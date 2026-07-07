@@ -31,6 +31,20 @@ pnpm build        # production build (also the Vercel build)
 
 To point at a specific log: `TELEMETRY_LOG=/abs/path/telemetry.jsonl pnpm dev`.
 
+## Tests (no CI — run locally)
+
+```bash
+pnpm test            # Vitest: unit tests (lib/telemetry etc.), jsdom + testing-library
+pnpm test:watch      # Vitest watch mode
+pnpm coverage        # Vitest + v8 coverage
+
+pnpm e2e:install     # one-time: download the Chromium browser
+pnpm e2e             # Playwright: boots `pnpm dev` and smoke-tests the page
+```
+
+Vitest 4 (`@vitejs/plugin-react`, jsdom) for units/components; Playwright 1.61 for e2e. There is
+deliberately **no CI** — these are yours to run when you want them.
+
 ## Decisions & caveats
 
 - **Charts = Recharts, not the Tremor npm package.** `@tremor/react` (3.18) still requires Tailwind
@@ -42,4 +56,4 @@ To point at a specific log: `TELEMETRY_LOG=/abs/path/telemetry.jsonl pnpm dev`.
 - **Deploy = Vercel.** The API route is `dynamic` (server-rendered). On Vercel the serverless runtime
   won't have the local `logs/` file — wire `TELEMETRY_LOG` to a real source (uploaded artifact, blob, or
   a small DB) when you deploy. Local dev reads the repo's `logs/telemetry.jsonl` directly.
-- Not yet added: **Vitest + Playwright** (agreed testing stack) — next pass.
+- **Testing**: Vitest (units) + Playwright (e2e) are wired — see above. **No CI by design.**
