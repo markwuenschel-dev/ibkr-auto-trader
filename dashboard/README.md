@@ -23,7 +23,7 @@ Requires Node ≥ 20.9 and pnpm (both on your machine; this repo's sandbox could
 ```bash
 cd dashboard
 pnpm install
-pnpm dev          # http://localhost:3000
+pnpm dev          # http://localhost:3007
 pnpm lint         # oxlint
 pnpm format       # oxfmt
 pnpm build        # production build (also the Vercel build)
