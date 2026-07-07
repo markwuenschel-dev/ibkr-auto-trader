@@ -1,0 +1,30 @@
+[project]
+name = "ibkr-auto-trader"
+version = "0.0.0"
+description = "Safe, auditable, paper-first automated trading system for a small IBKR taxable account — the first coding domain-pack built on the collab-kit reusable core."
+requires-python = ">=3.14"
+# Runtime deps are declared here but intentionally NOT installed at bootstrap (PT-0). The scaffold and
+# its tests are stdlib-only; these arrive with the slices that need them (PT-1 domain models -> pydantic,
+# PT-3 IBKR session -> ib_async, PT-6 risk math -> numpy/pandas, structured logs -> structlog).
+dependencies = [
+    "pydantic>=2",
+    "ib_async",
+    "pandas",
+    "numpy",
+    "structlog",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-subtests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ibkr_trader"]
+
+[tool.pytest.ini_options]
+# src layout: import the package without an editable install (bootstrap has no uv/venv yet).
+pythonpath = ["src"]
+testpaths = ["tests"]

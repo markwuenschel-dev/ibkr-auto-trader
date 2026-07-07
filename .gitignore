@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# secrets / local
+.env
+.env.local
+seats.json
+
+# collab-kit RUNTIME state (not source): autopilot control/replies/status, event logs, outbox.
+# The handoff *specs* (handoffs/**/*.md) and design docs ARE tracked — they're the decision ledger.
+autopilot/replies/
+autopilot/control.json
+autopilot/status.json
+logs/
+outbox/
+handoffs/.idlock/
+
+# one-off backup snapshot
+_autopilot-backup-*/
+
+# harness state
+.claude/
