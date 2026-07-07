@@ -1,14 +1,45 @@
 @import "tailwindcss";
 
-/* Tailwind v4 theme tokens (CSS-first config). Dark, dense, dashboard-oriented. */
-@theme {
-  --color-bg: #0a0a0a;
-  --color-panel: #141414;
-  --color-line: #262626;
-  --color-accent: #4f9cf9;
+/* dataviz palette — reference instance, defined as roles so light/dark swap in one place
+   and the chart body is written against roles, never raw hex. Dark is the selected design
+   (its own steps validated against the dark surface); light is the prefers-color-scheme flip. */
+:root {
+  --surface-1: #fcfcfb; /* chart card */
+  --page-plane: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781; /* axis / labels */
+  --grid: #e1e0d9;
+  --baseline: #c3c2b7;
+  --series-1: #2a78d6; /* categorical slot 1 (magnitude / single series) */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+  --border-ring: rgba(11, 11, 11, 0.1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-1: #1a1a19;
+    --page-plane: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --baseline: #383835;
+    --series-1: #3987e5;
+    --status-good: #0ca30c;
+    --status-warning: #fab219;
+    --status-serious: #ec835a;
+    --status-critical: #d03b3b;
+    --border-ring: rgba(255, 255, 255, 0.1);
+  }
 }
 
 html,
 body {
-  background: var(--color-bg);
+  background: var(--page-plane);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
