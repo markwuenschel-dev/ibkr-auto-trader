@@ -3,19 +3,20 @@ name = "ibkr-auto-trader"
 version = "0.0.0"
 description = "Safe, auditable, paper-first automated trading system for a small IBKR taxable account — the first coding domain-pack built on the collab-kit reusable core."
 requires-python = ">=3.14"
-# Runtime deps are declared here but intentionally NOT installed at bootstrap (PT-0). The scaffold and
-# its tests are stdlib-only; these arrive with the slices that need them (PT-1 domain models -> pydantic,
-# PT-3 IBKR session -> ib_async, PT-6 risk math -> numpy/pandas, structured logs -> structlog).
+# Core runtime deps only. Heavy/optional libraries live in extras below and install with the slice that
+# needs them (PT-3 -> ibkr, PT-6 -> analysis) — this keeps the bootstrap env small and avoids pulling
+# native wheels (numpy/pandas) before they're needed on a brand-new interpreter.
 dependencies = [
-    "pydantic>=2",
-    "ib_async",
-    "pandas",
-    "numpy",
-    "structlog",
+    "pydantic>=2",   # PT-1 frozen domain models
+    "structlog",     # structured logging
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-subtests"]
+ibkr = ["ib_async"]              # PT-3 IBKR session (async)
+analysis = ["pandas", "numpy"]   # PT-6 risk math / drift
+
+[dependency-groups]
+dev = ["pytest", "pytest-subtests", "ruff", "hypothesis"]  # hypothesis: property-based risk tests
 
 [build-system]
 requires = ["hatchling"]
@@ -25,6 +26,20 @@ build-backend = "hatchling.build"
 packages = ["src/ibkr_trader"]
 
 [tool.pytest.ini_options]
-# src layout: import the package without an editable install (bootstrap has no uv/venv yet).
-pythonpath = ["src"]
+pythonpath = ["src"]   # src layout without an editable install
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.14"
+typeCheckingMode = "standard"   # tighten to "strict" once the pipeline modules land (money-touching)
+venvPath = "."
+venv = ".venv"

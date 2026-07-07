@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 class Mode(enum.StrEnum):
     """Execution mode. The ModeController (PT-8) enforces transitions; this is the vocabulary."""
+
     PAPER = "PAPER"
     LIVE_SMALL_TEST = "LIVE_SMALL_TEST"
     LIVE = "LIVE"
@@ -45,17 +46,19 @@ def submission_allowed(mode: Mode) -> bool:
 class RiskLimits:
     """Account-level risk limits (the Rules Ledger, PT-5, enforces these per-order). Defaults are the
     PROTOCOL.md hard limits."""
-    max_risk_per_trade: float = 0.01       # <= 1% of equity at risk per trade
-    daily_loss_lockout: float = 0.03       # -3% realized daily P&L -> reject new opening risk
-    leverage_cap: float = 1.5              # target gross leverage < 1.5x
-    stop_loss_required: bool = True        # every order carries a stop or reviewed equivalent
+
+    max_risk_per_trade: float = 0.01  # <= 1% of equity at risk per trade
+    daily_loss_lockout: float = 0.03  # -3% realized daily P&L -> reject new opening risk
+    leverage_cap: float = 1.5  # target gross leverage < 1.5x
+    stop_loss_required: bool = True  # every order carries a stop or reviewed equivalent
 
 
 @dataclass(frozen=True)
 class Settings:
     """The resolved control-plane settings for a run."""
+
     mode: Mode = Mode.PAPER
-    paper_only: bool = True                # master guard; must be flipped by reviewed config for live
+    paper_only: bool = True  # master guard; must be flipped by reviewed config for live
     live_enabled: bool = False
     risk: RiskLimits = field(default_factory=RiskLimits)
 

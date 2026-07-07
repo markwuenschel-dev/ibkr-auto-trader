@@ -42,6 +42,7 @@ def _content_hash(payload: dict) -> str:
 class Emitter:
     """Writes §8 JSONL events for one run. Append-only; every event carries a content hash so the log
     doubles as an immutable audit record."""
+
     run_id: str = field(default_factory=new_run_id)
     trace_id: str = field(default_factory=lambda: f"tr-{uuid.uuid4().hex[:12]}")
     log_path: Path = field(default_factory=lambda: Path("logs") / "telemetry.jsonl")
@@ -62,7 +63,7 @@ class Emitter:
         decision: dict | None = None,
         metrics: dict | None = None,
         gates: list[dict] | None = None,
-        eval: dict | None = None,      # noqa: A002 — matches the §8 field name deliberately
+        eval: dict | None = None,
         risk: dict | None = None,
         failure: dict | None = None,
     ) -> dict:
@@ -83,12 +84,12 @@ class Emitter:
             "input_contract_hash": input_contract_hash,
             "output_contract_hash": output_contract_hash,
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "decision": decision,                       # {action, reason_codes[], confidence}
-            "metrics": metrics or {},                   # {latency_ms, *_tokens, tool_calls, cost_usd}
-            "gates": gates or [],                        # [{name, status, ruleset_hash, severity}]
-            "eval": eval,                                # {judge_mode, panel, score, ci_*, gold_split}
-            "risk": risk,                                # {p_error, ucb, tau, waived, audit_*} — null now
-            "failure": failure,                          # {class, severity, escaped}
+            "decision": decision,  # {action, reason_codes[], confidence}
+            "metrics": metrics or {},  # {latency_ms, *_tokens, tool_calls, cost_usd}
+            "gates": gates or [],  # [{name, status, ruleset_hash, severity}]
+            "eval": eval,  # {judge_mode, panel, score, ci_*, gold_split}
+            "risk": risk,  # {p_error, ucb, tau, waived, audit_*} — null now
+            "failure": failure,  # {class, severity, escaped}
         }
         if decision is not None and decision.get("action") not in ACTIONS:
             raise ValueError(f"decision.action must be one of {ACTIONS}, got {decision.get('action')!r}")

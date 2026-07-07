@@ -19,30 +19,36 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class DomainPack:
     name: str
-    oracle: str                                   # "execution" | "structural" | "oracle_poor" (§5.7 ceiling)
+    oracle: str  # "execution" | "structural" | "oracle_poor" (§5.7 ceiling)
     artifact_types: tuple[str, ...] = ()
-    deterministic_checks: tuple[str, ...] = ()     # L1 (total functions -> pass/fail); grows per slice
-    static_analyzers: tuple[str, ...] = ()         # L2
-    executables: tuple[str, ...] = ()              # L3 (tests/sims); the oracle
-    source_rules: tuple[str, ...] = ()             # L4 (empty — trading has no external-claim layer)
-    rubric_dimensions: tuple[str, ...] = ()        # L5 residual subjective (minimal for a coding pack)
-    human_review_triggers: tuple[str, ...] = ()    # L6
-    checklet_catalog: tuple[dict, ...] = ()        # each: criterion/input/output/authority/calibration_target
+    deterministic_checks: tuple[str, ...] = ()  # L1 (total functions -> pass/fail); grows per slice
+    static_analyzers: tuple[str, ...] = ()  # L2
+    executables: tuple[str, ...] = ()  # L3 (tests/sims); the oracle
+    source_rules: tuple[str, ...] = ()  # L4 (empty — trading has no external-claim layer)
+    rubric_dimensions: tuple[str, ...] = ()  # L5 residual subjective (minimal for a coding pack)
+    human_review_triggers: tuple[str, ...] = ()  # L6
+    checklet_catalog: tuple[dict, ...] = ()  # each: criterion/input/output/authority/calibration_target
     acceptance_thresholds: dict = field(default_factory=dict)
     known_failure_modes: tuple[str, ...] = ()
-    default_loop: tuple[str, ...] = ()             # recommended role set + ordering
+    default_loop: tuple[str, ...] = ()  # recommended role set + ordering
 
 
 TRADING_PACK = DomainPack(
     name="ibkr-trading",
     oracle="execution",
     artifact_types=(
-        "domain_model", "risk_context", "strategy_intent", "risk_plan",
-        "approved_order_intent", "executable_order", "fill_or_ack", "audit_record",
+        "domain_model",
+        "risk_context",
+        "strategy_intent",
+        "risk_plan",
+        "approved_order_intent",
+        "executable_order",
+        "fill_or_ack",
+        "audit_record",
     ),
     executables=("pytest",),  # the risk-math + invariant suite; property-based tests land per slice
     human_review_triggers=(
-        "mode_transition_to_live",       # any step toward live is human-gated
+        "mode_transition_to_live",  # any step toward live is human-gated
         "kill_switch_or_pause_change",
         "risk_limit_config_change",
     ),
@@ -56,9 +62,13 @@ TRADING_PACK = DomainPack(
         "live_rejected_by_default": True,
     },
     known_failure_modes=(
-        "order_without_stop", "live_leak_from_paper_mode", "strategy_mints_executable_order",
-        "causal_data_violation_lookahead", "duplicate_order_no_idempotency",
-        "daily_loss_lockout_not_persisted_across_restart", "decision_not_audited",
+        "order_without_stop",
+        "live_leak_from_paper_mode",
+        "strategy_mints_executable_order",
+        "causal_data_violation_lookahead",
+        "duplicate_order_no_idempotency",
+        "daily_loss_lockout_not_persisted_across_restart",
+        "decision_not_audited",
     ),
     default_loop=("orchestrator", "builder", "grounded_verifier"),
 )
