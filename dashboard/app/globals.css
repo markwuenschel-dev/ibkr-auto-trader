@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+/* Tailwind v4 theme tokens (CSS-first config). Dark, dense, dashboard-oriented. */
+@theme {
+  --color-bg: #0a0a0a;
+  --color-panel: #141414;
+  --color-line: #262626;
+  --color-accent: #4f9cf9;
+}
+
+html,
+body {
+  background: var(--color-bg);
+}

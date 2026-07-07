@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from ibkr_trader import __version__, app
 from ibkr_trader.config import Mode, RiskLimits, Settings, resolve_mode, submission_allowed
 from ibkr_trader.pack import TRADING_PACK
@@ -47,27 +49,44 @@ class TestControlPlaneIsPaperFirst:
         assert r.leverage_cap == 1.5 and r.stop_loss_required is True
 
 
-class TestTelemetryEnvelope:
-    _REQUIRED = {"schema_version", "trace_id", "span_id", "parent_span_id", "run_id", "task_id",
-                 "agent_role", "stage", "decision", "metrics", "gates", "eval", "risk", "failure",
-                 "event_id"}
+_REQUIRED_KEYS = frozenset(
+    {
+        "schema_version",
+        "trace_id",
+        "span_id",
+        "parent_span_id",
+        "run_id",
+        "task_id",
+        "agent_role",
+        "stage",
+        "decision",
+        "metrics",
+        "gates",
+        "eval",
+        "risk",
+        "failure",
+        "event_id",
+    }
+)
 
+
+class TestTelemetryEnvelope:
     def test_emit_writes_valid_jsonl_envelope(self, tmp_path):
         em = Emitter(log_path=tmp_path / "t.jsonl")
-        ev = em.emit(stage="unit.test", agent_role="builder",
-                     decision={"action": "accept", "reason_codes": ["x"], "confidence": None})
-        assert self._REQUIRED <= ev.keys()
+        ev = em.emit(
+            stage="unit.test",
+            agent_role="builder",
+            decision={"action": "accept", "reason_codes": ["x"], "confidence": None},
+        )
+        assert ev.keys() >= _REQUIRED_KEYS
         assert ev["schema_version"] == SCHEMA_VERSION and ev["risk"] is None  # fail-closed: risk null now
         lines = (tmp_path / "t.jsonl").read_text("utf-8").splitlines()
         assert len(lines) == 1 and json.loads(lines[0])["event_id"] == ev["event_id"]
 
     def test_invalid_decision_action_rejected(self, tmp_path):
         em = Emitter(log_path=tmp_path / "t.jsonl")
-        try:
+        with pytest.raises(ValueError):
             em.emit(stage="x", decision={"action": "bogus"})
-            assert False, "expected ValueError on unknown action"
-        except ValueError:
-            pass
 
     def test_append_only(self, tmp_path):
         em = Emitter(log_path=tmp_path / "t.jsonl")

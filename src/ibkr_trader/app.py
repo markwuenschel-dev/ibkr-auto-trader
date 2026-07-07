@@ -23,11 +23,20 @@ def bootstrap(settings: Settings | None = None, emitter: Emitter | None = None) 
         stage="app.bootstrap",
         agent_role="orchestrator",
         task_id="PT-0",
-        decision={"action": "accept", "reason_codes": [f"mode:{mode}", f"pack:{TRADING_PACK.name}"],
-                  "confidence": None},
+        decision={
+            "action": "accept",
+            "reason_codes": [f"mode:{mode}", f"pack:{TRADING_PACK.name}"],
+            "confidence": None,
+        },
         metrics={"version": __version__},
-        gates=[{"name": "paper-default", "status": "pass" if settings.paper_only else "advisory",
-                "ruleset_hash": None, "severity": "blocking"}],
+        gates=[
+            {
+                "name": "paper-default",
+                "status": "pass" if settings.paper_only else "advisory",
+                "ruleset_hash": None,
+                "severity": "blocking",
+            }
+        ],
         risk=None,  # fail-closed bootstrap: the calibrated risk layer (§6/§11) is not built yet
     )
 
@@ -36,9 +45,11 @@ def main(argv: list[str] | None = None) -> int:
     settings = Settings()
     mode = settings.effective_mode()
     event = bootstrap(settings)
-    print(f"ibkr_trader {__version__} — mode={mode} "
-          f"submission_allowed={submission_allowed(mode)} pack={TRADING_PACK.name} "
-          f"(oracle={TRADING_PACK.oracle}); telemetry run {event['run_id']}")
+    print(
+        f"ibkr_trader {__version__} — mode={mode} "
+        f"submission_allowed={submission_allowed(mode)} pack={TRADING_PACK.name} "
+        f"(oracle={TRADING_PACK.oracle}); telemetry run {event['run_id']}"
+    )
     return 0
 
 

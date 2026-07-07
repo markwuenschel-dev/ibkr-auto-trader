@@ -2,5 +2,5 @@
 
 Authorizes an ApprovedOrderIntent in the current mode, mints the ExecutableOrder, and routes it to an
 adapter. Adapters accept ONLY ExecutableOrder (bypass is type-impossible): `simulated` (default) and
-`paper_ibkr` now; `live_ibkr` is FUTURE-ONLY and mode-gated. Kill/pause block submission here. Empty until PT-8.
+`paper_ibkr` now; `live_ibkr` is FUTURE-ONLY and mode-gated. Kill/pause block submission. Empty until PT-8.
 """
