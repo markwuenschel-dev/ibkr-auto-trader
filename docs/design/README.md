@@ -14,7 +14,7 @@ verification must be first-class, parallel, and independent.**
 
 Source material: [`../../CONTEXT.md`](../../CONTEXT.md) (domain model), [`../../PROTOCOL.md`](../../PROTOCOL.md)
 (safety rules), [`../../AGENT-INSTRUCTIONS.md`](../../AGENT-INSTRUCTIONS.md) (roles),
-[`../../handoffs/pending/001-initial-design.md`](../../handoffs/pending/001-initial-design.md).
+[`../../handoffs/superseded/001-initial-design.md`](../../handoffs/superseded/001-initial-design.md).
 
 ---
 
@@ -79,7 +79,7 @@ collab-kit's own construction (dogfooding by necessity).
 ## 4. Reconciliation with existing files
 
 The hand-made `PROTOCOL.md`, `REVIEWER-BRIEFING.md`, `KICKOFF.md`, `CONTEXT.md`, and
-`handoffs/pending/001-initial-design.md` are effectively the *rendered templates* of the
+`handoffs/superseded/001-initial-design.md` are effectively the *rendered templates* of the
 `ibkr-auto-trader` collab. collab-kit's `newproject` templates must be a **superset** of what's
 already here, so re-bootstrapping this collab would never lose the existing domain model. In
 practice: when `newproject` is built (slice 8), diff its rendered output against these files and

@@ -5,15 +5,15 @@
 **Objective**: Design, implement, and safely validate an automated trading system for the user's taxable IBKR account (~$2k equity, aggressive equity tilt) using the collab-kit builder + independent reviewer + adversarial verification model.
 
 **Current State**:
-- PROTOCOL.md written with strict paper-first, risk management, no-lookahead, and auditability rules.
-- REVIEWER-BRIEFING.md created.
-- First handoff (001-initial-design) is in `handoffs/pending/`.
+- PROTOCOL.md written with strict paper-first, risk management, no-lookahead, and auditability rules; REVIEWER-BRIEFING.md created.
+- collab-kit slices 001–006 (collab_common → autopilot driver) and 012–017 (autonomous-mode architecture + evidence-gated done) are in `handoffs/done/`. The original `001-initial-design` proposal now lives in `handoffs/superseded/`.
+- Trading system: PT-1 (frozen domain models) is done. The live pending handoff is `handoffs/pending/027-pt-2-sqlite-state-store.md` — PT-2, a SQLite state store (positions cache, restart-surviving daily P&L for the −3% lockout, idempotency keys).
 
-**Next Expected Actions**:
-1. Independent reviewer claims and reviews handoff 001.
-2. Adversarial regression hunt triggered for risk/safety aspects.
-3. Human (Mark) reviews via Telegram or direct file comments.
-4. Once approved, move to detailed module design + first working paper-trading skeleton.
+**Next Expected Actions** (evidence-gated autonomous flow):
+1. Builder (Claude opus) claims handoff 027 and implements PT-2.
+2. Reviewer (gpt-5.5, repo-aware) plus breaker/verifier adversarial lanes verify the change.
+3. `done_contract` gate evaluates all conditions (incl. source==tested + full pytest); only on pass does 027 advance to `handoffs/done/` — otherwise it stays `claimed/` with a `signoff_blocked` reason.
+4. Continue draining subsequent PT slices the same way.
 
 **How to Use This Collab**:
 - Builder creates new handoffs in `pending/`.
