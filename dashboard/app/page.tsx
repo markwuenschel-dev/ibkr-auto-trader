@@ -181,7 +181,7 @@ function Kpi({ label, value, accent }: { label: string; value: number; accent?: 
   );
 }
 
-function Action({ action }: { action?: string }) {
+function Action({ action }: { action?: string | null }) {
   if (!action) return <span className="text-[var(--text-muted)]">—</span>;
   return (
     <span className="inline-flex items-center gap-2">
