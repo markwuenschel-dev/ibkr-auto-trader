@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "collab-kit/telemetry/contracts/handoff.schema.json",
+  "title": "Handoff",
+  "description": "Descriptive JSON-Schema-style contract for a collab-kit handoff artifact (ARCHITECTURE.md §7.2 typed contracts). A handoff is a Markdown file: a `---`-delimited frontmatter block of simple `key: value` pairs, followed by a body of `## Section` headings. This document is DOCUMENTATION and the single source of truth that drives tools/lib/contracts.py:validate_handoff(); it is hand-rolled, NOT enforced by a jsonschema library (stdlib-only project). Keep the two in lockstep.",
+  "type": "object",
+  "required": ["frontmatter", "sections"],
+  "properties": {
+    "frontmatter": {
+      "type": "object",
+      "description": "Parsed key/value pairs from the leading `---`-fenced block.",
+      "required": ["to", "from", "id", "title", "priority", "date", "status"],
+      "properties": {
+        "to":       { "type": "string", "description": "Recipient collab/role." },
+        "from":     { "type": "string", "description": "Originating collab/role." },
+        "id":       { "type": "string", "description": "Stable handoff id (e.g. '001'). Load-bearing for handoff-loss edges (§7.4)." },
+        "title":    { "type": "string", "description": "One-line human title." },
+        "priority": { "type": "string", "enum": ["high", "normal", "low"] },
+        "date":     { "type": "string", "description": "ISO-8601 date the handoff was issued." },
+        "status":   { "type": "string", "enum": ["pending", "claimed", "done"] },
+        "revision": { "type": "string", "description": "Optional revision marker (e.g. 'rev 3')." },
+        "guardrails": {
+          "type": "array",
+          "description": "Optional bracketed list, e.g. [concurrency, path-safety]. Each entry is a machine-checkable explicit constraint (§7.4).",
+          "items": { "type": "string" }
+        },
+        "approved": { "type": "string", "description": "Optional approver token / bar reference." }
+      }
+    },
+    "sections": {
+      "type": "object",
+      "description": "Body `## Heading` -> section text. Names are the heading text verbatim.",
+      "required": ["Summary"],
+      "properties": {
+        "Summary": { "type": "string", "description": "Required. What this handoff is and why." },
+        "Constraints": {
+          "type": "string",
+          "description": "Optional but PREFERRED. Declared, typed constraints as `- [ID] text` bullets (e.g. `- [C1] paper-trading only`). IDs are stable and identity-addressable, so handoff_loss (§7.4) measures retention by ID across a revision edge rather than scraping prose. Declaring constraints here is what makes handoff loss a trustworthy number."
+        }
+      }
+    }
+  },
+  "x-constraint-sources": {
+    "description": "Where constraints are read for handoff_loss (§7.4). The DECLARED path is preferred and identity-addressed; the scraped path is a lossy legacy fallback used only when no `## Constraints` section is present.",
+    "declared": "`## Constraints` bullets of the form `- [ID] text` -> {id: text} (preferred, matched by ID)",
+    "scraped_fallback": {
+      "guardrails": "every frontmatter.guardrails entry",
+      "bullets_under": ["Request", "Risks & Questions"],
+      "imperative_lines": "any body line containing a must/required/MUST imperative"
+    }
+  }
+}

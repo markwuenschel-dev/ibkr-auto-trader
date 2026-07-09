@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "description": "Risk classes -> required adversarial lanes for autonomous closeout (ARCHITECTURE.md §18.2, autonomous revision). A risk class fires when its trigger guardrails are a subset of the handoff's guardrails; guardrail_lanes adds per-guardrail coverage for partial matches.",
+  "risk_classes": {
+    "autopilot": {
+      "guardrails": ["bounded-autonomy", "untrusted-agent-output"],
+      "required_lanes": [
+        "untrusted-agent-output",
+        "bounded-autonomy",
+        "path-pointer-safety",
+        "process-isolation",
+        "data-integrity-under-concurrent-autopilots"
+      ]
+    }
+  },
+  "guardrail_lanes": {
+    "path-safety": ["path-pointer-safety"],
+    "auth": ["path-pointer-safety"],
+    "data-integrity": ["data-integrity-under-concurrent-autopilots"],
+    "concurrency": ["data-integrity-under-concurrent-autopilots"],
+    "money": ["data-integrity-under-concurrent-autopilots"],
+    "safety": ["bounded-autonomy"]
+  }
+}

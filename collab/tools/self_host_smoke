@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# self_host_smoke — thin bash shim (path resolution only). Self-locates the kit root BEFORE sourcing the
+# shared resolver, so it works when installed as a ~/bin symlink (where dirname of the symlink is
+# NOT the kit). COLLAB_KIT_ROOT (install-time, [C17]) wins; else follow the symlink to the real
+# script. No logic lives here ([C14]/[C37]).
+set -euo pipefail
+SELF="${BASH_SOURCE[0]}"
+if [ -n "${COLLAB_KIT_ROOT:-}" ] && [ -f "$COLLAB_KIT_ROOT/tools/lib/collab_common.sh" ]; then
+  _libsh="$COLLAB_KIT_ROOT/tools/lib/collab_common.sh"
+else
+  _real="$(readlink -f "$SELF" 2>/dev/null || echo "$SELF")"  # follow a ~/bin symlink to the real file
+  _libsh="$(dirname "$_real")/lib/collab_common.sh"
+fi
+if [ ! -f "$_libsh" ]; then
+  echo "self_host_smoke: cannot locate collab-kit (set COLLAB_KIT_ROOT to the kit root)" >&2
+  exit 127
+fi
+source "$_libsh"
+for py in python3 python; do
+  command -v "$py" >/dev/null 2>&1 && exec "$py" "$KIT_ROOT/tools/lib/self_host_smoke.py" "$@"
+done
+echo "self_host_smoke: no python interpreter found on PATH" >&2
+exit 127

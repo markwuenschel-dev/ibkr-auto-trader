@@ -1,0 +1,36 @@
+{
+  "name": "default",
+  "version": "1.0",
+  "description": "Example ruleset: an L1 contract check (required_fields on the artifact) and an L3 execution oracle (pytest). Tiers run in order; a blocking failure early-exits with the tier number as the exit code.",
+  "tiers": [
+    {
+      "tier": 1,
+      "name": "contract",
+      "checks": [
+        {
+          "name": "artifact-has-required-fields",
+          "kind": "required_fields",
+          "severity": "blocking",
+          "params": {
+            "path": "{artifact}",
+            "fields": ["id", "kind", "payload"]
+          }
+        }
+      ]
+    },
+    {
+      "tier": 3,
+      "name": "execution-oracle",
+      "checks": [
+        {
+          "name": "unit-tests-green",
+          "kind": "pytest",
+          "severity": "blocking",
+          "params": {
+            "path": "tests"
+          }
+        }
+      ]
+    }
+  ]
+}
