@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# collab-handoff — per-collab wrapper. Binds HANDOFF_ROOT (defaults to the current directory) so
+# you can run per-collab commands without repeating the collab name, e.g. from inside a collab:
+#   collab-handoff create --to reviewer --title "..."
+# Self-locates the sibling `handoff` shim BEFORE exec (works when installed as a ~/bin symlink);
+# handoff_cli falls back to $HANDOFF_ROOT when the <collab> positional is omitted.
+set -euo pipefail
+SELF="${BASH_SOURCE[0]}"
+: "${HANDOFF_ROOT:=$PWD}"
+export HANDOFF_ROOT
+if [ -n "${COLLAB_KIT_ROOT:-}" ] && [ -x "$COLLAB_KIT_ROOT/tools/handoff" ]; then
+  _handoff="$COLLAB_KIT_ROOT/tools/handoff"
+else
+  _real="$(readlink -f "$SELF" 2>/dev/null || echo "$SELF")"
+  _handoff="$(dirname "$_real")/handoff"
+fi
+exec "$_handoff" "$@"

@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "_readme": "Copy to $COLLAB_HOME/seats.json and edit. A seat with backend 'cli' is automated: its 'cmd' is run with the prompt on STDIN and the reply read from STDOUT (no shell). The driver prepends 'system' into the prompt, so a backend only needs its bare read-stdin/print-stdout mode. A seat WITHOUT a cli backend (omit it, or backend != 'cli') is the human/web seat: the driver leaves its handoffs for the Telegram bridge. 'timeout' is per-invocation seconds. Exact argv is tool/version specific; the contract is: read prompt on stdin, write reply on stdout, exit 0.",
+  "seats": {
+    "builder": {
+      "backend": "cli",
+      "cmd": ["python", "C:\\Users\\Nalakram\\Documents\\GitHub\\ibkr-auto-trader\\collab\\tools\\adapters\\openai-compatible-seat.py",
+              "--base", "https://api.x.ai/v1", "--model", "grok-4.5", "--key-env", "XAI_API_KEY"],
+      "system": "You are the BUILDER in a collab-kit handoff loop. Read the reviewer's handoff below and respond with your implementation notes / decisions. Do not restate the whole design; answer the reviewer's points.",
+      "timeout": 600
+    },
+
+    "reviewer": {
+      "backend": "cli",
+      "cmd": ["python", "C:\\Users\\Nalakram\\Documents\\GitHub\\ibkr-auto-trader\\collab\\tools\\adapters\\openai-compatible-seat.py",
+              "--base", "https://api.openai.com/v1", "--model", "gpt-5-codex", "--key-env", "OPENAI_API_KEY", "--api", "responses"],
+      "system": "You are the independent REVIEWER in a collab-kit handoff loop. Be skeptical and specific: verify claims against the described behavior, name concrete blockers with failing scenarios, and do not sign off unless it is genuinely production-grade.",
+      "timeout": 600
+    },
+
+    "_other_backends_you_could_use": {
+      "note": "The adapter (tools/adapters/openai-compatible-seat.py) reads keys from .env and speaks any OpenAI-shaped API. Swap --base/--model/--key-env per provider. Use --api responses for OpenAI models that reject /chat/completions (gpt-5-codex etc.); leave it off (auto) and it falls back on the 404 anyway.",
+      "gemini": ["python", "...\\openai-compatible-seat.py", "--base", "https://generativelanguage.googleapis.com/v1beta/openai", "--model", "gemini-2.5-pro", "--key-env", "GEMINI_API_KEY"],
+      "claude_direct": ["claude", "-p"],
+      "any_stdin_cli": "Any command that reads the prompt on stdin and prints the reply on stdout drops in with zero code changes ([C34]) — the adapter is just the version-proof option for HTTP APIs."
+    },
+
+    "_web_seat_example": {
+      "backend": "bridge",
+      "note": "A non-cli seat is NOT automated. Its handoffs are left in place so the Telegram bridge delivers them to a human (or a browser agent) who replies with /c <project> <message>. Use this for the seat you want to keep a human/web agent on."
+    }
+  }
+}

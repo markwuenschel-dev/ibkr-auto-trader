@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# gate — thin bash shim (path resolution only). Locates KIT_ROOT via the shared
+# collab_common.sh resolver, then execs the Python core. No logic lives here.
+set -euo pipefail
+SELF="${BASH_SOURCE[0]}"
+# Self-locate before sourcing so a ~/bin symlink works (COLLAB_KIT_ROOT wins, else follow symlink).
+if [ -n "${COLLAB_KIT_ROOT:-}" ] && [ -f "$COLLAB_KIT_ROOT/tools/lib/collab_common.sh" ]; then
+  source "$COLLAB_KIT_ROOT/tools/lib/collab_common.sh"
+else
+  _real="$(readlink -f "$SELF" 2>/dev/null || echo "$SELF")"
+  source "$(dirname "$_real")/lib/collab_common.sh"
+fi
+for py in python3 python; do
+  command -v "$py" >/dev/null 2>&1 && exec "$py" "$KIT_ROOT/tools/lib/gate_runner.py" "$@"
+done
+echo "gate: no python interpreter found on PATH" >&2
+exit 127

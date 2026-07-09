@@ -1,0 +1,14 @@
+{
+  "name": "autonomous-done",
+  "version": "1",
+  "description": "Fail-closed source==tested gate for autonomous closeout (ARCHITECTURE.md §17/§18, autonomous revision). The artifact is a source manifest ({path: sha256}); base defaults to the kit root.",
+  "tiers": [
+    {
+      "tier": 1,
+      "name": "source-consistency",
+      "checks": [
+        {"name": "source==tested", "kind": "source_consistency", "severity": "blocking", "params": {"manifest": "{artifact}"}}
+      ]
+    }
+  ]
+}

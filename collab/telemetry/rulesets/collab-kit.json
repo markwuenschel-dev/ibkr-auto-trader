@@ -1,0 +1,23 @@
+{
+  "name": "collab-kit-repo",
+  "version": "1",
+  "description": "Fail-closed gate for the collab-kit repo: structure (L1) then the full test oracle (L3).",
+  "tiers": [
+    {
+      "tier": 1,
+      "name": "structure",
+      "checks": [
+        {"name": "core-present",   "kind": "file_exists", "severity": "blocking", "params": {"path": "tools/lib/collab_common.py"}},
+        {"name": "trace-present",  "kind": "file_exists", "severity": "blocking", "params": {"path": "tools/lib/trace.py"}},
+        {"name": "root-marker",    "kind": "file_exists", "severity": "blocking", "params": {"path": ".collab-kit"}}
+      ]
+    },
+    {
+      "tier": 3,
+      "name": "test-oracle",
+      "checks": [
+        {"name": "pytest-suite", "kind": "pytest", "severity": "blocking", "params": {"path": "tests"}}
+      ]
+    }
+  ]
+}

@@ -10,6 +10,11 @@ venv/
 dist/
 build/
 
+# PT-2 SQLite state store: db file + WAL/-shm sidecars (runtime state, not source)
+state/*.db
+state/*.db-wal
+state/*.db-shm
+
 # secrets / local
 .env
 .env.local
