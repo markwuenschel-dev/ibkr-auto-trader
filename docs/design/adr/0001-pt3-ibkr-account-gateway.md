@@ -1,7 +1,9 @@
 # ADR 0001 — PT-3 IBKR Account Gateway
 
-- **Status:** Accepted — design signed off after a grilling session 2026-07-09; implementation pending (handoff 028).
-- **Slice:** PT-3 (IBKR connection/session → account snapshot → `RiskContext`).
+- **Status:** Accepted — design signed off after a grilling session 2026-07-09; implemented (handoff 028).
+  **Amended by [ADR-0002](0002-pt4-market-data-ingestion.md) (PT-4, Proposed 2026-07-10)** — see the
+  *Amendment* section at the foot of this file.
+- **Slice:** PT-3 (IBKR connection/session → account snapshot → `AccountSnapshot`).
 - **Depends on:** PT-1 (domain models, `RiskContext`), PT-2 (SQLite state store, positions cache).
 - **Companion:** `trading-system-design.md` §6.3, §8; `paper-trading-roadmap.md`.
 
@@ -60,6 +62,9 @@ paper-first; a live IB Gateway is external I/O that can't be unit-tested directl
    deterministic in tests. Broker time (`ib.reqCurrentTime()`) is read and compared; drift past a threshold
    emits `clock.skew`. `as_of` *is* the decision clock the causal-data rule (PT-4) measures market-data
    timestamps against — we own it and monitor drift rather than surrender it to the broker's clock.
+   **⚠ Amended by ADR-0002:** PT-3 no longer owns the *decision clock*. It owns only its own account
+   **`observed_at`** and skew telemetry; the single `decision_at` is stamped by the
+   `DecisionContextAssembler` at the **close** of input collection. See the Amendment section.
 
 ## Telemetry (§8 envelope, from line one)
 
@@ -89,3 +94,25 @@ paper-first; a live IB Gateway is external I/O that can't be unit-tested directl
 
 - `Watchdog`/IBC auto-Gateway-restart (PT-13/ops). Shared rate-limiter (PT-4). Writable execution session
   (PT-10). Pause-on-dirty-reconciliation policy (PT-8).
+
+## Amendment (ADR-0002, PT-4 — Proposed 2026-07-10)
+
+The PT-4 grilling revised four PT-3 decisions. Recorded here so this ADR stays honest; the changes land as
+part of the PT-4 mission (which necessarily reaches back into PT-3, since no downstream slice consumes PT-3
+yet). See [ADR-0002](0002-pt4-market-data-ingestion.md) for the full rationale.
+
+- **⑨ Decision clock ownership moves out of PT-3.** PT-3 stamps only its own account **`observed_at`**; the
+  single `decision_at` is sealed by the `DecisionContextAssembler` at the *close* of all input collection
+  (account **and** market data), so an ordinary tick arriving during acquisition can never cause a false
+  look-ahead rejection. Causality keys on **availability time**, not event/trade time.
+- **① / ⑧ `snapshot()` returns `AccountSnapshot`, not `RiskContext`.** The gateway no longer constructs
+  `RiskContext` (now mint-guarded by `ASSEMBLER_AUTHORITY`, built only by the assembler). `AccountSnapshot`
+  carries the account fields + `observed_at` + `HeldPosition[]`. `build_risk_context` → `build_account_snapshot`.
+- **⑤ / ⑧ Held-position valuation is sourced here.** Positions come from `ib.portfolio()` (per-position
+  broker `marketValue`/mark, `valuation_status = AVAILABLE | UNAVAILABLE`) after the account-update
+  subscription is warmed + verified and reconciled against the position inventory — not a blind
+  `positions()`→`portfolio()` swap. Held **value uses `marketValue`**, not `quantity × price`.
+- **⑥ The shared rate-limiter is now owned by an extracted `IbkrSession`.** The raw `IB()`/clientId,
+  reconnect lifecycle, health, pacing gate, serialized I/O lock, and a **reconnect `generation` fence** move
+  out of the gateway into `IbkrSession` (sole lifecycle owner; started/stopped once by the composition
+  root). The account gateway and the PT-4 market feed share this one read-only session.
