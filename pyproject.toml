@@ -28,6 +28,11 @@ packages = ["src/ibkr_trader"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]   # src layout without an editable install
 testpaths = ["tests"]
+markers = [
+    # PT-3 opt-in: the one test that dials a real paper Gateway. Skipped unless IBKR_INTEGRATION is set,
+    # so CI stays fake-only and green without a Gateway. Run manually: IBKR_INTEGRATION=1 pytest -m integration
+    "integration: exercises a live paper Gateway; excluded from CI (manual, needs IBKR_INTEGRATION=1)",
+]
 
 [tool.ruff]
 line-length = 110
