@@ -10,8 +10,10 @@ tools. When the model calls one, we read the real repository off local disk (sco
 no escaping the root) and hand the bytes back, looping until the model stops calling tools and returns its
 final review. That is how a datacenter model "sees the repo": it asks, we serve.
 
-Read-only by design: there is no write/edit/exec tool, so a review seat can inspect the code but never
-mutate it. Stdlib only (no pip / no openai SDK) — function-calling is done over raw POST /chat/completions.
+Read-only by default (list_dir/read_file/search) — a review seat inspects but never mutates. Pass
+``--write`` and it also gains ``write_file`` + ``run_command`` (allow-listed: pytest/ruff/python/uv), so a
+BUILDER seat on ANY model (not just Claude) can implement a handoff and run the checks. Stdlib only (no pip
+/ no openai SDK) — function-calling is done over raw POST /chat/completions.
 
   --base <url>        API base, e.g. https://api.openai.com/v1
   --model <name>      e.g. gpt-5.5
@@ -24,6 +26,8 @@ mutate it. Stdlib only (no pip / no openai SDK) — function-calling is done ove
 import argparse
 import json
 import os
+import shlex
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -145,6 +149,47 @@ def _tool_search(root: Path, query: str, glob: str = "**/*.py", max_results: int
     return f"search {query!r} (glob {glob!r}), {len(hits)} hits:\n" + "\n".join(hits)
 
 
+def _tool_write_file(root: Path, path: str, content: str = "") -> str:
+    """Create or overwrite a UTF-8 text file under the repo root (parent dirs auto-created)."""
+    try:
+        p = _safe_path(root, path)
+    except ValueError as e:
+        return f"error: {e}"
+    if p.is_dir():
+        return f"error: {path!r} is a directory, not a file"
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    except OSError as e:
+        return f"error writing {path!r}: {e}"
+    return f"wrote {path} ({len(content)} bytes, {content.count(chr(10)) + 1} lines)"
+
+
+_RUN_ALLOW = {"pytest", "ruff", "python", "python3", "py", "uv"}
+
+
+def _tool_run_command(root: Path, command: str, max_bytes: int, timeout: float) -> str:
+    """Run an allow-listed check command (pytest/ruff/python/uv) in the repo root; return exit code +
+    captured output. Not a general shell — the first token must be in the allow-list."""
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError as e:
+        return f"error: cannot parse command {command!r}: {e}"
+    if not argv:
+        return "error: empty command"
+    if argv[0] not in _RUN_ALLOW:
+        return f"error: command {argv[0]!r} not allowed (allowed: {sorted(_RUN_ALLOW)})"
+    try:
+        proc = subprocess.run(argv, cwd=str(root), capture_output=True, text=True,
+                              timeout=timeout, shell=False)
+    except subprocess.TimeoutExpired:
+        return f"error: {command!r} timed out after {timeout:.0f}s"
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"error running {command!r}: {e}"
+    body = (proc.stdout or "") + (("\n[stderr]\n" + proc.stderr) if proc.stderr else "")
+    return f"$ {command}\n(exit {proc.returncode})\n{body[:max_bytes]}"
+
+
 _TOOLS_SPEC = [
     {"type": "function", "function": {
         "name": "list_dir",
@@ -170,7 +215,35 @@ _TOOLS_SPEC = [
 ]
 
 
-def _dispatch_tool(root: Path, name: str, args: dict, max_bytes: int) -> str:
+_WRITE_TOOLS_SPEC = [
+    {"type": "function", "function": {
+        "name": "write_file",
+        "description": "Create or overwrite a UTF-8 text file in the repository (parent dirs auto-created). Provide the FULL new file contents.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "File path relative to repo root."},
+            "content": {"type": "string", "description": "The full file contents to write."}},
+            "required": ["path", "content"]}}},
+    {"type": "function", "function": {
+        "name": "run_command",
+        "description": "Run an allow-listed check command (pytest, ruff, python, uv) in the repo root; returns exit code + output. Use it to run the tests/linters after writing files.",
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string", "description": "e.g. 'python -m pytest -q' or 'ruff check'."}},
+            "required": ["command"]}}},
+]
+
+
+_SYSTEM_BUILDER_NOTE = (
+    "You are the BUILDER, working directly on the ACTUAL repository. You have tools to inspect it "
+    "(list_dir, read_file, search) AND to change it: write_file creates/overwrites a file with the full "
+    "contents you provide, and run_command runs allow-listed checks (pytest, ruff, python, uv) in the repo "
+    "root. IMPLEMENT the handoff by WRITING the real source and test files with write_file — do not merely "
+    "describe them. After writing, RUN the checks with run_command (e.g. 'python -m pytest -q') and report "
+    "the ACTUAL output — never claim green until a run_command shows it. When done, write a short final "
+    "summary as an ordinary message with no further tool calls."
+)
+
+
+def _dispatch_tool(root: Path, name: str, args: dict, max_bytes: int, run_timeout: float = 600.0) -> str:
     """Execute a tool call against the real filesystem. Any error becomes a returned string (never an
     exception) so one bad model-supplied argument fails that call, not the whole round."""
     try:
@@ -182,6 +255,10 @@ def _dispatch_tool(root: Path, name: str, args: dict, max_bytes: int) -> str:
         if name == "search":
             return _tool_search(root, args["query"], args.get("glob", "**/*.py"),
                                 args.get("max_results", 60), max_bytes)
+        if name == "write_file":
+            return _tool_write_file(root, args["path"], args.get("content", ""))
+        if name == "run_command":
+            return _tool_run_command(root, args["command"], max_bytes, run_timeout)
         return f"error: unknown tool {name!r}"
     except (ValueError, KeyError, TypeError) as e:
         return f"error: {e}"
@@ -209,16 +286,18 @@ _SYSTEM_TOOL_NOTE = (
 
 
 def _run_agentic(base: str, model: str, key: str, prompt: str, root: Path, *,
-                 timeout: float, max_steps: int, max_bytes: int) -> str:
+                 timeout: float, max_steps: int, max_bytes: int,
+                 tools_spec=None, system_note: str = _SYSTEM_TOOL_NOTE, run_timeout: float = 600.0) -> str:
     """Drive a chat/completions tool-calling loop until the model returns a tool-free message."""
+    tools_spec = tools_spec if tools_spec is not None else _TOOLS_SPEC
     messages = [
-        {"role": "system", "content": _SYSTEM_TOOL_NOTE},
+        {"role": "system", "content": system_note},
         {"role": "user", "content": prompt},
     ]
     url = f"{base}/chat/completions"
     for _ in range(max_steps):
         data = _post_json(url, key, {"model": model, "messages": messages,
-                                     "tools": _TOOLS_SPEC, "tool_choice": "auto"}, timeout)
+                                     "tools": tools_spec, "tool_choice": "auto"}, timeout)
         msg = data["choices"][0]["message"]
         calls = msg.get("tool_calls") or []
         if not calls:
@@ -231,7 +310,7 @@ def _run_agentic(base: str, model: str, key: str, prompt: str, root: Path, *,
                 cargs = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 cargs = {}
-            result = _dispatch_tool(root, fn.get("name", ""), cargs, max_bytes)
+            result = _dispatch_tool(root, fn.get("name", ""), cargs, max_bytes, run_timeout)
             messages.append({"role": "tool", "tool_call_id": call.get("id"),
                              "content": result[:max_bytes]})
     # Ran out of steps: ask once more, tools OFF, forcing a final written review from what it has seen.
@@ -239,6 +318,63 @@ def _run_agentic(base: str, model: str, key: str, prompt: str, root: Path, *,
                      "You have reached the tool-call budget. Stop inspecting and write your final review now."})
     data = _post_json(url, key, {"model": model, "messages": messages}, timeout)
     return data["choices"][0]["message"].get("content") or ""
+
+
+def _extract_responses_text(data: dict) -> str:
+    """Pull assistant text out of a /responses payload (output_text convenience field, else message text)."""
+    if isinstance(data.get("output_text"), str):
+        return data["output_text"]
+    chunks = []
+    for item in data.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for c in item.get("content") or []:
+            if isinstance(c, dict) and c.get("type") in ("output_text", "text") and isinstance(c.get("text"), str):
+                chunks.append(c["text"])
+    return "".join(chunks)
+
+
+def _to_responses_tools(chat_tools: list) -> list:
+    """Convert /chat/completions tool specs ({type,function:{name,...}}) to the flat /responses shape."""
+    out = []
+    for t in chat_tools:
+        f = t.get("function", {})
+        out.append({"type": "function", "name": f.get("name"),
+                    "description": f.get("description", ""), "parameters": f.get("parameters", {})})
+    return out
+
+
+def _run_agentic_responses(base: str, model: str, key: str, prompt: str, root: Path, *,
+                           timeout: float, max_steps: int, max_bytes: int,
+                           tools_spec=None, system_note: str = _SYSTEM_TOOL_NOTE,
+                           run_timeout: float = 600.0) -> str:
+    """The same agentic tool loop, but over the OpenAI **/responses** API (models that reject
+    /chat/completions, e.g. gpt-5.6-terra). Tool calls come back as ``function_call`` output items and are
+    answered with ``function_call_output`` input items keyed by ``call_id``; we pass the full growing input
+    each turn (no server-side state)."""
+    tools = _to_responses_tools(tools_spec if tools_spec is not None else _TOOLS_SPEC)
+    url = f"{base}/responses"
+    input_items = [{"role": "user", "content": prompt}]
+    for _ in range(max_steps):
+        data = _post_json(url, key, {"model": model, "instructions": system_note,
+                                     "input": input_items, "tools": tools, "tool_choice": "auto"}, timeout)
+        output = data.get("output") or []
+        calls = [it for it in output if isinstance(it, dict) and it.get("type") == "function_call"]
+        if not calls:
+            return _extract_responses_text(data)
+        input_items.extend(calls)  # echo the function_call items so their outputs can reference them
+        for call in calls:
+            cid = call.get("call_id") or call.get("id")
+            try:
+                cargs = json.loads(call.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                cargs = {}
+            result = _dispatch_tool(root, call.get("name", ""), cargs, max_bytes, run_timeout)
+            input_items.append({"type": "function_call_output", "call_id": cid, "output": result[:max_bytes]})
+    input_items.append({"role": "user", "content":
+                        "You have reached the tool-call budget. Stop and write your final answer now."})
+    data = _post_json(url, key, {"model": model, "instructions": system_note, "input": input_items}, timeout)
+    return _extract_responses_text(data)
 
 
 def main(argv=None) -> int:
@@ -251,10 +387,16 @@ def main(argv=None) -> int:
     p.add_argument("--base", default=os.environ.get("SEAT_API_BASE", "https://api.openai.com/v1"))
     p.add_argument("--model", default=os.environ.get("SEAT_API_MODEL", "gpt-5.5"))
     p.add_argument("--key-env", default="OPENAI_API_KEY")
-    p.add_argument("--repo-root", required=True, help="repository the model may read (read-only)")
+    p.add_argument("--repo-root", required=True, help="repository the model may read (and write with --write)")
     p.add_argument("--timeout", type=float, default=float(os.environ.get("SEAT_API_TIMEOUT", "180")))
     p.add_argument("--max-steps", type=int, default=50)
     p.add_argument("--max-bytes", type=int, default=100_000)
+    p.add_argument("--write", action="store_true",
+                   help="enable write_file + run_command (a BUILDER seat); default is read-only")
+    p.add_argument("--run-timeout", type=float, default=600.0,
+                   help="per run_command timeout in seconds (only with --write)")
+    p.add_argument("--api", choices=("auto", "chat", "responses"), default="auto",
+                   help="which OpenAI-shaped API to drive the tool loop over; 'auto' tries chat, falls back to responses on 404")
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
 
     key = os.environ.get(args.key_env)
@@ -269,8 +411,25 @@ def main(argv=None) -> int:
     prompt = sys.stdin.read()
     base = args.base.rstrip("/")
     try:
-        out = _run_agentic(base, args.model, key, prompt, root,
-                           timeout=args.timeout, max_steps=args.max_steps, max_bytes=args.max_bytes)
+        tools_spec = _TOOLS_SPEC + _WRITE_TOOLS_SPEC if args.write else _TOOLS_SPEC
+        system_note = _SYSTEM_BUILDER_NOTE if args.write else _SYSTEM_TOOL_NOTE
+        kw = dict(timeout=args.timeout, max_steps=args.max_steps, max_bytes=args.max_bytes,
+                  tools_spec=tools_spec, system_note=system_note, run_timeout=args.run_timeout)
+        if args.api == "responses":
+            out = _run_agentic_responses(base, args.model, key, prompt, root, **kw)
+        elif args.api == "chat":
+            out = _run_agentic(base, args.model, key, prompt, root, **kw)
+        else:  # auto: chat, but fall back to /responses if the model rejects /chat/completions
+            try:
+                out = _run_agentic(base, args.model, key, prompt, root, **kw)
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", "replace")
+                if e.code == 404:
+                    sys.stderr.write("openai-repo-seat: model rejects /chat/completions; retrying /responses\n")
+                    out = _run_agentic_responses(base, args.model, key, prompt, root, **kw)
+                else:
+                    sys.stderr.write(f"api error {e.code}: {body[:500]}\n")
+                    return 1
     except urllib.error.HTTPError as e:
         sys.stderr.write(f"api error {e.code}: {e.read().decode('utf-8', 'replace')[:500]}\n")
         return 1
