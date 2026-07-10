@@ -362,7 +362,13 @@ def _run_agentic_responses(base: str, model: str, key: str, prompt: str, root: P
         calls = [it for it in output if isinstance(it, dict) and it.get("type") == "function_call"]
         if not calls:
             return _extract_responses_text(data)
-        input_items.extend(calls)  # echo the function_call items so their outputs can reference them
+        # Echo the model's output items back IN ORDER, keeping the `reasoning` items — NOT just the
+        # function_calls. A reasoning model (e.g. gpt-5.6-terra) REJECTS a replayed function_call that
+        # arrives without its paired reasoning item ("function_call ... was provided without its required
+        # 'reasoning' item"). We keep only reasoning + function_call (dropping any assistant message text,
+        # which must not sit between the calls and their outputs) so each call's reasoning travels with it.
+        input_items.extend(it for it in output
+                           if isinstance(it, dict) and it.get("type") in ("reasoning", "function_call"))
         for call in calls:
             cid = call.get("call_id") or call.get("id")
             try:

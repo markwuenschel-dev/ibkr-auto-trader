@@ -11,7 +11,7 @@
 
 **Next Expected Actions** (evidence-gated autonomous flow):
 1. Builder (Claude opus) claims handoff 027 and implements PT-2.
-2. Reviewer (gpt-5.5, repo-aware) plus breaker/verifier adversarial lanes verify the change.
+2. Reviewer (gpt-5.6-terra, repo-aware) plus breaker/verifier adversarial lanes verify the change.
 3. `done_contract` gate evaluates all conditions (incl. source==tested + full pytest); only on pass does 027 advance to `handoffs/done/` — otherwise it stays `claimed/` with a `signoff_blocked` reason.
 4. Continue draining subsequent PT slices the same way.
 

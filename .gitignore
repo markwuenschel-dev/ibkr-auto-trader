@@ -34,3 +34,6 @@ _autopilot-backup-*/
 
 # harness state
 .claude/
+
+# local scratch architecture notes (not the tracked design docs under docs/)
+ARCHITECTURE.md

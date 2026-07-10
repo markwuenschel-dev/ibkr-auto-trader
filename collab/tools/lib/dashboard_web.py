@@ -89,6 +89,17 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(404, {"error": str(e)})
             except cc.CollabError as e:
                 return self._json(500, {"error": str(e)})
+        if parts.path == "/api/narrative":
+            # read-only + host-checked (like /api/handoff). hid validated + resolved via the state machine.
+            hid = (urllib.parse.parse_qs(parts.query).get("hid") or [""])[0].strip()
+            if not _HID_RE.fullmatch(hid):
+                return self._json(400, {"error": "bad hid"})
+            try:
+                return self._json(200, dc.narrative_view(collab, hid))
+            except hc.HandoffNotFound as e:
+                return self._json(404, {"error": str(e)})
+            except Exception:  # a summary failure must never 500 the whole dashboard
+                return self._json(500, {"error": "narrative unavailable"})
         if parts.path == "/api/runs":
             # read-only run history (newest first); entries may carry current:true for the live run.
             return self._json(200, dc.list_runs(collab))
@@ -430,6 +441,28 @@ _PAGE = r"""<!doctype html>
   .cmptbl th{ color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; font-weight:600; }
   .cmptbl td.k{ color:var(--muted); white-space:nowrap; } .cmptbl td.v{ font-variant-numeric:tabular-nums; }
   .cmptbl td.d.up{ color:var(--crit); } .cmptbl td.d.down{ color:var(--ok); } .cmptbl td.d.same{ color:var(--faint); }
+  .narr{ max-width:100%; } .narr.collapsed{ display:none; }
+  .narr .nh1{ font-size:17px; font-weight:700; letter-spacing:-.01em; margin:2px 0 4px; text-wrap:balance; }
+  .narr .nh2{ font-size:10.5px; text-transform:uppercase; letter-spacing:.13em; color:var(--muted);
+    font-weight:650; margin:0 0 8px; }
+  .narr .np{ margin:0 0 9px; color:var(--text); }
+  .narr .np.lead{ font-size:14.5px; max-width:92ch; margin-bottom:14px; }
+  .narr .nlist{ margin:0; display:flex; flex-direction:column; gap:6px; }
+  .narr .nli{ position:relative; padding-left:17px; }
+  .narr .nli::before{ content:"\203a"; position:absolute; left:3px; top:-1px; color:var(--faint); font-weight:700; }
+  .narr .nli.blk{ color:var(--warn); } .narr .nli.blk::before{ content:"\26a0"; color:var(--warn); }
+  .narr code{ background:var(--raised2); border:1px solid var(--border-soft); border-radius:5px;
+    padding:0 5px; font-size:12px; font-family:ui-monospace,Consolas,monospace; }
+  .narr .none{ color:var(--muted); }
+  /* fill the card width: context sections tile into auto-fit columns; the timeline spans full width. */
+  .narr .ncols{ display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+    gap:18px 32px; align-items:start; margin-top:4px; }
+  .narr .nsec{ min-width:0; }
+  .narr .nsec.wide{ grid-column:1/-1; padding-top:14px; border-top:1px solid var(--border-soft); }
+  .narr .nsec.wide + .nsec{ padding-top:14px; border-top:1px solid var(--border-soft); }
+  .narr .nsec.turns .nlist{ display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr));
+    gap:8px 30px; }
+  #narrToggle{ transition:transform .15s; } #narrCard.folded #narrToggle{ transform:rotate(-90deg); }
   #viewer{ position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; z-index:40; padding:16px; }
   #viewer .box{ background:var(--surface); border:1px solid var(--border); border-radius:14px; max-width:800px; width:100%; max-height:86vh; display:flex; flex-direction:column; box-shadow:var(--shadow); }
   #viewer .top{ display:flex; justify-content:space-between; align-items:center; padding:13px 17px; border-bottom:1px solid var(--border); }
@@ -481,6 +514,12 @@ _PAGE = r"""<!doctype html>
   <div id="empty" style="display:none">Driver not running — start autopilot to see live activity.</div>
 
   <div class="grid">
+    <section class="card full" id="narrCard" style="display:none"><h2>What happened
+      <span class="r"><span id="narrMeta"></span>
+      <button class="iconbtn ghost" id="narrToggle" aria-label="Collapse" aria-expanded="true"
+        onclick="toggleNarr()" title="Collapse / expand">&#9662;</button></span></h2>
+      <div id="narr" class="narr"></div></section>
+
     <section class="card"><h2>Agents
       <span class="r"><span class="legdot"><i style="background:var(--claude)"></i>Claude</span>
       <span class="legdot"><i style="background:var(--gpt)"></i>OpenAI</span></span></h2>
@@ -525,6 +564,7 @@ _PAGE = r"""<!doctype html>
 <script>
 const TOKEN="__TOKEN__";
 let last=null, connected=true;
+let narrHid=null, narrData=null;   // the handoff the "What happened" card is showing + its fetched narrative
 const $=id=>document.getElementById(id);
 const esc=s=>(s==null?"":String(s));
 function el(tag,cls,txt){const e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e;}
@@ -634,7 +674,7 @@ function render(s){
   setFav(PHASECOL[ph]||"#5c6675"); document.title=(s.status?"● ":"")+phaseLabel(ph)+" · autopilot";
   $("empty").style.display = (!s.status && !(s.events&&s.events.length))? "block":"none";
 
-  renderHero(s); renderSeats(s); renderLanes(s); renderPipe(s); renderFeed(s); renderRuns(s); syncTurns(s);
+  renderNarrative(s); renderHero(s); renderSeats(s); renderLanes(s); renderPipe(s); renderFeed(s); renderRuns(s); syncTurns(s);
   const cn=s.counts||{};
   const foot=$("foot"); foot.textContent="";
   [["pending",cn.pending],["claimed",cn.claimed],["done",cn.done],["archive",cn.archive]].forEach(([k,v])=>{
@@ -642,6 +682,92 @@ function render(s){
   foot.appendChild(el("span","spacer")); foot.lastChild.style.flex="1";
   const l1=el("span","legdot"); l1.appendChild(el("i")); l1.lastChild.style.background="var(--claude)"; l1.appendChild(el("span",null,"Claude builds")); foot.appendChild(l1);
   const l2=el("span","legdot"); l2.appendChild(el("i")); l2.lastChild.style.background="var(--gpt)"; l2.appendChild(el("span",null,"ChatGPT reviews · breaks · verifies")); foot.appendChild(l2);
+}
+
+// ---- "What happened" narrative card ------------------------------------- //
+// Picks the handoff worth narrating (the one being worked, else the newest done/claimed) and lazy-loads its
+// human-readable story from /api/narrative — re-fetched only when the focus handoff changes, not every poll.
+function focusHid(s){
+  const st=s.status||{};
+  if(st.current_hid) return String(st.current_hid);
+  const b=s.board||{};
+  const done=b.done||[]; if(done.length) return String(done[done.length-1].id);
+  const cl=b.claimed||[]; if(cl.length) return String(cl[cl.length-1].id);
+  return null;
+}
+function renderNarrative(s){
+  const card=$("narrCard"); const hid=focusHid(s);
+  if(!hid){ card.style.display="none"; narrHid=null; narrData=null; return; }
+  card.style.display=""; applyNarrCollapse();
+  if(hid!==narrHid){ narrHid=hid; narrData=null; paintNarrative(); fetchNarrative(hid); }
+}
+function narrCollapsed(){ try{ return localStorage.getItem("ap-narr-collapsed")==="1"; }catch(e){ return false; } }
+function applyNarrCollapse(){ const c=narrCollapsed();
+  $("narr").classList.toggle("collapsed",c); $("narrCard").classList.toggle("folded",c);
+  $("narrToggle").setAttribute("aria-expanded", c?"false":"true");
+  $("narrToggle").setAttribute("aria-label", c?"Expand":"Collapse"); }
+function toggleNarr(){ try{ localStorage.setItem("ap-narr-collapsed", narrCollapsed()?"0":"1"); }catch(e){}
+  applyNarrCollapse(); }
+async function fetchNarrative(hid){
+  try{ const r=await fetch("/api/narrative?hid="+encodeURIComponent(hid)); const j=await r.json();
+    if(narrHid!==hid) return;   // focus moved on while we were loading — drop this stale response
+    narrData = r.ok? j : {error:(j&&j.error)||("error "+r.status)}; paintNarrative();
+  }catch(e){ if(narrHid===hid){ narrData={error:String(e)}; paintNarrative(); } }
+}
+function paintNarrative(){
+  const box=$("narr"), meta=$("narrMeta"); if(!box) return; box.textContent="";
+  meta.textContent = narrHid? ("handoff "+narrHid+(narrData&&narrData.state?" · "+narrData.state:"")) : "";
+  if(!narrData){ box.appendChild(el("div","none","loading…")); return; }
+  if(narrData.error){ box.appendChild(el("div","none",narrData.error)); return; }
+  narrMarkdown(box, narrData.markdown||"");
+}
+// SAFE structural markdown -> DOM ([C38]): EVERY text node is set via textContent, so untrusted agent prose
+// can never become markup. Only #/##/bullets/**bold**/`code` are recognised — none can inject HTML. We parse
+// into a title + lead + per-## sections first, THEN lay the sections into a width-filling grid.
+function narrParse(md){
+  const out={title:null, lead:[], secs:[]}; let cur=null;
+  String(md).split("\n").forEach(raw=>{
+    const ln=raw.replace(/<!--[\s\S]*?-->/g,"").replace(/\s+$/,"");
+    if(!ln.trim()) return;
+    if(ln.startsWith("# ")){ out.title=ln.slice(2).trim(); return; }
+    if(ln.startsWith("## ")){ cur={head:ln.slice(3).trim(), items:[]}; out.secs.push(cur); return; }
+    const mLi=ln.match(/^\s*(?:\d+\.|[-*])\s+(.*)$/);
+    const bucket = cur? cur.items : out.lead;
+    if(mLi){ bucket.push({kind:"li", text:mLi[1], blk:/⚠|blocker/i.test(mLi[1])}); return; }
+    if(/^_.*_$/.test(ln)) bucket.push({kind:"p", text:ln.replace(/^_|_$/g,""), none:true});
+    else bucket.push({kind:"p", text:ln});
+  });
+  return out;
+}
+function narrItems(parent, items){   // render a flat item list, grouping consecutive bullets into one .nlist
+  let list=null;
+  items.forEach(it=>{
+    if(it.kind==="li"){ if(!list){ list=el("div","nlist"); parent.appendChild(list); }
+      const li=el("div","nli"+(it.blk?" blk":"")); narrInline(li,it.text); list.appendChild(li); }
+    else{ list=null; const p=el("div","np"+(it.none?" none":"")); narrInline(p,it.text); parent.appendChild(p); }
+  });
+}
+function narrMarkdown(box, md){
+  const doc=narrParse(md);
+  if(doc.title) box.appendChild(el("div","nh1",doc.title));
+  doc.lead.forEach((it,i)=>{ const p=el("div","np"+(i===0?" lead":"")+(it.none?" none":""));
+    narrInline(p,it.text); box.appendChild(p); });
+  const grid=el("div","ncols");
+  doc.secs.forEach(sec=>{
+    const turns=/how it unfolded/i.test(sec.head);   // the timeline — span full width, flow into columns
+    const block=el("div","nsec"+(turns?" wide turns":""));
+    block.appendChild(el("div","nh2",sec.head));
+    narrItems(block, sec.items);
+    grid.appendChild(block);
+  });
+  box.appendChild(grid);
+}
+function narrInline(node, text){
+  String(text).split(/(\*\*[^*]+\*\*|`[^`]+`)/).forEach(pt=>{ if(!pt) return;
+    if(pt.length>4&&pt.startsWith("**")&&pt.endsWith("**")) node.appendChild(el("b",null,pt.slice(2,-2)));
+    else if(pt.length>2&&pt.startsWith("`")&&pt.endsWith("`")) node.appendChild(el("code",null,pt.slice(1,-1)));
+    else node.appendChild(document.createTextNode(pt));
+  });
 }
 
 function metric(box,v,k,color){ const m=el("div","metric"); const vv=el("div","v num",v); if(color)vv.style.color=color;

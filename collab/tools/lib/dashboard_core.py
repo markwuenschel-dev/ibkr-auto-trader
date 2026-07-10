@@ -607,6 +607,18 @@ def handoff_view(collab, hid: str) -> dict:
     return {"id": hid, "state": state, "frontmatter": safe, "body_text": body, "is_reply": is_reply}
 
 
+def narrative_view(collab, hid: str) -> dict:
+    """The human-readable narrative of a handoff for the dashboard's "What happened" card.
+
+    Returns ``{"id", "state", "markdown"}``. ``markdown`` is UNTRUSTED text ([C38]) — it stitches agent
+    reply prose — so the web layer MUST render it as text (a safe structural pass), never as raw HTML.
+    Read-only: :func:`narrative.build` transitions nothing and runs no agents. Raises
+    :class:`handoff_core.HandoffNotFound` for an unknown id."""
+    import narrative
+    md = narrative.build(collab, hid)
+    return {"id": hid, "state": hc.state_of(collab, hid), "markdown": md}
+
+
 def advance_handoff(collab, hid: str) -> dict:
     """Human sign-off: advance a handoff to ``done`` and log it.
 
@@ -630,6 +642,11 @@ def advance_handoff(collab, hid: str) -> dict:
     ap._emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.control", role="human",
                   artifact=f"handoff:{hid}",
                   decision={"action": "approve", "reason_codes": ["dashboard:advance"], "confidence": None})
+    try:  # attach the human-readable narrative to the handoff too (a human approval is still a closeout)
+        import narrative
+        narrative.write(collab, hid)
+    except Exception:  # the summary is best-effort; the approval already stands regardless
+        pass
     return {"id": hid, "state": "done", "changed": True}
 
 
