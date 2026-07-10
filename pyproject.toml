@@ -3,16 +3,15 @@ name = "ibkr-auto-trader"
 version = "0.0.0"
 description = "Safe, auditable, paper-first automated trading system for a small IBKR taxable account — the first coding domain-pack built on the collab-kit reusable core."
 requires-python = ">=3.14"
-# Core runtime deps only. Heavy/optional libraries live in extras below and install with the slice that
-# needs them (PT-3 -> ibkr, PT-6 -> analysis) — this keeps the bootstrap env small and avoids pulling
-# native wheels (numpy/pandas) before they're needed on a brand-new interpreter.
+# Core runtime deps only. PT-3 requires ib_async because the real AccountGateway adapter
+# must be importable in an installed application; it remains quarantined to ibkr_gateway.py.
 dependencies = [
     "pydantic>=2",   # PT-1 frozen domain models
     "structlog",     # structured logging
+    "ib_async",      # PT-3 read-only IBKR account session
 ]
 
 [project.optional-dependencies]
-ibkr = ["ib_async"]              # PT-3 IBKR session (async)
 analysis = ["pandas", "numpy"]   # PT-6 risk math / drift
 
 [dependency-groups]

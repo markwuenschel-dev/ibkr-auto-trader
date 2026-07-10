@@ -39,6 +39,7 @@ from ibkr_trader.ibkr import (
     resolve_account,
 )
 from ibkr_trader.ibkr.config import DEFAULT_HOST, DEFAULT_PAPER_PORT
+from ibkr_trader.ibkr.gateway import clock_skew_seconds
 from ibkr_trader.state import StateStore
 from ibkr_trader.telemetry import Emitter
 
@@ -374,6 +375,47 @@ class TestClockSkew:
         _run(gw.connect())
         _run(gw.snapshot())
         assert _stages(emitter, "clock.skew") == []
+
+    def test_naive_broker_time_does_not_gate_the_read(self):
+        # Regression: a NAIVE broker_time (the fake's skew knob) must not raise TypeError on the naive/aware
+        # subtraction and gate the read — skew is reported, never gates (ADR ⑤/⑦/⑨). The snapshot must still
+        # return a RiskContext, and the skew is still detected across the tz-normalized comparison.
+        emitter = RecordingEmitter()
+        gw = _make_gateway(
+            summary=_paper_summary(),
+            positions={},
+            emitter=emitter,
+            broker_time=(_MOMENT + timedelta(seconds=5)).replace(tzinfo=None),  # NAIVE
+            skew_threshold=2.0,
+        )
+        _run(gw.connect())
+        ctx = _run(gw.snapshot())  # must NOT raise
+        assert ctx.net_liquidation == Decimal("2000.50")
+        assert _stages(emitter, "clock.skew")
+
+    def test_naive_decision_clock_does_not_gate_the_read(self):
+        # Regression (second trigger): a mis-injected NAIVE decision Clock vs an aware broker time must also
+        # normalize rather than raise on the snapshot path.
+        emitter = RecordingEmitter()
+        gw = _make_gateway(
+            clock=FixedClock(_MOMENT.replace(tzinfo=None)),  # NAIVE clock
+            summary=_paper_summary(),
+            positions={},
+            emitter=emitter,
+            broker_time=_MOMENT + timedelta(seconds=5),  # aware
+            skew_threshold=2.0,
+        )
+        _run(gw.connect())
+        ctx = _run(gw.snapshot())  # must NOT raise
+        assert ctx.buying_power == Decimal("8000.00")
+
+    def test_clock_skew_seconds_normalizes_mixed_awareness(self):
+        aware = _MOMENT
+        naive = (_MOMENT + timedelta(seconds=5)).replace(tzinfo=None)  # a naive value 5s later
+        # a naive datetime is treated as UTC on either side; the skew is 5s and it never raises.
+        assert clock_skew_seconds(aware, naive) == 5.0
+        assert clock_skew_seconds(naive, aware) == 5.0
+        assert clock_skew_seconds(aware, None) is None
 
 
 class TestConfig:

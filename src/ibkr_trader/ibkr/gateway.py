@@ -226,11 +226,21 @@ def reconcile_positions(
     return PositionReconciliation(broker=broker_nz, cache=cache_nz, diffs=diffs)
 
 
+def _as_utc(dt: datetime) -> datetime:
+    """A tz-aware UTC datetime: a naive value is assumed UTC (the system convention, matching the live
+    adapter's broker-time normalization); an aware value is converted to UTC."""
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
 def clock_skew_seconds(local: datetime, broker: datetime | None) -> float | None:
-    """Absolute skew between the injected clock and broker time, or ``None`` if broker time is absent."""
+    """Absolute skew between the injected clock and broker time, or ``None`` if broker time is absent.
+
+    Defensive about tz-awareness: a naive datetime on either side is normalized to UTC before subtracting
+    (ADR ⑨ 'tz-aware UTC throughout'), so a naive broker time (the fake's skew knob) or a mis-injected naive
+    ``Clock`` can never raise ``TypeError`` on the snapshot path — skew is *reported*, never gates (⑤/⑦)."""
     if broker is None:
         return None
-    return abs((broker - local).total_seconds())
+    return abs((_as_utc(broker) - _as_utc(local)).total_seconds())
 
 
 def backoff_delays(attempts: int, base: float, cap: float) -> list[float]:

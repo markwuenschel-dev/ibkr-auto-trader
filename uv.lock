@@ -90,6 +90,7 @@ name = "ibkr-auto-trader"
 version = "0.0.0"
 source = { editable = "." }
 dependencies = [
+    { name = "ib-async" },
     { name = "pydantic" },
     { name = "structlog" },
 ]
@@ -98,9 +99,6 @@ dependencies = [
 analysis = [
     { name = "numpy" },
     { name = "pandas" },
-]
-ibkr = [
-    { name = "ib-async" },
 ]
 
 [package.dev-dependencies]
@@ -113,13 +111,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ib-async", marker = "extra == 'ibkr'" },
+    { name = "ib-async" },
     { name = "numpy", marker = "extra == 'analysis'" },
     { name = "pandas", marker = "extra == 'analysis'" },
     { name = "pydantic", specifier = ">=2" },
     { name = "structlog" },
 ]
-provides-extras = ["ibkr", "analysis"]
+provides-extras = ["analysis"]
 
 [package.metadata.requires-dev]
 dev = [
