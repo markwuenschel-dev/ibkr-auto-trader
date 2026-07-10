@@ -384,7 +384,7 @@ class TestSignoff:
         hc.create(collab, to="reviewer", from_="builder", title="x", body="please review")
         status, raw = _turn(collab, "reviewer", seats=_signer(["reviewer"]),
                            runner=lambda *a, **k: "approved\n[[SIGNOFF]]")
-        assert status == "turn"                          # blocked sign-off falls through to an ordinary turn
+        assert status == "blocked"                       # a refused sign-off now reports the distinct "blocked"
         assert hc.state_of(collab, "001") == "claimed"
         assert any(e["stage"] == "autopilot.signoff_blocked" for e in _events(collab))
 
@@ -395,7 +395,7 @@ class TestSignoff:
         _write_satisfied_ledger(collab, "001", builder="reviewer", reviewer="reviewer")
         status, raw = _turn(collab, "reviewer", seats=_signer(["reviewer"]),
                            runner=lambda *a, **k: "approved\n[[SIGNOFF]]", counterpart_seat="reviewer")
-        assert status == "turn"
+        assert status == "blocked"
         assert hc.state_of(collab, "001") == "claimed"  # no self-approval
 
     def test_signoff_blocked_on_source_drift(self, tmp_path):
@@ -406,7 +406,7 @@ class TestSignoff:
         (Path(collab) / "src" / "mod_001.py").write_text("x = 2  # drift\n", encoding="utf-8")
         status, raw = _turn(collab, "reviewer", seats=_signer(["reviewer"]),
                            runner=lambda *a, **k: "approved\n[[SIGNOFF]]")
-        assert status == "turn"
+        assert status == "blocked"
         assert hc.state_of(collab, "001") == "claimed"
 
     def test_signoff_blocked_when_blocker_lacks_regression(self, tmp_path):
@@ -418,7 +418,7 @@ class TestSignoff:
                                            "fixed": True, "regression_test": None}])
         status, raw = _turn(collab, "reviewer", seats=_signer(["reviewer"]),
                            runner=lambda *a, **k: "approved\n[[SIGNOFF]]")
-        assert status == "turn"
+        assert status == "blocked"
         assert hc.state_of(collab, "001") == "claimed"
 
     def test_signoff_token_ignored_without_optin(self, tmp_path):
@@ -428,7 +428,7 @@ class TestSignoff:
         _write_satisfied_ledger(collab, "001")  # even a good ledger can't help a non-opted-in seat
         status, raw = _turn(collab, "reviewer", seats=_cli(["reviewer"]),
                            runner=lambda *a, **k: "looks great\n[[SIGNOFF]]")
-        assert status == "turn"
+        assert status == "turn"                          # no opt-in -> sign-off branch never runs
         assert hc.state_of(collab, "001") == "claimed"
 
     def test_optin_seat_without_token_stays_claimed(self, tmp_path):
@@ -438,7 +438,7 @@ class TestSignoff:
         _write_satisfied_ledger(collab, "001")
         status, raw = _turn(collab, "reviewer", seats=_signer(["reviewer"]),
                            runner=lambda *a, **k: "I do NOT sign off yet — fix the race first.")
-        assert status == "turn"
+        assert status == "turn"                          # opt-in but no token -> ordinary turn
         assert hc.state_of(collab, "001") == "claimed"
 
     def test_run_loop_ends_on_signoff_without_hitting_cap(self, tmp_path):
@@ -567,7 +567,7 @@ class TestCloseout:
         hc.claim(collab, "001")
         status, raw = _turn(collab, "reviewer", seats=self._seats(), runner=self._runner,
                            counterpart_seat="builder", closeout=closeout)
-        assert status == "turn"                          # tests failed -> contract blocks (no fake green)
+        assert status == "blocked"                       # tests failed -> contract blocks (no fake green)
         assert hc.state_of(collab, "001") == "claimed"
 
     def test_shipped_seats_json_closeout_loads(self):
