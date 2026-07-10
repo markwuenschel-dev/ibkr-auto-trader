@@ -475,7 +475,7 @@ The two core roles are **seats**, not people, and are **swappable** (agent-agnos
 | Role | Live seat (this collab) | Authority |
 |---|---|---|
 | **Builder** | Claude (`claude -p --model opus`) | implements; **may not** approve its own work |
-| **Reviewer / Verifier** | ChatGPT (`gpt-5.5` via the OpenAI-compatible adapter) | independent review; runs/owns the lanes + ledger; may approve **another seat's** work |
+| **Reviewer / Verifier** | ChatGPT (`gpt-5.6-terra` via the OpenAI-compatible adapter) | independent review; runs/owns the lanes + ledger; may approve **another seat's** work |
 | Standby reviewers | Grok, Gemini | act only when a handoff is addressed to them |
 | Human | over Telegram | override / block / re-route |
 
