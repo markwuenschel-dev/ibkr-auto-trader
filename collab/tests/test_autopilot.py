@@ -133,7 +133,9 @@ class TestBoundedLoop:
         hc.create(collab, to="reviewer", from_="builder", title="kickoff", body="start the exchange")
         seats = _cli(["builder", "reviewer"])  # both automated -> would ping-pong forever without the cap
         rounds = ap.run(collab, seats=seats, max_rounds=3, runner=lambda *a, **k: "ok, continuing", home=home)
-        assert rounds == 3                                      # hard cap enforced ([C35])
+        # max_rounds counts PRIMARY-WORKER (first_seat) attempts; the counterpart's review turns are free, so
+        # 3 attempts => 6 total turns. The cap is still hard-enforced ([C35]).
+        assert rounds == 6
         notes = list((Path(home) / "outbox").glob("*autopilot*.md"))
         assert notes and "paused" in notes[0].read_text("utf-8")  # human pinged via the outbox/bridge
 
@@ -467,7 +469,7 @@ class TestOneThreadAtATime:
         seats = _cli(["builder", "reviewer"])  # both automated, neither signs off
         rounds = ap.run(collab, seats=seats, max_rounds=2,
                         runner=lambda *a, **k: "reply, still working", home=home)
-        assert rounds == 2                              # the per-thread budget was spent on 001's thread ONLY
+        assert rounds == 4                              # 2 primary-worker attempts (free counterpart turns) = 4 turns, on 001's thread ONLY
         assert hc.state_of(collab, "002") == "pending"  # the second handoff was never started (no fan-out)
         assert hc.state_of(collab, "001") == "claimed"  # the first was processed
         assert list((Path(home) / "outbox").glob("*autopilot*.md"))  # capped -> human pinged
@@ -593,6 +595,69 @@ class TestCloseout:
         assert hc.state_of(collab, "001") == "done"   # the driver self-closed it, no manual lane step
         assert rounds == 1
 
+    def test_item5_fix_cycles_skip_the_reviewer(self, tmp_path):
+        # Item 5 (2026-07-11): once a defect is CONFIRMED, the builder<->lanes tight loop verifies each fix
+        # with DRIVER-run lanes (no reviewer turn) until clean, then ONE reviewer sign-off at the end. Prove
+        # it end-to-end with a builder whose v1+v2 are defective and v3 is clean: between the FIRST sign-off
+        # block and the autonomous done there must be exactly ONE reviewer round (the final sign-off) — not
+        # one per fix — and the middle must show mid-loop lane events + send-backs instead.
+        home = tmp_path / "home"; home.mkdir()
+        collab = str(tmp_path / "c")
+        (Path(collab) / "src").mkdir(parents=True, exist_ok=True)
+        (Path(collab) / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
+        import subprocess as _sp
+        _sp.run(["git", "init"], cwd=collab, capture_output=True)  # cond-11 preflight needs a repo, not a commit
+        # Addressed TO the builder: the builder is the worker (first_seat) that fixes; the reviewer is the
+        # can_sign_off counterpart. Guardrails on the root drive the adversarial lanes.
+        hc.create(collab, to="builder", from_="reviewer", title="slice", body="please build")
+        import re as _re
+        _, p = hc._reconcile(collab, "001")
+        txt = _re.sub(r"(?m)^(status:.*\n)", r"\1guardrails: [bounded-autonomy, untrusted-agent-output]\n",
+                      Path(p).read_text("utf-8"), count=1)
+        Path(p).write_text(txt, "utf-8")
+
+        src = Path(collab) / "src" / "m.py"
+        state = {"builder": 0}
+
+        def runner(cmd, prompt, *, timeout, **kw):
+            who = cmd[0]
+            if "builder" in who:
+                state["builder"] += 1
+                buggy = state["builder"] < 3  # v1, v2 defective (distinct content -> real re-run); v3 clean
+                src.write_text(f"x = 1  # BUG {state['builder']}\n" if buggy else "x = 1\n", encoding="utf-8")
+                return f"attempt {state['builder']}"
+            if "reviewer" in who:
+                return "Conformance: all met.\n[[SIGNOFF]]"
+            bad = "BUG" in (src.read_text("utf-8") if src.exists() else "")
+            if "grok" in who:    # breaker
+                return "FINDING: src/m.py:1 -> x is unchecked -> data loss" if bad else "NO-FINDING"
+            if "gemini" in who:  # verifier
+                return "VERDICT: CONFIRMED src/m.py:1 x unchecked" if bad else "VERDICT: REFUTED"
+            return "ok"
+
+        seats_doc = {"version": 1,
+                     "closeout": {"breaker": "grok", "verifier": "gemini", "source_base": collab,
+                                  "source_roots": ["src/*.py"], "test_path": str(self._tiny_test(tmp_path, ok=True))},
+                     "seats": self._seats()}
+        (home / "seats.json").write_text(json.dumps(seats_doc), encoding="utf-8")
+        ap.run(collab, seats=self._seats(), max_rounds=6, runner=runner, home=str(home))
+
+        assert hc.state_of(collab, "001") == "done"   # self-closed after the clean fix
+        assert state["builder"] == 3                  # v1 + two fix attempts, then the reviewer signed off
+        evs = _events(collab)
+        i_block = next(i for i, e in enumerate(evs) if e.get("stage") == "autopilot.signoff_blocked")
+        i_done = next(i for i, e in enumerate(evs) if e.get("stage") == "autopilot.autonomous_done")
+        assert i_block < i_done
+        mid = evs[i_block + 1:i_done]
+
+        def _round_starts(role):
+            return [e for e in mid if e.get("stage") == "autopilot.round"
+                    and (e.get("decision") or {}).get("action") == "start" and e.get("role") == role]
+        assert len(_round_starts("reviewer")) == 1   # ONLY the final sign-off — reviewer skipped mid-loop
+        assert len(_round_starts("builder")) == 2     # the two fix attempts ran builder<->lanes
+        assert any(e.get("stage") == "autopilot.lane" for e in mid)      # driver-run verification happened
+        assert sum(1 for e in mid if e.get("stage") == "autopilot.sendback") == 2  # one send-back per fix
+
 
 def test_root_guardrails_drive_signoff_lanes(tmp_path):
     # ADR-0001: turns are no longer handoffs, so there is no auto-created reply to "carry" guardrails onto.
@@ -633,8 +698,25 @@ def test_claimed_never_exceeds_one_across_a_multiround_exchange(tmp_path):
         return "approved\n[[SIGNOFF]]"  # no ledger -> blocked every time -> the exchange keeps going
 
     rounds = ap.run(collab, seats=seats, max_rounds=4, runner=fake, home=home)
-    assert rounds == 4                                   # blocked sign-off -> ran the full multi-round budget
-    assert len(claimed_snaps) == 4                       # the runner (hence a turn) really fired every round
+    assert rounds == 8                                   # 4 primary-worker attempts (free counterpart turns) = 8 turns
+    assert len(claimed_snaps) == 8                       # the runner (hence a turn) really fired every turn
     assert all(c <= 1 for c in claimed_snaps)            # INVARIANT: never more than one handoff claimed
     assert all(p == 0 for p in pending_snaps)            # and no per-turn handoff minted into pending/
     assert hc.state_of(collab, "001") == "claimed"       # still the ONE handoff, never advanced
+
+
+def test_promote_next_draft_pulls_lowest_in_order(tmp_path):
+    # THE PULL MODEL (user-chosen): on sign-off a slice ships to done/, then the NEXT staged slice is pulled
+    # from draft/ into pending/ — lowest id first, exactly one queued at a time, so nothing runs out of order.
+    collab = str(tmp_path / "c")
+    hc.create(collab, to="builder", from_="reviewer", title="root", body="x")  # lays out handoffs/
+    draft = Path(collab) / "handoffs" / "draft"
+    draft.mkdir(parents=True, exist_ok=True)
+    (draft / "031-c.md").write_text("---\nto: builder\nfrom: reviewer\n---\n\n## Summary\nc\n", encoding="utf-8")
+    (draft / "030-b.md").write_text("---\nto: builder\nfrom: reviewer\n---\n\n## Summary\nb\n", encoding="utf-8")
+    pend = Path(collab) / "handoffs" / "pending"
+    assert ap._promote_next_draft(collab) == "030"              # lowest id first
+    assert (pend / "030-b.md").exists() and not (draft / "030-b.md").exists()
+    assert ap._promote_next_draft(collab) == "031"              # then the next
+    assert (pend / "031-c.md").exists()
+    assert ap._promote_next_draft(collab) is None               # draft drained

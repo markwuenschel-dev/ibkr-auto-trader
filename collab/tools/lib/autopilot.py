@@ -549,13 +549,39 @@ def _autoclose_ledger(collab, hid, builder_seat, closeout, *, seats, runner, log
                             test_path=test_path, tests=tests, runner=runner, log=log)
 
 
+def _verify_fix_lanes(collab, hid, builder_seat, closeout, *, seats, runner, log, rid, sp_round) -> None:
+    """Re-run tests + adversarial lanes on the builder's latest fix WITHOUT a reviewer turn — the tight
+    builder<->lanes middle loop ([user-chosen] item 5, 2026-07-11). Writes the verification ledger the caller
+    then reads via :func:`_confirmed_blockers`; the reviewer's independent repo-preflight (done-contract
+    condition 11) is captured later, on the single FINAL sign-off (``run_lanes`` regenerates the whole ledger
+    each call — including the preflight and a fresh ``generated_ts`` — reusing only the cached lane *results*
+    when the source is unchanged, so deferring the preflight here is safe). Mirrors the closeout's
+    status+heartbeat so the dashboard shows the lane phase and doesn't read the long lane run as stale."""
+    if not (closeout and closeout.get("breaker") and closeout.get("verifier")):
+        return  # no closeout configured -> nothing to verify here; the reviewer sign-off path handles it
+    _write_status(collab, phase="thinking", active_seat="lanes", current_hid=hid,
+                  active_since=_now_utc(), timeout=0)
+    try:
+        with _Heartbeat(collab):  # keep updated_ts fresh through the multi-minute lane phase (liveness)
+            _autoclose_ledger(collab, hid, builder_seat, closeout, seats=seats, runner=runner,
+                              log=log, reviewer_seat=None)  # preflight deferred to the final sign-off
+    except (cc.CollabError, hc.HandoffNotFound) as e:
+        _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.lane", role="lanes",
+                   artifact=f"handoff:{hid}", span_id=f"r{sp_round}:midlanes",
+                   decision={"action": "lane_error", "reason_codes": [str(e)[:60]], "confidence": None},
+                   failure={"kind": "lanes", "message": str(e)[:200]})
+        print(f"[autopilot] mid-loop lanes for {hid} failed: {e}")
+    _write_status(collab, active_seat=None)  # lanes done; the caller reads the ledger's confirmed blockers
+
+
 # --------------------------------------------------------------------------- #
 # one round / the bounded loop
 # --------------------------------------------------------------------------- #
 
 
 def _run_turn(collab, seat: str, *, seats: dict, runner, hid: str, transcript: str, round_no: int,
-              counterpart_seat: str, log: str, closeout: dict | None, rid: str) -> tuple[str, str | None]:
+              counterpart_seat: str, log: str, closeout: dict | None, rid: str,
+              attempt: int | None = None) -> tuple[str, str | None]:
     """Run ONE builder/reviewer turn against the already-claimed handoff ``hid``.
 
     A turn is *conversation*, not a handoff: it is persisted only as a reply artifact + events — no board
@@ -578,7 +604,8 @@ def _run_turn(collab, seat: str, *, seats: dict, runner, hid: str, transcript: s
                decision={"action": "start", "reason_codes": [f"seat:{seat}"], "confidence": None},
                metrics={"round_no": round_no})
     timeout_s = float(cfg.get("timeout", _DEFAULT_TIMEOUT))
-    _write_status(collab, phase="thinking", active_seat=seat, current_hid=hid, round=round_no,
+    _write_status(collab, phase="thinking", active_seat=seat, current_hid=hid,
+                  round=attempt if attempt is not None else round_no,  # DISPLAY = builder-attempt number, not raw turns
                   active_since=_now_utc(), timeout=timeout_s)  # active_since => elapsed; timeout => deadline
     prompt = _build_prompt(cfg.get("system"), transcript)
     t0 = time.monotonic()
@@ -676,6 +703,36 @@ def _next_root(collab, seats: dict, exclude: set) -> str | None:
         if to and _cli_seat(seats, to.strip()) is not None and (best is None or h["id"] < best):
             best = h["id"]
     return best
+
+
+def _promote_next_draft(collab, *, log: str | None = None, rid: str | None = None) -> str | None:
+    """A slice just shipped to ``done/`` — PULL the next staged one: move the lowest-id handoff from
+    ``handoffs/draft/`` into ``handoffs/pending/``. Keeping exactly ONE slice queued makes the pipeline run
+    in strict id order (029 -> 030 -> ...) with no skipping or out-of-order fan-out, even if more than one
+    driver is polling. Returns the promoted numeric id, or ``None`` when ``draft/`` is empty."""
+    draft = Path(collab) / "handoffs" / "draft"
+    try:
+        staged = sorted((p for p in draft.glob("*.md") if re.match(r"^\d+-", p.name)),
+                        key=lambda p: int(re.match(r"^(\d+)", p.name).group(1)))
+    except OSError:
+        return None
+    if not staged:
+        return None
+    src = staged[0]
+    dst = Path(collab) / "handoffs" / "pending" / src.name
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(str(src), str(dst))  # atomic within the one filesystem
+    except OSError as e:
+        print(f"[autopilot] could not promote next staged slice {src.name}: {e}", file=sys.stderr)
+        return None
+    hid = re.match(r"^(\d+)", src.name).group(1)
+    if log:
+        _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.promote", role="autopilot",
+                   artifact=f"handoff:{hid}",
+                   decision={"action": "promote", "reason_codes": [f"hid:{hid}", "from:draft"], "confidence": None})
+    print(f"[autopilot] promoted {src.name}: draft/ -> pending/ (next slice, in order)")
+    return hid
 
 
 def run(collab, *, seats: dict, max_rounds: int = 6, runner=_cli_runner, watch: bool = False,
@@ -805,6 +862,8 @@ def _run_loop(collab, *, seats, max_rounds, runner, watch, interval, home, log, 
             seat, counterpart = first_seat, other_seat  # `to` acts first; `from` is the counterpart
             thread_rounds = 0
             fix_attempts = 0  # informed auto-fix attempts spent on lane-confirmed defects for THIS handoff
+            fix_mode = False  # item 5: once a defect is found, verify each builder fix with driver-run lanes
+                              # (no reviewer turn) until clean, then ONE reviewer sign-off at the end
             while True:
                 tctrl = _read_control(collab)
                 # Live per-thread cap: a positive control.json `max_rounds` raises/lowers the ceiling
@@ -815,8 +874,12 @@ def _run_loop(collab, *, seats, max_rounds, runner, watch, interval, home, log, 
                 if cap != live_cap:
                     _write_status(collab, max_rounds=cap)
                     live_cap = cap
-                if thread_rounds >= cap:
-                    break  # per-thread budget exhausted -> outcome defaults to "capped"
+                # Budget = BUILDER attempts only (user-chosen turn model): the reviewer + the adversarial
+                # lanes evaluate the CURRENT attempt and NEVER draw it down. So the cap is checked+charged
+                # only when the worker (the seat the handoff is addressed to) is about to start a fresh
+                # attempt — i.e. work has come back to it. A reviewer turn can never trip the cap mid-cycle.
+                if seat == first_seat and thread_rounds >= cap:
+                    break  # the builder has used its attempt budget -> outcome defaults to "capped"
                 if tctrl.get("stop"):
                     outcome = "stopped"
                     break  # abandon the exchange; the top-level loop emits stop + returns
@@ -835,11 +898,12 @@ def _run_loop(collab, *, seats, max_rounds, runner, watch, interval, home, log, 
                 if _cli_seat(seats, seat) is None:
                     outcome = "human"  # the next turn belongs to a human/web seat — awaiting a person
                     break
+                if seat == first_seat:
+                    thread_rounds += 1  # entering a BUILDER attempt — the ONLY thing that draws down the budget
                 status, raw = _run_turn(collab, seat, seats=seats, runner=runner, hid=root,
-                                        transcript=transcript, round_no=total_rounds + 1,
+                                        transcript=transcript, round_no=total_rounds + 1, attempt=thread_rounds,
                                         counterpart_seat=counterpart, log=log, closeout=closeout, rid=rid)
-                total_rounds += 1
-                thread_rounds += 1
+                total_rounds += 1  # unique turn sequence for span/reply ids; the budget is thread_rounds above
                 if status == "fail":
                     outcome = "stalled"  # backend failed — handoff stays claimed; a human needs to look
                     break
@@ -850,34 +914,47 @@ def _run_loop(collab, *, seats, max_rounds, runner, watch, interval, home, log, 
                     break  # the handoff was accepted and advanced to done/
                 transcript = f"{transcript}\n\n----- {seat} -----\n{_sanitize(raw)}"  # extend the conversation
                 if status == "blocked":
-                    # A sign-off the evidence contract REFUSED. If it refused on CONFIRMED lane defects, apply
-                    # the auto-fix-once-then-escalate policy: the 1st time, feed the builder the exact defects
-                    # and let it fix (one informed attempt); if the lanes STILL confirm after that, escalate to
-                    # the terminal and stop rather than burn rounds. A block with no confirmed lane defects
-                    # (e.g. a preflight gap) just continues the exchange, as before.
+                    # A sign-off the evidence contract REFUSED. If it refused on CONFIRMED lane defects, hand
+                    # the builder the exact defects, SEND IT BACK, and enter the tight builder<->lanes loop
+                    # (item 5): the driver itself re-verifies each subsequent fix with the lanes — NO reviewer
+                    # turn — until the ledger is clean, then ONE reviewer sign-off at the end. A block with NO
+                    # confirmed lane defect (e.g. a preflight gap) just continues the exchange.
                     blockers = _confirmed_blockers(collab, root)
-                    if blockers and fix_attempts >= _MAX_FIX_ATTEMPTS:
-                        import escalation as _esc
-                        _esc.write(collab, root, blockers, attempts=fix_attempts,
-                                   title=_handoff_title(collab, root))
-                        _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.escalation", role="autopilot",
-                                   artifact=f"handoff:{root}",
-                                   decision={"action": "escalate",
-                                             "reason_codes": [f"root:{root}", f"defects:{len(blockers)}",
-                                                              f"fix_attempts:{fix_attempts}"],
-                                             "confidence": None})
-                        print(f"[autopilot] {root}: {len(blockers)} defect(s) survived {fix_attempts} auto-fix "
-                              f"attempt(s) -> ESCALATED to terminal (autopilot/escalations/{root}.md)")
-                        outcome = "escalated"
-                        break
                     if blockers:
-                        fix_attempts += 1  # one INFORMED auto-fix attempt: hand the builder the exact defects
+                        fix_attempts += 1  # a SEND-BACK: hand the builder the exact defects and continue
                         transcript = f"{transcript}\n\n{_fix_directive(blockers)}"
-                        print(f"[autopilot] {root}: {len(blockers)} lane-confirmed defect(s) -> auto-fix "
-                              f"attempt {fix_attempts}/{_MAX_FIX_ATTEMPTS} (feeding findings to the builder)")
+                        _record_sendback(collab, root, blockers, attempt=fix_attempts,
+                                         round_no=total_rounds, log=log, rid=rid)
+                        fix_mode = True  # verify the builder's fixes with driver-run lanes, not the reviewer
+                        print(f"[autopilot] {root}: {len(blockers)} lane-confirmed defect(s) -> SENT BACK to "
+                              f"builder (send-back #{fix_attempts}; round {thread_rounds}/{cap})")
+                    seat, counterpart = counterpart, seat  # reviewer -> builder
+                    continue
+                if fix_mode and status == "turn" and seat == first_seat:
+                    # The builder just produced a fix in the tight loop: VERIFY it with driver-run lanes and NO
+                    # reviewer turn. Clean ledger -> hand to the reviewer for the single final sign-off (which
+                    # re-runs the closeout on the unchanged source: a lane cache hit, but a freshly regenerated
+                    # ledger with the reviewer's preflight, so the done-contract still holds). Defects remain ->
+                    # send back and keep the builder (another counted attempt next iteration).
+                    _verify_fix_lanes(collab, root, seat, closeout, seats=seats, runner=runner,
+                                      log=log, rid=rid, sp_round=total_rounds)
+                    blockers = _confirmed_blockers(collab, root)
+                    if blockers:
+                        fix_attempts += 1
+                        transcript = f"{transcript}\n\n{_fix_directive(blockers)}"
+                        _record_sendback(collab, root, blockers, attempt=fix_attempts,
+                                         round_no=total_rounds, log=log, rid=rid)
+                        print(f"[autopilot] {root}: {len(blockers)} defect(s) still open after fix -> SENT BACK "
+                              f"(send-back #{fix_attempts}; round {thread_rounds}/{cap}); reviewer NOT invoked")
+                        continue  # stay on the builder — no swap, no reviewer turn
+                    fix_mode = False
+                    print(f"[autopilot] {root}: lanes CLEAN after fix -> handing to reviewer for final sign-off")
+                    seat, counterpart = counterpart, seat  # builder -> reviewer (the single final sign-off)
+                    continue
                 seat, counterpart = counterpart, seat  # hand the next turn to the other seat
 
         if outcome == "closed":
+            _promote_next_draft(collab, log=log, rid=rid)  # a slice shipped -> pull the next staged slice in, in order
             continue  # ONLY a sign-off advances -> select the next handoff
         if outcome == "stopped" or _read_control(collab).get("stop"):
             continue  # let the top of the loop emit the stop + return cleanly
@@ -885,17 +962,16 @@ def _run_loop(collab, *, seats, max_rounds, runner, watch, interval, home, log, 
         _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.pause", role="autopilot",
                    decision={"action": "cap", "reason_codes": [f"root:{root}", f"outcome:{outcome}"],
                              "confidence": None})
-        err = (f"{root}: verified defect — escalated to terminal (autopilot/escalations/{root}.md)"
-               if outcome == "escalated" else f"{root} not signed off ({outcome}); awaiting human")
+        err = f"{root} not signed off ({outcome}); awaiting human"
         _write_status(collab, phase="capped", last_error=err)
         _pause_note(collab, home, max_rounds)
         return total_rounds
 
 
-# The auto-fix-then-escalate policy ([user-chosen]): on a lane-CONFIRMED defect the driver makes this many
-# INFORMED autonomous builder fix attempts; if the lanes still confirm a defect after them, it stops and
-# escalates to the terminal (see :mod:`escalation`) instead of thrashing to the round cap.
-_MAX_FIX_ATTEMPTS = 1
+# The send-back policy ([user-chosen], revised 2026-07-11): on a lane-CONFIRMED defect the driver hands the
+# builder the exact defects and SENDS IT BACK, then keeps iterating — no early give-up. Each builder
+# re-attempt is a counted turn (total_rounds/thread_rounds), so the per-thread round budget (max_rounds) is
+# the only bound; on the cap it pings the human as usual. Every send-back is logged (see _record_sendback).
 
 
 def _confirmed_blockers(collab, hid: str) -> list:
@@ -921,6 +997,31 @@ def _fix_directive(blockers: list) -> str:
         reg = b.get("regression_test")
         lines.append(f"- [{b.get('lane', 'lane')}] {loc}" + (f"  (regression test: {reg})" if reg else ""))
     return "\n".join(lines)
+
+
+def _record_sendback(collab, hid, blockers, *, attempt, round_no, log, rid) -> None:
+    """Log a SEND-BACK — the builder is handed the CONFIRMED defects and the exchange continues. Emits an
+    ``autopilot.sendback`` telemetry event (surfaces in the dashboard activity feed) AND appends a durable
+    human-readable line to ``<collab>/autopilot/sendbacks/<hid>.log`` — the audit trail of every bounce."""
+    _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.sendback", role="autopilot",
+               artifact=f"handoff:{hid}",
+               decision={"action": "sendback",
+                         "reason_codes": [f"sendback:{attempt}", f"defects:{len(blockers)}",
+                                          f"round:{round_no}"] + [f"lane:{b.get('lane')}" for b in blockers],
+                         "confidence": None})
+    try:
+        d = Path(collab) / "autopilot" / "sendbacks"
+        d.mkdir(parents=True, exist_ok=True)
+        lines = [f"{_now_utc()}  SEND-BACK #{attempt} (round {round_no}) — "
+                 f"{len(blockers)} confirmed defect(s) returned to the builder:"]
+        for b in blockers:
+            desc = str(b.get("description") or "").strip().replace("\n", " ")
+            reg = b.get("regression_test")
+            lines.append(f"  - [{b.get('lane', 'lane')}] {desc}" + (f"  (regression: {reg})" if reg else ""))
+        with open(d / f"{hid}.log", "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as e:
+        print(f"[autopilot] could not write sendback log for {hid}: {e}", file=sys.stderr)
 
 
 def _handoff_title(collab, hid: str) -> str | None:

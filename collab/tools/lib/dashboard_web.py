@@ -157,6 +157,11 @@ class _Handler(BaseHTTPRequestHandler):
                 if not _HID_RE.fullmatch(hid):
                     return self._json(400, {"error": "bad hid"})
                 return self._json(200, dc.nudge(collab, hid))
+            if self.path == "/api/reopen":
+                hid = str(body.get("hid") or "").strip()
+                if not _HID_RE.fullmatch(hid):
+                    return self._json(400, {"error": "bad hid"})
+                return self._json(200, dc.reopen_handoff(collab, hid))  # claimed -> pending (HandoffConflict -> 409)
             if self.path == "/api/seat-model":
                 seat, model = body.get("seat"), body.get("model")
                 if not (isinstance(seat, str) and isinstance(model, str)
@@ -176,6 +181,14 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json(200, dc.set_max_rounds(collab, n, by="dashboard-web"))
                 except ValueError as e:
                     return self._json(400, {"error": str(e)})
+            if self.path == "/api/start":
+                mr = body.get("max_rounds")
+                if mr is not None and (not isinstance(mr, int) or isinstance(mr, bool) or not (1 <= mr <= 50)):
+                    return self._json(400, {"error": "bad max_rounds"})
+                try:  # "already running" / "not found" are CONFLICTs, not server faults -> 409.
+                    return self._json(200, dc.start_driver(collab, self.server.home, max_rounds=mr, by="dashboard-web"))  # type: ignore[attr-defined]
+                except cc.CollabError as e:
+                    return self._json(409, {"error": str(e)})
         except hc.HandoffNotFound as e:
             return self._json(404, {"error": str(e)})
         except hc.HandoffConflict as e:
@@ -492,6 +505,7 @@ _PAGE = r"""<!doctype html>
     <input type="number" min="1" max="50" id="maxturns" class="mono" aria-label="Max rounds (round budget)">
     <button class="ghost" id="btnTurns" onclick="setTurns()">Set</button>
   </span>
+  <button class="primary" id="btnStart" onclick="startRun()" title="Spawn the driver process against this collab (uses the cap at left)">▶ Start</button>
   <button class="ghost" id="btnPause" onclick="ctl('pause')">Pause</button>
   <button class="ghost" id="btnResume" onclick="ctl('resume')">Resume</button>
   <button class="danger ghost" id="btnStop" onclick="doStop()">Stop</button>
@@ -589,8 +603,34 @@ function vendorOf(m,name){ const t=(((m&&m.launcher)||"")+" "+((m&&m.model)||"")
   return name==="builder"?"c":"g"; }
 function seatVendor(n){ return vendorOf((last&&last.seats&&last.seats[n])||null, n); }
 function vColor(n){ return {c:"var(--claude)",g:"var(--gpt)",k:"var(--grok)",m:"var(--gemini)"}[seatVendor(n)]||"var(--gpt)"; }
-function seatModel(n){ const m=(last&&last.seats&&last.seats[n])||null; if(!m) return null;
-  const mo=m.model, la=m.launcher; if(mo&&la&&la!=="python") return la+" · "+mo; return mo||la||null; }
+function seatModel(n){ const m=(last&&last.seats&&last.seats[n])||null;
+  // While a run is LIVE, prefer the model the driver actually composed at start (status.run_seats — ids only,
+  // held in the driver's memory) over the on-disk seats.json value, which a mid-run edit would desync. Keep
+  // the launcher from _seat_models (run_seats carries no launcher). After a run ends, fall back to disk.
+  const st=(last&&last.status)||null;
+  const running = st && st.phase && st.phase!=="done" && st.phase!=="capped";
+  const live = running && st.run_seats && st.run_seats[n];
+  const mo=live||(m&&m.model), la=m&&m.launcher; if(!mo&&!la) return null;
+  if(mo&&la&&la!=="python") return la+" · "+mo; return mo||la||null; }
+// A finding string (breaker "FINDING: <path> -> <trigger>", verifier "VERDICT: CONFIRMED <path> <trigger>")
+// split into segments: [what/where, what triggers it, what breaks]. Tolerant — no arrow -> single segment.
+const _PATH_RE=/([A-Za-z0-9_./\\-]+\.[A-Za-z]{1,6}(?::\d+(?:-\d+)?)?)/g;
+function parseFinding(txt){ let t=String(txt||"").trim();
+  t=t.replace(/^\s*(FINDING|VERDICT)\s*:?\s*/i,"").replace(/^\s*(CONFIRMED|REFUTED)\s+/i,"");
+  const parts=t.split(/\s*(?:->|→)\s*/).map(x=>x.trim()).filter(Boolean); return parts.length?parts:[t]; }
+// The newest adversarial-lane event as a one-line play-by-play (null if none) — the live closeout narration.
+function latestLaneLine(s){ const evs=s.events||[];
+  for(let i=evs.length-1;i>=0;i--){ const ev=evs[i]; if((ev.stage||"")!=="autopilot.lane") continue;
+    const dec=ev.decision||{}, act=dec.action||"", rc=dec.reason_codes||[];
+    const ln=(rc.find(x=>x.indexOf("lane:")===0)||"lane:?").slice(5);
+    if(act==="breaker"){ const nf=(rc.find(x=>x.indexOf("findings:")===0)||"findings:0").slice(9);
+      return "breaker probing "+ln+" — "+nf+" finding"+(nf==="1"?"":"s"); }
+    if(act==="verdict"){ const vd=(rc.find(x=>x.indexOf("verdict:")===0)||"verdict:?").slice(8);
+      return "verifier adjudicating "+ln+" → "+vd; }
+    const cf=(rc.find(x=>x.indexOf("confirmed:")===0)||"confirmed:0").slice(10);
+    const rf=(rc.find(x=>x.indexOf("refuted:")===0)||"refuted:0").slice(8);
+    return "lane "+ln+" done · "+cf+" confirmed / "+rf+" refuted"; }
+  return null; }
 // Header label for a vendor group: "<label> · <first model of that vendor>" (e.g. "OpenAI · gpt-5.5").
 function vendorTag(models,vendor){ const label={c:"Claude",g:"OpenAI",k:"xAI",m:"Google"}[vendor]||vendor;
   for(const k in models){ const m=models[k]; if(m&&vendorOf(m,k)===vendor&&m.model) return label+" · "+m.model; } return label; }
@@ -618,9 +658,13 @@ async function ctl(kind, extra){
     if(!r.ok) toast(j.error||("error "+r.status),"err"); else toast(kind+(extra&&extra.hid?" "+extra.hid:"")+" ok","ok");
   }catch(e){ toast(String(e),"err"); } refresh();
 }
+function startRun(){ const n=parseInt(($("maxturns")||{}).value,10);
+  const mr=(Number.isInteger(n)&&n>=1&&n<=50)?n:null;
+  if(confirm("Start the autopilot driver against this collab now"+(mr?(" (max rounds "+mr+")"):"")+"?")) ctl("start",mr?{max_rounds:mr}:{}); }
 function doStop(){ if(confirm("Stop the autopilot loop (graceful, reversible)?")) ctl("stop"); }
 function approve(hid){ if(confirm("Approve (advance) "+hid+" to done?")) ctl("approve",{hid}); }
 function nudge(hid){ if(confirm("Re-queue "+hid+" as a NEW pending handoff?")) ctl("nudge",{hid}); }
+function reopen(hid){ if(confirm("Re-open "+hid+" — send it back to pending so the driver re-runs it (send-back loop retries the defects)?")) ctl("reopen",{hid}); }
 
 let viewerOpener=null;
 async function openHandoff(hid){
@@ -671,6 +715,7 @@ function render(s){
   const alive = stl.cls==="ok" && ph==="thinking";
   $("beacon").className="beacon"+(alive?" on":"");
   $("btnPause").disabled=!!s.paused||!s.status; $("btnResume").disabled=!s.paused;
+  $("btnStart").disabled = stl.cls==="ok";  // a live driver is heartbeating -> block a second spawn
   setFav(PHASECOL[ph]||"#5c6675"); document.title=(s.status?"● ":"")+phaseLabel(ph)+" · autopilot";
   $("empty").style.display = (!s.status && !(s.events&&s.events.length))? "block":"none";
 
@@ -691,8 +736,10 @@ function focusHid(s){
   const st=s.status||{};
   if(st.current_hid) return String(st.current_hid);
   const b=s.board||{};
-  const done=b.done||[]; if(done.length) return String(done[done.length-1].id);
+  // a CLAIMED handoff (in-progress, or stuck/unshipped after a capped run) is what's happening NOW — it
+  // outranks the newest DONE handoff (finished history). Otherwise fall back to the last done.
   const cl=b.claimed||[]; if(cl.length) return String(cl[cl.length-1].id);
+  const done=b.done||[]; if(done.length) return String(done[done.length-1].id);
   return null;
 }
 function renderNarrative(s){
@@ -781,16 +828,30 @@ function renderHero(s){
   if(!s.status){ stripe.style.background="var(--faint)"; eb.textContent="offline"; ti.textContent="Driver not running";
     sub.textContent="Start autopilot against this collab to see live activity."; return; }
   const active = st.active_seat && st.current_hid && !s.paused && ph==="thinking";
+  const pendingCt=((s.board||{}).pending||[]).length;
   let color="var(--faint)";
   if(active){
-    color=vColor(st.active_seat);
+    const seat=st.active_seat, isLanes=(seat==="lanes");
+    color=isLanes?vColor("breaker"):vColor(seat);
     eb.textContent="round "+(st.round||0)+" / "+(st.max_rounds||0)+" · working";
-    const verb = st.active_seat==="reviewer"?"is reviewing":st.active_seat==="builder"?"is building on":
-      (st.active_seat==="breaker"||st.active_seat==="verifier")?"is probing":"is working on";
-    const t1=el("span",null,st.active_seat); t1.style.color=color; ti.appendChild(t1);
+    const verb = seat==="reviewer"?"is reviewing":seat==="builder"?"is building on":
+      (seat==="breaker"||seat==="verifier"||isLanes)?"is probing":"is working on";
+    const label=isLanes?"adversarial lanes":seat;
+    const t1=el("span",null,label); t1.style.color=color; ti.appendChild(t1);
     ti.appendChild(document.createTextNode(" "+verb+" "+st.current_hid));
+    const model=isLanes?(seatModel("breaker")||seatModel("verifier")||"opus"):(seatModel(seat)||"");
     const since=Date.parse(st.active_since||st.updated_ts); const elp=(Date.now()-since)/1000, to=st.timeout||0;
-    sub.textContent=(seatModel(st.active_seat)||"")+" · "+fmtdur(elp)+(to?" / "+fmtdur(to):"")+" elapsed";
+    // During the multi-minute closeout the sub-line reads the newest lane event (live play-by-play) instead of
+    // the static "breaker→verifier"; falls back to the static label until the first lane event lands.
+    const laneLine=isLanes?latestLaneLine(s):null;
+    sub.textContent=(isLanes?(laneLine||("breaker→verifier · "+model)):model)+" · "+fmtdur(elp)+(to?" / "+fmtdur(to):"")+" elapsed";
+  } else if(!s.paused && pendingCt>0){
+    // Queued work with NO driver actively running it — show this REGARDLESS of a stale status.phase (a
+    // prior run that already exited leaves phase "done"/"capped"). Actionable: press Start.
+    const qhid=String(((s.board||{}).pending||[])[0].id);
+    color="var(--gpt)"; eb.textContent=pendingCt+" queued · no driver running";
+    ti.textContent=qhid+" is queued — press ▶ Start to run it";
+    sub.textContent="Start launches a watching driver that claims and runs it. (Re-run sends a stuck handoff back to this queue.)";
   } else if(ph==="capped"){
     const err=st.last_error||""; const hm=err.match(/^(\d{1,9})/); const hid=hm?hm[1]:(st.current_hid||"");
     const doneIds=new Set(((s.board||{}).done||[]).concat((s.board||{}).archive||[]).map(h=>h.id));
@@ -798,15 +859,23 @@ function renderHero(s){
       sub.textContent="The capped handoff was approved or finished out of band. Loop idle; start a run to continue."; }
     else{ color="var(--violet)"; eb.textContent="round budget reached · "+(st.round||0)+" / "+(st.max_rounds||0);
       ti.textContent="The gate held. Your call.";
-      const blk=(s.lanes||{}).blockers||0;
-      sub.textContent=(hid?("Handoff "+hid+" was not signed off. "):"")+(blk?(blk+" adversarial finding"+(blk===1?"":"s")+" unresolved. "):"")+"Nothing shipped autonomously — exactly as designed.";
+      const blk=(s.lanes||{}).blockers||0; const laneLine=latestLaneLine(s);
+      sub.textContent=(hid?("Handoff "+hid+" was not signed off. "):"")+(blk?(blk+" adversarial finding"+(blk===1?"":"s")+" unresolved. "):"")+"Nothing shipped autonomously — exactly as designed."+(laneLine?(" Last lane: "+laneLine+"."):"");
       if(hid){ const b1=el("button","primary","Approve "+hid+" → done"); b1.onclick=()=>approve(hid); cta.appendChild(b1);
-        const b2=el("button","warn ghost","Re-queue "+hid); b2.onclick=()=>nudge(hid); cta.appendChild(b2); } }
+        const b2=el("button","warn ghost","↻ Re-run "+hid); b2.onclick=()=>reopen(hid); cta.appendChild(b2); } }
   } else if(ph==="paused"){ color="var(--warn)"; eb.textContent="held"; ti.textContent="Paused";
     sub.textContent="The loop is frozen and fully reversible. Resume when you're ready.";
     const b=el("button","primary","Resume"); b.onclick=()=>ctl("resume"); cta.appendChild(b);
-  } else if(ph==="done"){ color="var(--ok)"; eb.textContent="complete"; ti.textContent="Thread complete";
-    sub.textContent="The board is drained and autopilot is idle.";
+  } else if(ph==="done"){
+    const claimed=(s.board||{}).claimed||[];
+    if(claimed.length){  // "drained" but a handoff is STUCK in claimed (worked, never signed off) — not success
+      const hid=String(claimed[claimed.length-1].id); const blk=(s.lanes||{}).blockers||0;
+      color="var(--violet)"; eb.textContent="idle · "+claimed.length+" stuck";
+      ti.textContent=hid+" is stuck in claimed — NOT shipped";
+      sub.textContent="The run drained but "+hid+" never signed off"+(blk?(" ("+blk+" unresolved finding"+(blk===1?"":"s")+")"):"")+". Re-run it (send-back loop retries) or fix it by hand.";
+      const b=el("button","primary","↻ Re-run "+hid); b.onclick=()=>reopen(hid); cta.appendChild(b);
+    } else { color="var(--ok)"; eb.textContent="complete"; ti.textContent="Thread complete";
+      sub.textContent="The board is drained and autopilot is idle."; }
   } else if(ph==="sleeping"||ph==="idle"){ color="var(--faint)"; eb.textContent=ph; ti.textContent="Idle — watching for work";
     sub.textContent="No pending handoff addressed to a CLI seat right now.";
   } else { color="var(--faint)"; eb.textContent=ph||"—"; ti.textContent="Autopilot"; sub.textContent=""; }
@@ -879,6 +948,7 @@ function renderSeats(s){
   });
 }
 
+let laneOpen=new Set();  // lane names the user expanded — persists across the 1s poll re-render so detail stays open
 function renderLanes(s){
   const L=s.lanes; const card=$("lanesCard"), box=$("lanes"), head=$("lanehead");
   if(!L||!L.lanes||!L.lanes.length){ card.style.display="none"; return; }
@@ -886,16 +956,55 @@ function renderLanes(s){
   const tp=el("span","chip "+(L.tests_passed?"ok":"crit"),L.tests_passed?"tests ✓":"tests ✗"); head.appendChild(tp);
   head.appendChild(el("span","chip "+((L.blockers||0)?"crit":""),(L.blockers||0)+" blocker"+((L.blockers||0)===1?"":"s")));
   box.textContent="";
+  // The ledger carries no run_uid, so a lane panel that predates the current run's start is stale evidence
+  // (generated_ts < status.started_ts). Flag it so a prior run's findings aren't read as this run's.
+  const started=(s.status||{}).started_ts;
+  if(L.generated_ts && started && String(L.generated_ts) < String(started)){
+    const ban=el("div",null,"⚠ Lane results are from a previous run.");
+    ban.style.cssText="margin:0 0 9px;padding:5px 9px;border-radius:6px;font-size:11.5px;background:rgba(230,172,72,.14);color:var(--warn,#e6ac48);";
+    box.appendChild(ban);
+  }
   L.lanes.forEach(ln=>{
-    const hit=(ln.confirmed||0)>0; const d=el("div","lane "+(ln.ran?(hit?"hit":"clean"):""));
+    const hit=(ln.confirmed||0)>0;
+    const cf=ln.confirmed_findings||[], rf=ln.refuted_findings||[]; const hasDetail=(cf.length+rf.length)>0;
+    const wrap=el("div","lanewrap");
+    const d=el("div","lane "+(ln.ran?(hit?"hit":"clean"):""));
     d.appendChild(el("div","verdict",hit?"!":"✓"));
-    const c=el("div","ln"); c.appendChild(el("div","name",ln.lane||"?"));
-    const flow=el("div","flow"); const b=el("span","g",ln.breaker||"breaker"); flow.appendChild(b);
+    const c=el("div","ln"); c.appendChild(el("div","name",(ln.lane||"?")+(hasDetail?"  ▸":"")));
+    const flow=el("div","flow"); flow.appendChild(el("span","g",ln.breaker||"breaker"));
     flow.appendChild(el("span","arrow"," → ")); flow.appendChild(el("span","g",ln.verifier||"verifier")); c.appendChild(flow);
     d.appendChild(c);
     const t=el("div","tally"); t.appendChild(el("span","c",(ln.confirmed||0)+" confirmed")); t.appendChild(el("br"));
     t.appendChild(el("span","r",(ln.refuted||0)+" refuted")); d.appendChild(t);
-    box.appendChild(d);
+    wrap.appendChild(d);
+    if(hasDetail){
+      const key=ln.lane||"?"; const caret=c.querySelector(".name"); const isOpen=laneOpen.has(key);
+      const det=el("div"); det.style.cssText="margin:2px 0 10px;padding:8px 10px;border-radius:6px;background:rgba(128,128,128,.09);";
+      det.style.display=isOpen?"block":"none";
+      // Render a finding as: a colored CONFIRMED/refuted chip, then its segments (file:line → triggers →
+      // breaks) with code paths monospaced. All agent text goes through textContent — never innerHTML.
+      const monoInto=(line,seg)=>{ let last2=0, m2; const re=new RegExp(_PATH_RE.source,"g");
+        while((m2=re.exec(seg))){ if(m2.index>last2) line.appendChild(document.createTextNode(seg.slice(last2,m2.index)));
+          const code=el("code",null,m2[0]); code.style.cssText="font-family:ui-monospace,SFMono-Regular,monospace;background:rgba(128,128,128,.16);padding:0 4px;border-radius:3px;font-size:11px;";
+          line.appendChild(code); last2=m2.index+m2[0].length; }
+        if(last2<seg.length) line.appendChild(document.createTextNode(seg.slice(last2))); };
+      const addF=(txt,confirmed)=>{ const row=el("div");
+        row.style.cssText="margin:0 0 10px;padding:7px 9px;border-radius:6px;background:rgba(128,128,128,.06);";
+        const chip=el("span",null,confirmed?"CONFIRMED":"REFUTED");
+        chip.style.cssText="display:inline-block;font-weight:700;font-size:9.5px;letter-spacing:.06em;padding:1px 7px;border-radius:9px;color:#fff;background:"+(confirmed?"var(--crit,#e5484d)":"var(--ok,#57c46b)")+";";
+        row.appendChild(chip);
+        parseFinding(txt).forEach((seg,i)=>{ const line=el("div"); line.style.cssText="margin:5px 0 0;font-size:11.5px;line-height:1.45;";
+          if(i>0){ const lab=el("span",null,(i===1?"triggers":"breaks")+": "); lab.style.cssText="color:var(--muted,#8c96a8);font-size:10px;"; line.appendChild(lab); }
+          monoInto(line,seg); row.appendChild(line); });
+        det.appendChild(row); };
+      cf.forEach(f=>addF(f,true)); rf.forEach(f=>addF(f,false));
+      if(caret) caret.textContent=key+(isOpen?"  ▾":"  ▸");
+      d.style.cursor="pointer";
+      d.onclick=()=>{ const open=!laneOpen.has(key); if(open) laneOpen.add(key); else laneOpen.delete(key);
+        det.style.display=open?"block":"none"; if(caret) caret.textContent=key+(open?"  ▾":"  ▸"); };
+      wrap.appendChild(det);
+    }
+    box.appendChild(wrap);
   });
 }
 
@@ -930,6 +1039,7 @@ function evIcon(ev){ const dec=ev.decision||{}, act=dec.action||"", stage=ev.sta
   if(stage==="autopilot.lane"&&act==="breaker") return ["🔨","role-g"];
   if(stage==="autopilot.lane") return ["⚖","v-violet"];
   if(stage==="autopilot.autonomous_done"||stage==="handoff.done") return ["✓✓","v-ok"];
+  if(stage==="autopilot.sendback") return ["🔁","v-crit"];
   if(stage==="autopilot.signoff_blocked") return ["⛔","v-crit"];
   if(stage==="autopilot.pause") return ["⏸","v-violet"];
   if(stage==="autopilot.control") return ["·","v-warn"];
@@ -955,6 +1065,9 @@ function evMsg(ev){ const dec=ev.decision||{}, act=dec.action||"", stage=ev.stag
     const cf=(rc.find(x=>x.indexOf("confirmed:")===0)||"confirmed:0").slice(10); const rf=(rc.find(x=>x.indexOf("refuted:")===0)||"refuted:0").slice(8);
     return wrap("lane "+ln+" done · ", el("span","v-crit",cf+" confirmed"), " / ", el("span","v-ok",rf+" refuted")); }
   if(stage==="autopilot.autonomous_done") return wrap(el("b","v-ok",art+" SIGNED OFF → done"));
+  if(stage==="autopilot.sendback"){ const n=(rc.find(x=>x.indexOf("defects:")===0)||"defects:?").slice(8);
+    const sb=(rc.find(x=>x.indexOf("sendback:")===0)||"sendback:?").slice(9);
+    return wrap(el("b","v-crit","sent back to builder")," — send-back #"+sb+", "+n+" defect"+(n==="1"?"":"s")); }
   if(stage==="autopilot.signoff_blocked") return wrap(b(art)," sign-off blocked: ", el("span","v-crit",rc.join(", ").slice(0,60)));
   if(stage==="autopilot.pause") return wrap(el("b","v-violet","round budget reached")," — awaiting human"+(art?" on "+art:""));
   if(stage==="autopilot.control") return wrap("· "+act+" ("+role+")");
@@ -984,7 +1097,10 @@ function renderFeed(s){
 
 // ---- max-turns (round budget) ------------------------------------------- //
 function fmtDurMs(ms){ if(ms==null) return "-"; return fmtdur(ms/1000); }
-function shortId(u){ return u? String(u).slice(0,10) : "—"; }
+function shortId(u){ if(!u) return "—"; const m=String(u).match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})\d{2}Z?-(\d+)$/);
+  if(m){ const mo=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][(+m[2])-1]||m[2];
+    return mo+" "+m[3]+" "+m[4]+":"+m[5]+" · "+m[6]; }   // "20260711T175411Z-76072" -> "Jul 11 17:54 · 76072"
+  return String(u).slice(0,10); }
 function syncTurns(s){
   const inp=$("maxturns");
   // CRITICAL focus guard (mirrors the renderSeats <select> guard): if the operator is typing in the

@@ -247,12 +247,37 @@ def _deliverable_lines(text: str, cap: int = 8) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def _run_label(uid: str | None, started: str | None) -> str:
-    if uid and started:
-        return f"run {str(uid)[:15]} · started {started}"
-    if uid:
-        return f"run {str(uid)[:15]}"
-    return "the live run"
+def _clock(started: str | None) -> str:
+    """A plain ``HH:MM`` clock from an ISO-ish timestamp (best-effort; the raw string if it can't be parsed)."""
+    s = str(started or "")
+    return s[11:16] if ("T" in s and len(s) >= 16) else s
+
+
+def _run_label(uid: str | None, started: str | None, is_current: bool = False) -> str:
+    """A human run label: ``Current run`` / ``Previous run`` + a plain clock time, instead of a raw run_uid +
+    ISO timestamp. ``is_current`` is decided by the caller (:func:`_choose_events` — the live run when its
+    turns post-date ``status.started_ts``)."""
+    if not uid and not started:
+        return "the live run"
+    who = "Current run" if is_current else "Previous run"
+    clk = _clock(started)
+    return f"{who} · {clk}" if clk else who
+
+
+_CONF_RE = re.compile(r"^\s*[-*]\s*\[\s*(met|partial|missing)\s*\]\s*(.+?)\s*$", re.IGNORECASE)
+
+
+def _conformance(text: str | None) -> list[dict]:
+    """Parse a reviewer's spec-conformance itemization from a reply — lines of the form
+    ``- [met|partial|missing] <item>`` (the reviewer checks each ADR-contract / Definition-of-done item against
+    the diff). Returns ``[{status, item}, …]``; ``[]`` if none. Advisory evidence: surfaced in the summary,
+    NOT gated on by the done-contract (a reviewer that ignores its own itemization can still sign off)."""
+    out: list[dict] = []
+    for line in str(text or "").splitlines():
+        m = _CONF_RE.match(line)
+        if m:
+            out.append({"status": m.group(1).lower(), "item": m.group(2).strip()})
+    return out
 
 
 def _read_status(collab) -> dict:
@@ -285,10 +310,10 @@ def _choose_events(collab, hid: str) -> tuple:
     if started:
         live = [e for e in log_events if str(e.get("ts") or "") >= str(started)]
         if any(_is_turn(e, hid) for e in live):
-            return _run_label(_read_status(collab).get("run_uid"), started), live
+            return _run_label(_read_status(collab).get("run_uid"), started, is_current=True), live
     for uid, s, events in _run_feeds(collab):
         if any(_is_turn(e, hid) for e in events):
-            return _run_label(uid, s), events
+            return _run_label(uid, s, is_current=False), events
     return "the live run", log_events
 
 
@@ -320,12 +345,17 @@ def collect(collab, hid: str) -> dict:
     run_label, events = _choose_events(collab, hid)
     models = _model_map(collab)
     turns = []
+    conformance: list[dict] = []  # the reviewer's spec-conformance itemization (last review that emits one wins)
     for ev in events:
         if not _is_turn(ev, hid):
             continue
         metrics = ev.get("metrics") or {}
         role = ev.get("role") or "?"
-        gist, blocker = _gist(_read_reply(collab, _reply_relpath(ev)), limit=280)
+        reply_text = _read_reply(collab, _reply_relpath(ev))
+        gist, blocker = _gist(reply_text, limit=280)
+        conf = _conformance(reply_text)
+        if conf:
+            conformance = conf  # events are oldest-first -> the final reviewer sign-off's itemization stands
         turns.append({
             "round": _round_of(ev),
             "role": role,
@@ -361,6 +391,9 @@ def collect(collab, hid: str) -> dict:
         "depends_on": _as_list(fm.get("depends_on")),
         "adr": fm.get("adr"),
         "deliverables": _deliverable_lines(sections.get("Deliverables", "")),
+        "dod": _deliverable_lines(sections.get("Definition of done", "")),
+        "contract": _deliverable_lines(sections.get("The contract (ADR decisions)", "")),
+        "conformance": conformance,
         "run_label": run_label,
         "turns": turns,
         "last_turn": {"gist": last_gist, "blocker": last_blocker} if turns else None,
@@ -450,6 +483,14 @@ def render_markdown(d: dict) -> str:
             L.append(f"- {item}")
         L.append("")
 
+    if d.get("contract") or d.get("dod"):
+        L.append("## The contract & definition of done")
+        for item in d.get("contract") or []:
+            L.append(f"- {item}")
+        for item in d.get("dod") or []:
+            L.append(f"- {item}")
+        L.append("")
+
     if d.get("turns"):
         L.append(f"## How it unfolded — {d['run_label']}")
         for t in d["turns"]:
@@ -476,6 +517,13 @@ def render_markdown(d: dict) -> str:
     L.append(f"- Tests: {'passed' if tp is True else ('failed' if tp is False else 'not recorded')}")
     if d["signoff_blocked"]:
         L.append(f"- Sign-off blocked: {'; '.join(d['signoff_blocked'])[:200]}")
+    if d.get("conformance"):
+        marks = {"met": "✓", "partial": "~", "missing": "✗"}
+        missing = sum(1 for c in d["conformance"] if c["status"] in ("partial", "missing"))
+        L.append(f"- Spec conformance (reviewer itemization) — {len(d['conformance'])} items, "
+                 f"{missing} unmet:")
+        for c in d["conformance"]:
+            L.append(f"    - {marks.get(c['status'], '•')} **{c['status']}** — {c['item']}")
     L.append("")
     L.append(f"_Full evidence audit: `closeout-report <collab> {hid}`._")
     L.append(_END.format(hid=hid))
