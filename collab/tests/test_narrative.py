@@ -257,6 +257,46 @@ class TestWrite:
 
 
 class TestUnits:
+    def test_conformance_parses_met_partial_missing(self):
+        text = ("Reviewed the diff against the ADR + DoD.\n"
+                "- [met] snapshot is frozen (ADR-0001 §3)\n"
+                "* [Partial] retry backoff only half-wired\n"
+                "-  [missing]  regression test for the skew path\n"
+                "not a conformance line at all\n"
+                "[[SIGNOFF]]")
+        out = narrative._conformance(text)
+        assert [c["status"] for c in out] == ["met", "partial", "missing"]
+        assert out[2]["item"] == "regression test for the skew path"
+
+    def test_conformance_empty_when_absent(self):
+        assert narrative._conformance("Looks good to me.\n[[SIGNOFF]]") == []
+        assert narrative._conformance(None) == []
+
+    def test_clock_extracts_hh_mm(self):
+        assert narrative._clock("2026-07-09T00:18:44Z") == "00:18"
+        assert narrative._clock("nonsense") == "nonsense"
+        assert narrative._clock(None) == ""
+
+    def test_run_label_current_vs_previous(self):
+        assert narrative._run_label("20260709T001844Z-42", "2026-07-09T00:18:44Z", is_current=True) \
+            == "Current run · 00:18"
+        assert narrative._run_label("20260709T001844Z-42", "2026-07-09T00:18:44Z", is_current=False) \
+            == "Previous run · 00:18"
+        assert narrative._run_label(None, None) == "the live run"
+
+    def test_render_surfaces_conformance_and_dod(self):
+        d = {"hid": "001", "title": "t", "state": "done", "why": "", "guardrails": [], "depends_on": [],
+             "adr": None, "deliverables": [], "dod": ["frozen snapshot", "retry backoff"],
+             "contract": ["ADR-0001 §3 decision"], "conformance": [{"status": "met", "item": "snapshot frozen"},
+             {"status": "missing", "item": "skew regression"}], "run_label": "Current run · 00:18", "turns": [],
+             "last_turn": None, "signed_off": True, "closed_autonomously": True, "tests_passed": True,
+             "capped": False, "signoff_blocked": [], "escalated": False}
+        md = narrative.render_markdown(d)
+        assert "## The contract & definition of done" in md
+        assert "ADR-0001 §3 decision" in md and "retry backoff" in md
+        assert "Spec conformance (reviewer itemization) — 2 items, 1 unmet" in md
+        assert "✓ **met** — snapshot frozen" in md and "✗ **missing** — skew regression" in md
+
     def test_as_list_handles_both_spellings(self):
         assert narrative._as_list(["a", "b"]) == ["a", "b"]
         assert narrative._as_list("[PT-1 x, PT-2 y]") == ["PT-1 x", "PT-2 y"]
