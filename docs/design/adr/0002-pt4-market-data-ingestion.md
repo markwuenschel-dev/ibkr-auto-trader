@@ -1,7 +1,14 @@
 # ADR 0002 — PT-4 Market-Data Ingestion
 
-- **Status:** Proposed — design sealed after a grilling session 2026-07-10; implementation pending. Amends
+- **Status:** Accepted — design signed off 2026-07-11 (sealed in a 2026-07-10 grilling session);
+  implementation pending (handoffs 029/032/033). Amends
   [ADR-0001](0001-pt3-ibkr-account-gateway.md) ①/⑤/⑥/⑧/⑨ (see that file's *Amendment* section).
+  **Revised by [ADR-0003](0003-pt5-rules-ledger.md) (PT-5, Accepted 2026-07-11):** the `RiskContext`
+  shape in Decisions ③/⑬ is superseded — the three conId-keyed dicts (`positions`/`prices`/`data_as_of`)
+  collapse into a single `holdings: Mapping[InstrumentId, HoldingValuation]` with `positions` *derived*
+  (kills parallel-map key/quantity drift; surfaces per-holding `valuation_status` + `broker_market_value`
+  to PT-5 without leaking `AccountSnapshot` across the Risk & Sizing seam). `valuation_status` is
+  canonically `AVAILABLE | UNAVAILABLE`. See ADR-0003 Decision 4.
 - **Slice:** PT-4 (market-data ingestion → the sealed, causal `RiskContext`).
 - **Depends on:** PT-1 (domain models), PT-3 (`AccountGateway`, injected `Clock`, read-only session).
 - **Companion:** `trading-system-design.md` §5, §6.4, §7; `paper-trading-roadmap.md`; `glossary.md` (PT-4
@@ -209,7 +216,7 @@ durations. Session: `session.pacing` (queue delay / rejection), `session.generat
 
 The grill widened this past the original 8 lanes; it now spans PT-1/PT-2/PT-3 as well as PT-4 (all cheap
 now — nothing downstream consumes them yet). Docs (this ADR, the ADR-0001 amendment, the glossary PT-4
-section) are already written as part of this Proposed change.
+section) are already written as part of this change.
 
 | Lane | Deliverable |
 |---|---|
