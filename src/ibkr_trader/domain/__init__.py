@@ -1,8 +1,8 @@
-"""domain — frozen pydantic models + the type-gated constructibility seams (PT-1).
+"""Frozen domain facts and mint seams.
 
-Home of RiskContext, StrategyIntent, RiskPlan, ApprovedOrderIntent, ExecutableOrder, Fill/Ack. The
-safety seam lives here: ApprovedOrderIntent/ExecutableOrder have no strategy-usable constructor, so a
-strategy can never mint an executable order (§2 constructibility rule).
+``ASSEMBLER_AUTHORITY`` is intentionally not exported: the decision-context
+assembler is its designated issuer.  Risk and execution authorities remain
+public until the release-gate issuer-containment work lands.
 """
 
 from .models import (
@@ -12,11 +12,16 @@ from .models import (
     ApprovedOrderIntent,
     ExecutableOrder,
     Fill,
+    HoldingValuation,
+    InstrumentId,
+    InstrumentRef,
+    InstrumentResolver,
     MintAuthority,
     RiskContext,
     RiskPlan,
     Side,
     StrategyIntent,
+    ValuationStatus,
 )
 
 __all__ = [
@@ -26,9 +31,14 @@ __all__ = [
     "ApprovedOrderIntent",
     "ExecutableOrder",
     "Fill",
+    "HoldingValuation",
+    "InstrumentId",
+    "InstrumentRef",
+    "InstrumentResolver",
     "MintAuthority",
     "RiskContext",
     "RiskPlan",
     "Side",
     "StrategyIntent",
+    "ValuationStatus",
 ]

@@ -18,8 +18,27 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 SCHEMA_VERSION = "0.1"
+
+
+@runtime_checkable
+class TelemetrySink(Protocol):
+    """The narrow §8 emit seam a producer depends on (never the whole ``Emitter``).
+
+    Best-effort by contract: a sink call must never break the producer's path. Only the fields producers
+    actually populate are named; the concrete ``Emitter`` accepts the full envelope.
+    """
+
+    def emit(
+        self,
+        *,
+        stage: str,
+        agent_role: str | None = ...,
+        task_id: str | None = ...,
+        metrics: dict | None = ...,
+    ) -> None: ...
 
 # The decision actions the control plane may record (Reusable Core §8 envelope).
 ACTIONS = ("accept", "revise", "reject", "escalate", "skip", "waive")

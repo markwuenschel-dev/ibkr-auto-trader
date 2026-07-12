@@ -9,12 +9,14 @@ the reactive drop path with zero wall-clock (inject a no-op ``sleep``).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 
 from ..config import Mode
+from ..telemetry import TelemetrySink
 from .config import IbkrConnectionConfig
-from .gateway import Clock, _BaseAccountGateway
+from .gateway import Clock, HeldPosition, _BaseAccountGateway, _PositionStore
+from .session import Session
 
 
 async def _noop_sleep(_seconds: float) -> None:
@@ -25,9 +27,10 @@ async def _noop_sleep(_seconds: float) -> None:
 class FakeAccountGateway(_BaseAccountGateway):
     """A deterministic ``AccountGateway`` backed by in-memory dicts.
 
-    Set ``summary`` (tag -> string value), ``positions`` (symbol -> signed int), ``accounts`` (what
-    ``getAccounts()`` would return) and, optionally, ``broker_time`` (to exercise clock-skew). The gateway
-    resolves/maps/reconciles exactly as the live one does.
+    Set ``summary`` (tag -> string value), ``held`` (a list of ``HeldPosition``, conId-keyed inventory),
+    ``accounts`` (what ``getAccounts()`` would return) and, optionally, ``broker_time`` (to exercise
+    clock-skew). The gateway resolves/maps/reconciles exactly as the live one does. Inject a ``session`` to
+    share a generation with a fake market feed (exercises the assembler's reconnect fence).
     """
 
     def __init__(
@@ -36,11 +39,12 @@ class FakeAccountGateway(_BaseAccountGateway):
         config: IbkrConnectionConfig | None = None,
         mode: Mode = Mode.PAPER,
         clock: Clock | None = None,
-        store: object | None = None,
-        emitter: object | None = None,
+        store: _PositionStore | None = None,
+        emitter: TelemetrySink | None = None,
+        session: Session | None = None,
         accounts: list[str] | None = None,
         summary: Mapping[str, object] | None = None,
-        positions: Mapping[str, object] | None = None,
+        held: Iterable[HeldPosition] | None = None,
         broker_time: datetime | None = None,
         **kwargs: object,
     ) -> None:
@@ -50,13 +54,14 @@ class FakeAccountGateway(_BaseAccountGateway):
             clock=clock,
             store=store,
             emitter=emitter,
+            session=session,
             sleep=kwargs.pop("sleep", None) or _noop_sleep,  # type: ignore[arg-type]
             **kwargs,  # type: ignore[arg-type]
         )
         # ``getAccounts()`` default: a single DU paper account, so the happy path needs no wiring.
         self.accounts: list[str] = accounts if accounts is not None else ["DU1234567"]
         self.summary: dict[str, object] = dict(summary or {})
-        self.positions: dict[str, object] = dict(positions or {})
+        self.held: list[HeldPosition] = list(held or [])
         self.broker_time: datetime | None = broker_time
         #: How many upcoming ``_raw_connect`` calls should fail (models a flaky socket for backoff tests).
         self._pending_connect_failures = 0
@@ -97,8 +102,8 @@ class FakeAccountGateway(_BaseAccountGateway):
     async def _fetch_summary(self) -> Mapping[str, object]:
         return dict(self.summary)
 
-    async def _fetch_positions(self) -> Mapping[str, object]:
-        return dict(self.positions)
+    async def _fetch_held_positions(self) -> Iterable[HeldPosition]:
+        return list(self.held)
 
     async def _fetch_broker_time(self) -> datetime | None:
         return self.broker_time

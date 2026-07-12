@@ -14,12 +14,19 @@ Approved design: Design B with a single facade.
 RiskSizing.decide(intent, context) -> ApprovalDecision
 ```
 
-Internally, the facade delegates to a planner and approver:
+Internally, the facade delegates to a planner and approver (ADR-0003, recompute-for-authority):
 
 ```text
-RiskPlanner.plan(intent, context) -> ProposedTradePlan
-RiskApprover.approve(plan, context, rules_ledger) -> ApprovalDecision
+RiskSizing.decide(intent, context, control_state) -> ApprovalDecision
+RiskPlanner.plan(intent, context, control_state) -> RiskPlan     # owns reduction/rounding/decline
+RiskApprover.approve(plan, context, control_state) -> ApprovalDecision
 ```
+
+The approver recomputes a `VerifiedProjection` from canonical order terms and runs the ledger over
+`RiskEvaluation(plan, context, control_state, verified_projection)`; the plan's own `planner_projection`
+is non-authoritative evidence. A planner-vs-verified mismatch is a hard reject + alarm, never a silent
+repair. Control-plane facts (mode elsewhere, reviewed `RiskPolicy`, Eastern `session_date`, realized daily
+P&L) live in `RiskControlState`, separate from the sealed causal `RiskContext`.
 
 ### Risk Planner
 
@@ -31,7 +38,15 @@ The internal part of Risk & Sizing that decides whether a proposed trade plan ma
 
 ### Rules Ledger
 
-The explicit, auditable list of risk rules evaluated by the Risk Approver. Initial rules include paper-first mode, 1% max risk per trade, 3% daily loss limit, buying power, maintenance margin, leverage cap, stop-loss requirement, no direct strategy orders, causal data only, duplicate order prevention, concentration checks, taxable account guardrails, and audit completeness.
+The explicit, auditable list of risk rules evaluated by the Risk Approver — each a pure predicate over the
+`RiskEvaluation` tuple. **Active v1 (ADR-0003):** max-risk-per-trade, daily-realized-opening-lockout
+(Control 1), buying-power (incremental debit), leverage-cap (fail-closed on unpriced holdings),
+stop-loss-required, causal-data-only (belt), unvalued-holding reduce-only, concentration (target-weight
+fallback), maintenance-margin (degraded current-headroom), and session-drawdown-breaker (Control 2 —
+detect+alarm active, enforcement dark until `pct_d` calibrated). **Relocated/out of the ledger:**
+paper-first → Mode Controller/Execution Control; duplicate-prevention → Execution Control (durable
+submission state machine); no-direct-strategy-orders → cross-cutting release gate; audit-completeness →
+the mint is contingent on a durable audit write (PT-7/PT-12); taxable-account-guardrails → deferred.
 
 ## Core Risk Objects
 
@@ -41,7 +56,18 @@ A non-executable request from a strategy. It describes desired exposure, symbol,
 
 ### Risk Context
 
-The causal snapshot used by Risk & Sizing: trading mode, clock, account equity, Net Liquidation Value, buying power, margin, daily P&L, positions, open orders, market data, and risk config.
+The **sealed causal snapshot** used by Risk & Sizing (ADR-0002/0003; `ASSEMBLER_AUTHORITY`-minted): `as_of`
+(the decision seal), `account_observed_at`, Net Liquidation Value, buying power, maintenance margin, per-
+instrument `prices`/`price_basis`/`data_as_of`, and a `holdings` map (`InstrumentId → HoldingValuation`
+carrying quantity, `ValuationStatus`, `broker_market_value`, `mark_available_at`) from which `positions`
+is derived. It carries **only decision-data facts** — trading mode, reviewed limits, Eastern session date,
+and realized daily P&L are control-plane facts and live in `RiskControlState`, not here.
+
+### Risk Control State
+
+The control-plane decision input owned by PT-5, separate from the sealed `RiskContext`: the reviewed
+versioned `RiskPolicy`, the canonical US/Eastern `session_date`, `realized_daily_pnl`, and `observed_at`.
+Excludes `mode` (Mode Controller owns it) and reservation/idempotency state (Execution Control owns it).
 
 ### Proposed Trade Plan
 
@@ -49,7 +75,7 @@ The planner output: estimated quantity, notional, entry price, stop price, max l
 
 ### Approval Decision
 
-The approver output. It records whether the proposed trade plan is approved, reduced, rejected, or requires pause, plus rule results and audit evidence.
+The approver output. Verdict is `APPROVED | REJECTED` only (no `reduced`, no `requires pause` — the planner owns reduction; mode/operational pause live elsewhere). It records the verdict, plan/context digests, the full tuple of rule results, an audit ref, and the minted `ApprovedOrderIntent` if approved.
 
 ### Approved Order Intent
 
@@ -88,7 +114,8 @@ The only object an execution adapter may send. It can exist only after Execution
 - Every executable order must pass through Execution Control.
 - Execution adapters accept only executable orders.
 - Approved risk per trade must be at most 1% of current equity.
-- New opening risk is rejected when daily loss reaches 3%.
+- New opening risk is rejected when the **realized** daily loss reaches `pct_a` of session-start equity E0 (Control 1); strict risk-reducing exits remain eligible.
+- A **session drawdown breaker** on total equity `(NLV−E0)/E0 ≤ −pct_d` de-risks the book (Control 2); it detects+alarms in v1 and enforces once `pct_d` is paper-calibrated.
 - Live mode is rejected unless explicitly enabled by reviewed config and approved workflow state.
 - Backtest, paper, and live paths use the same Risk & Sizing implementation.
 - Market data must be causal at decision time.

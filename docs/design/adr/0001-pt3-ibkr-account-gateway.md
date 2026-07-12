@@ -1,7 +1,7 @@
 # ADR 0001 — PT-3 IBKR Account Gateway
 
 - **Status:** Accepted — design signed off after a grilling session 2026-07-09; implemented (handoff 028).
-  **Amended by [ADR-0002](0002-pt4-market-data-ingestion.md) (PT-4, Proposed 2026-07-10)** — see the
+  **Amended by [ADR-0002](0002-pt4-market-data-ingestion.md) (PT-4, Accepted 2026-07-11)** — see the
   *Amendment* section at the foot of this file.
 - **Slice:** PT-3 (IBKR connection/session → account snapshot → `AccountSnapshot`).
 - **Depends on:** PT-1 (domain models, `RiskContext`), PT-2 (SQLite state store, positions cache).
@@ -95,7 +95,7 @@ paper-first; a live IB Gateway is external I/O that can't be unit-tested directl
 - `Watchdog`/IBC auto-Gateway-restart (PT-13/ops). Shared rate-limiter (PT-4). Writable execution session
   (PT-10). Pause-on-dirty-reconciliation policy (PT-8).
 
-## Amendment (ADR-0002, PT-4 — Proposed 2026-07-10)
+## Amendment (ADR-0002, PT-4 — Accepted 2026-07-11)
 
 The PT-4 grilling revised four PT-3 decisions. Recorded here so this ADR stays honest; the changes land as
 part of the PT-4 mission (which necessarily reaches back into PT-3, since no downstream slice consumes PT-3

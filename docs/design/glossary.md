@@ -83,8 +83,10 @@ PT-3 grilling (2026-07-09); grows per slice.
   **not** `quantity × price` — that preserves broker multipliers/valuation treatment. Sourced from
   `ib.portfolio()`, **but not by blindly swapping `positions()`→`portfolio()`**: the session must warm +
   **verify the account-update subscription**, then **reconcile portfolio inventory against position
-  inventory** (a third reconciliation, alongside broker-vs-PT-2-cache). `valuation_status` is `VALUED` or
-  `UNVALUED_HELD_POSITION`.
+  inventory** (a third reconciliation, alongside broker-vs-PT-2-cache). `valuation_status` is canonically
+  `AVAILABLE | UNAVAILABLE` (see `ValuationStatus`; PT-5). **`AccountSnapshot` stays internal to the
+  assembler — `HeldPosition` never crosses the Risk & Sizing seam;** its valuation view is surfaced to PT-5
+  on the sealed `RiskContext.holdings` (see *`RiskContext.holdings`*, PT-5). See [[ADR-0003]].
 - **mark_available_at ≠ observed_at** — a held mark's availability is the **receipt time of its
   `updatePortfolio` event**, tracked per-event in `IbkrSession`, **not** the account read time. `ib_async`
   keeps portfolio as a cache populated by account updates, and IBKR portfolio/P&L updates *lag* (on a trade,
@@ -174,3 +176,102 @@ PT-3 grilling (2026-07-09); grows per slice.
   **class/cost**, emit **queue-delay + rejection telemetry**, keep capture fully serialized until real
   streaming demand justifies measurement-backed concurrency. A future streaming feed = a *second*
   `IbkrSession` + clientId + its own gate, never a feed-to-gateway backchannel.
+
+## PT-5 — Risk & Sizing / Rules Ledger (grilled 2026-07-11)
+
+- **InstrumentId vs InstrumentRef** — **`InstrumentId`** is the broker `conId` used as the *set key*
+  (positions, prices, quotes, `RiskContext.holdings`); **`InstrumentRef`** is the resolved descriptor
+  (≥ `con_id`, display `symbol`, security type, exchange) a resolver produces before a target may enter
+  `capture()`. Both coexist: the map key is the id, the descriptor carries display/routing metadata. See
+  [[ADR-0002]] Decision 13, [[ADR-0003]].
+- **`RiskContext.holdings`** — the sealed per-holding valuation view PT-5 reads:
+  `Mapping[InstrumentId, HoldingValuation{quantity, status, broker_market_value?, mark_available_at?}]`.
+  **Supersedes** ADR-0002's three parallel conId-keyed dicts (`positions`/`prices`/`data_as_of`) — one map
+  kills key/quantity drift, and **`positions` is *derived* from `holdings`, not separately authoritative**.
+  `RiskContext` is now `_MintGuarded` by `ASSEMBLER_AUTHORITY`. See [[ADR-0003]] Decision 4.
+- **ValuationStatus (`AVAILABLE | UNAVAILABLE`)** — a holding's valuation health. `AVAILABLE` requires a
+  non-null `broker_market_value` **and** UTC `mark_available_at ≤ as_of`; `UNAVAILABLE` carries **no
+  fabricated zero, no quote fallback, no last-value-forward**. Drives the unvalued-holding reduce-only rule.
+- **`SNAPSHOT_INCOMPLETE`** — an incomplete/unreconciled broker inventory ⇒ **mint no `RiskContext`, place
+  no automated order** (fail-closed). Distinct from a per-holding `UNAVAILABLE` valuation (the inventory is
+  known, one mark is not).
+- **Recompute-for-authority (Option C)** — the Risk Approver **recomputes** every projection from
+  **canonical order terms** (the `VerifiedProjection`) and treats the planner's figures as *evidence only*.
+  A planner-vs-verified mismatch is a **hard `REJECTED` + alarm — never a silent repair**. The safety gate
+  never trusts the planner. See [[ADR-0003]] Decision 1.
+- **PortfolioProjector** — one **deep, pure** module invoked **twice**: the planner uses it to *select* a
+  candidate, the approver invokes it again on canonical terms to *verify*. It uses **`broker_market_value`**
+  for existing holdings (never `quantity × price`), and **fails closed on any unpriced holding**.
+- **VerifiedProjection** — the **authoritative** derived figures the rules read: notional, incremental
+  buying-power debit, resulting gross leverage (`Σ abs(broker_market_value)`), resulting margin headroom,
+  resulting concentration, max-loss-if-stopped. Distinct from the plan's non-authoritative
+  `planner_projection`.
+- **RiskEvaluation** — the rule input tuple `(plan, context, control_state, verified_projection)`. Every
+  active rule is a **pure predicate** over it. `AccountSnapshot` is **not** a member (Decision 3).
+- **ApprovalVerdict (`APPROVED | REJECTED`)** — the whole verdict space. **No `REDUCED`, no
+  `REPLAN_REQUIRED`, no approver-computed quantity hint.** All reduction/rounding/decline is the
+  **planner's** job; the approver verifies a *fixed* plan. `PAUSED` is **not** a verdict (mode halts are
+  Execution Control; durable operational pause is PT-13). See [[ADR-0003]] Decision 2.
+- **RiskPolicy** — the reviewed, **versioned, `Decimal`** limits object (replaces the float `RiskLimits` at
+  `config.py:45`): `version`, `max_risk_per_trade`, `daily_realized_lockout_pct` (`pct_a`),
+  `session_drawdown_pct` (`pct_d`), `leverage_cap`, `stop_loss_required`. `policy.version` binds into every
+  plan + decision. `ConcentrationPolicy` is added only when fully defined.
+- **RiskControlState** — the **control-plane** decision input, owned by PT-5, *separate* from the sealed
+  `RiskContext`: `{policy, session_date, realized_daily_pnl, observed_at}`. **`mode` is not here**
+  (ModeController owns it); **reservation/idempotency state is not here** (Execution Control owns it).
+  Control-plane facts have different freshness + ownership than the causal snapshot — which is why the PT-4
+  assembler must **not** own daily P&L or mode.
+- **E0 / session-start equity** — the **fixed, auditable reference** the daily-loss control divides by
+  (`realized_daily_pnl ≤ −pct_a·E0`). Chosen over current NLV because a *change-from-reference* metric
+  needs a **stateable line** (realized-loss-over-total-equity is dimensionally incoherent), **not** because
+  current NLV is "circular" (it trips marginally *earlier*, not later). **Hard contract:** captured
+  **once**, persisted **insert-if-absent** (restarts *read*, never re-anchor), read as **`Decimal | None`**
+  (absent ⇒ **fail closed**), keyed to the canonical Eastern `session_date`. See [[ADR-0003]] Decision 6.
+- **session_date (US/Eastern) & the lockstep** — the one canonical trading-session date shared by the E0
+  baseline **and** the realized-P&L numerator, so they can never straddle the **UTC-midnight** boundary and
+  silently disable the lockout during evening trading. A **DST-aware Eastern `session_date()`** is owed by
+  the Risk layer. **This lockstep is the property most likely to fail at production scale** — engineered
+  hardest. (PT-2's store defaults to UTC-day, so the policy must *supply* the session day; `store.py:134`.)
+- **Equity denominator (split, not uniform)** — `daily-loss` uses **E0**; **`leverage-cap` uses current
+  NLV** (definitional present-tense solvency); **`max-risk-per-trade` uses current NLV** (pre-decided spec;
+  its auto-de-risking as equity falls is intentional). Uniform-E0 is rejected.
+- **Control 1 — daily-realized-opening-lockout** — `realized_daily_pnl ≤ −pct_a·E0` ⇒ `REDUCE_ONLY`.
+  Realized numerator from the durable store; **active in v1** (no price dependency). An honest
+  *opening-risk* gate — knowingly blind to unrealized bleed (that is Control 2's job).
+- **Control 2 — session-drawdown-breaker** — `(NLV − E0)/E0 ≤ −pct_d` ⇒ `REDUCE_ONLY` + alarm, escalate
+  to PT-13. Numerator is broker **`NetLiquidation`** (delivered by PT-3 today; ADR-0002 ⑫ holds it *more*
+  complete than `Σ broker_market_value`) — so **detection ships in v1, not PT-4-gated**. **Enforcement
+  ships dark** (detect + telemetry) until PAPER telemetry sets `pct_d`; **an armed breaker is a LIVE
+  prerequisite**. **Stateless-recompute** (restart-surviving without PT-13).
+- **pct_a vs pct_d (independent, unequally defaulted)** — `pct_a ≈ 3%` realized is fine; **`pct_d` must be
+  a wider, evidence-calibrated tail stop** — an equal-3% total-drawdown breaker would **fight the
+  rebalancer**, forcing sell-into-weakness on the dips a contrarian rebalance exists to buy. **No ordering
+  invariant** between them. `pct_d` calibration is the design's **top open risk**.
+- **REDUCE_ONLY (three-rung ladder, one primitive)** — `abs(resulting_qty) < abs(current_qty)` **and no
+  zero-crossing**; **enforced at the mint seam, latched per session, no auto-flatten**. One definition
+  shared by three producers: Control 1, Control 2, and the unvalued-holding rule. A drawdown breach
+  **de-risks, never freezes** (freezing traps risk, contradicting "never leave open risky positions"). A
+  harder `PAUSED`/`KILL_SWITCHED` blocking even reductions is reserved for a **separate
+  integrity/dislocation trigger**, never drawdown.
+- **Concentration — target-weight fallback** — active rule: the ceiling defaults to the **strategy's
+  declared target weight + drift band** (from PT-11). An **exact** bound (not an approximation), just
+  sourced from the strategy. **Dependency:** binds *only while the strategy declares weights* — a strategy
+  emitting intents without weights forces **reject-as-unconfigured**. **Resolution gate:** an explicit
+  `ConcentrationPolicy` supersedes it (no LIVE gate).
+- **Maintenance-margin — degraded current-headroom** — active but **conservative**: reject if current
+  maintenance headroom minus the order's notional impact falls under a policy cushion. **Only exact for
+  plain long equity** (linear); for shorts/options/portfolio-margin it **over-rejects**. **Resolution
+  gate:** the **IBKR what-if order-preview seam** — required before LIVE and any short/options/complex.
+  Distinct from **buying-power**, which is *fully computable in v1* (no Open) as an **incremental BP debit**
+  (not naïve notional) against `context.buying_power`.
+- **Reject-as-unconfigured** — the standing rule for a policy-blocked check: an unconfigured rule
+  (concentration without weights, freshness without thresholds) **rejects**; it **never silently
+  approximates**. Fail-closed by default.
+- **no-direct-strategy-orders (release gate, not structural)** — removed from the ledger but **not**
+  "already guaranteed": an **unsatisfied cross-cutting release gate** needing process isolation for
+  untrusted strategies, issuer containment, adapter runtime checks, and bypass tests. The mint seam is a
+  **provenance / accidental-bypass control, not a security boundary** — `model_construct()` and
+  public-authority imports bypass it. A **LIVE gate**.
+- **Durable-audit-contingent mint** — an `ApprovedOrderIntent` is minted **only after** a durable audit
+  write succeeds (PT-7/PT-12). `audit-completeness` is therefore **not** a ledger predicate — a
+  durable-audit-write failure mints nothing.

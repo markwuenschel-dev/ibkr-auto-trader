@@ -87,28 +87,35 @@ a `ProposedTradePlan` that is still non-executable.
 Runs the **Rules Ledger** over `(plan, context)` and emits an `ApprovalDecision`. A rejection carries
 the same audit weight as an approval.
 
-### 3.3 Rules Ledger (data-driven)
+### 3.3 Rules Ledger (data-driven) **[DECIDED: ADR-0003, PT-5 — recompute-for-authority]**
 
-Each rule is data: `id`, `predicate(plan, context) -> RuleResult`, `severity`, `evidence`. Evaluated
-in order; the approver aggregates results into the final verdict. Enumerated:
+Each rule is a **pure predicate** over `RiskEvaluation(plan, context, control_state, verified_projection)`
+→ `RuleResult(id, pass/fail, severity, evidence)`. **All rules are evaluated** (no short-circuit) for a
+complete audit; a single blocking failure yields `REJECTED`. The verdict space is **`APPROVED | REJECTED`
+only** — the *planner* owns all reduction/rounding/decline, and the *approver* recomputes a
+**`VerifiedProjection`** from canonical order terms (the rules never read the planner's own figures). See
+[ADR-0003](adr/0003-pt5-rules-ledger.md) for the full design; the v1 inventory:
 
-| id | Rule | Verdict on violation |
+| id | Rule (verdict = reject on fail) | Status |
 |---|---|---|
-| `paper-first` | mode is PAPER unless live explicitly enabled by reviewed config + workflow state | reject |
-| `max-risk-per-trade` | max-loss-if-stopped ≤ **1%** of current equity | reduce or reject |
-| `daily-loss-lockout` | if daily P&L ≤ **−3%**, reject *new opening* risk (exits allowed) | reject (open) |
-| `buying-power` | order notional ≤ available buying power | reject |
-| `maintenance-margin` | resulting maintenance margin within limits | reject |
-| `leverage-cap` | resulting leverage < **1.5x** | reject |
-| `stop-loss-required` | plan has a stop (or reviewed equivalent) | reject |
-| `no-direct-strategy-orders` | provenance: plan derives from a StrategyIntent via the planner | reject |
-| `causal-data-only` | all market data timestamps ≤ decision clock | reject |
-| `duplicate-prevention` | no equivalent open/recent order (idempotency) | reject |
-| `concentration` | resulting single-name / sleeve concentration within cap | reduce or reject |
-| `taxable-account-guardrails` | short-term-gain / wash-sale awareness flags | warn/reduce |
-| `audit-completeness` | every field needed to audit this decision is present | reject |
+| `max-risk-per-trade` | `verified.max_loss_if_stopped ≤ 1% · current NLV` | active |
+| `daily-loss-lockout` | Control 1: `realized_daily_pnl ≤ −pct_a·E0` ⇒ `REDUCE_ONLY` (opening blocked, exits eligible) | active |
+| `buying-power` | **incremental BP debit** ≤ `buying_power` (not naïve notional) | active (no Open) |
+| `leverage-cap` | `verified.resulting_gross_leverage < 1.5x` over `Σ abs(broker_market_value)`; **fail-closed** on any unpriced holding | active (fail-closed) |
+| `stop-loss-required` | valid stop present, correct side | active |
+| `causal-data-only` (belt) | `data_as_of`/`account_observed_at ≤ as_of`, aligned basis/time, UTC; breach ⇒ reject + **alarm** | active |
+| `unvalued-holding reduce-only` | `UNAVAILABLE` holding blocks opens/increases/zero-cross | active (NEW) |
+| `concentration` | ceiling = strategy target-weight + drift (fallback); else **reject-as-unconfigured** | active (fallback) |
+| `maintenance-margin` | conservative current-headroom check (long-equity-bounded, over-rejects) | active (degraded) |
+| `session-drawdown-breaker` | Control 2: `(NLV−E0)/E0 ≤ −pct_d` ⇒ `REDUCE_ONLY` + escalate | detect+alarm active; **enforcement dark** until `pct_d` calibrated |
+| `paper-first` | mode enforcement | **relocated → PT-8/PT-9** (`submission_allowed`) |
+| `duplicate-prevention` | idempotency | **relocated → PT-9** durable submission state machine |
+| `no-direct-strategy-orders` | provenance | **release gate** (process isolation, issuer containment, bypass tests) — not a ledger predicate |
+| `audit-completeness` | decision fully auditable | **PT-7/PT-12** — mint is *contingent on a durable audit write* |
+| `taxable-account-guardrails` | wash-sale / short-term-gain | **deferred** (not modelled at the paper milestone) |
 
-Rules being data means each is unit-testable in isolation and the ledger is auditable at a glance.
+Rules being pure predicates over the verified projection means each is unit-testable in isolation, the
+ledger is auditable at a glance, and the safety gate never trusts the planner.
 
 ---
 
@@ -195,7 +202,8 @@ involved).
 | Every executable order passes Execution Control | Adapter contract test: `send()` only accepts `ExecutableOrder`; gate is the sole minter |
 | Adapters accept only `ExecutableOrder` | Static + runtime type test on every adapter |
 | ≤1% risk per trade | Property test: ∀ equity, ∀ stop distance → planner/approver never approves max-loss > 1% |
-| New opening risk rejected at 3% daily loss | Test: daily P&L = −3% → opening intent rejected, exit intent allowed |
+| New opening risk rejected at realized daily loss (Control 1) | Test: `realized_daily_pnl ≤ −pct_a·E0` → opening intent rejected, strict exit allowed (`REDUCE_ONLY`) |
+| Session drawdown breaker on total equity (Control 2) | Test: `(NLV−E0)/E0 ≤ −pct_d` → detect+alarm (dark); once armed → `REDUCE_ONLY` + escalate; recompute is restart-stable |
 | Live rejected unless explicitly enabled | Test: default config → `ModeController` rejects LIVE |
 | Backtest/paper/live share Risk & Sizing | Test: all three call the same `RiskSizing.decide` object (no shadow impl) |
 | Market data causal at decision time | Property test: any datum with ts > decision clock → `causal-data-only` rejects |
