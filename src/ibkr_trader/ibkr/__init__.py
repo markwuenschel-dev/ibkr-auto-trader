@@ -15,12 +15,15 @@ from typing import TYPE_CHECKING
 
 from .config import IbkrConnectionConfig
 from .fake_gateway import FakeAccountGateway
+from .fake_marketdata import FakeMarketDataFeed
 from .gateway import (
     AccountGateway,
     AccountResolutionError,
+    AccountSnapshot,
     Clock,
     FatalGatewayError,
     FixedClock,
+    HeldPosition,
     IbkrGatewayError,
     NotConnected,
     PaperAssertionError,
@@ -29,41 +32,64 @@ from .gateway import (
     SnapshotTimeout,
     SystemClock,
     TransientGatewayError,
-    build_risk_context,
+    build_account_snapshot,
     reconcile_positions,
     resolve_account,
 )
+from .marketdata import (
+    MarketDataFeed,
+    QuoteBatch,
+    QuoteField,
+    select_causal,
+)
+from .session import FakeSession, PacingGate, Session
 
 if TYPE_CHECKING:  # for type-checkers only; runtime import is lazy (keeps ib_async out of CI)
     from .ibkr_gateway import IbkrAccountGateway
+    from .ibkr_marketdata import IbkrMarketDataFeed
 
 __all__ = [
     "AccountGateway",
     "AccountResolutionError",
+    "AccountSnapshot",
     "Clock",
     "FakeAccountGateway",
+    "FakeMarketDataFeed",
+    "FakeSession",
     "FatalGatewayError",
     "FixedClock",
+    "HeldPosition",
     "IbkrAccountGateway",
     "IbkrConnectionConfig",
     "IbkrGatewayError",
+    "IbkrMarketDataFeed",
+    "MarketDataFeed",
     "NotConnected",
+    "PacingGate",
     "PaperAssertionError",
     "PositionReconciliation",
+    "QuoteBatch",
+    "QuoteField",
+    "Session",
     "SnapshotIncomplete",
     "SnapshotTimeout",
     "SystemClock",
     "TransientGatewayError",
-    "build_risk_context",
+    "build_account_snapshot",
     "reconcile_positions",
     "resolve_account",
+    "select_causal",
 ]
 
 
 def __getattr__(name: str) -> object:
-    """Lazily resolve ``IbkrAccountGateway`` so importing this package never requires ib_async (PEP 562)."""
+    """Lazily resolve the ib_async adapters so importing this package never requires ib_async (PEP 562)."""
     if name == "IbkrAccountGateway":
         from .ibkr_gateway import IbkrAccountGateway
 
         return IbkrAccountGateway
+    if name == "IbkrMarketDataFeed":
+        from .ibkr_marketdata import IbkrMarketDataFeed
+
+        return IbkrMarketDataFeed
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -13,19 +13,40 @@ follow ADR 0001; validate them against the installed ib_async when running that 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 
 from ib_async import IB  # the quarantined dependency — imported nowhere else
 
 from ..config import Mode
+from ..telemetry import TelemetrySink
 from .config import IbkrConnectionConfig
 from .gateway import (
     DISCONNECT_ERROR_CODES,
     ERROR_CODE_CONN_RESTORED,
     Clock,
+    HeldPosition,
+    SnapshotIncomplete,
     _BaseAccountGateway,
+    _PositionStore,
 )
+from .session import (
+    STAGE_PORTFOLIO_RECONCILE,
+    Session,
+    aggregate_signed,
+    reconcile_inventory,
+)
+
+
+def _to_decimal(raw: object) -> Decimal | None:
+    """Parse a broker numeric to ``Decimal`` via ``str`` (never ``float``), or ``None`` if unparseable."""
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return None
+    try:
+        return Decimal(str(raw))
+    except (InvalidOperation, ValueError):
+        return None
 
 
 class IbkrAccountGateway(_BaseAccountGateway):
@@ -37,23 +58,39 @@ class IbkrAccountGateway(_BaseAccountGateway):
         config: IbkrConnectionConfig,
         mode: Mode,
         clock: Clock | None = None,
-        store: object | None = None,
-        emitter: object | None = None,
+        store: _PositionStore | None = None,
+        emitter: TelemetrySink | None = None,
+        session: Session | None = None,
         ib: IB | None = None,
         **kwargs: object,
     ) -> None:
         super().__init__(
-            config=config, mode=mode, clock=clock, store=store, emitter=emitter, **kwargs  # type: ignore[arg-type]
+            config=config,
+            mode=mode,
+            clock=clock,
+            store=store,
+            emitter=emitter,
+            session=session,
+            **kwargs,  # type: ignore[arg-type]
         )
         self._ib = ib or IB()
         self._events_wired = False
         # Keep strong refs to reconnect tasks so the loop cannot GC them mid-flight (RUF006).
         self._bg_tasks: set[asyncio.Task] = set()
+        # ADR-0002 ⑫: receipt time of each ``updatePortfolio`` event per conId — this, not the account
+        # read time, is a holding's ``mark_available_at``. A conId absent here is UNAVAILABLE (never a
+        # fabricated mark). Reset on reconnect so a stale pre-drop mark can never carry a new generation.
+        self._portfolio_mark_at: dict[int, datetime] = {}
+        self._account_updates_warm = False
 
     # ---- raw connection --------------------------------------------------- #
     async def _raw_connect(self) -> None:
         cfg = self._config
         assert isinstance(cfg, IbkrConnectionConfig)
+        # A (re)connect starts a fresh generation of broker state: drop stale portfolio marks and force a
+        # re-warm so no pre-drop mark is ever welded to post-reconnect inventory (ADR-0002 ⑨/⑫).
+        self._portfolio_mark_at.clear()
+        self._account_updates_warm = False
         await self._ib.connectAsync(
             host=cfg.host,
             port=cfg.port,
@@ -74,7 +111,18 @@ class IbkrAccountGateway(_BaseAccountGateway):
             return
         self._ib.disconnectedEvent += self._on_ib_disconnect
         self._ib.errorEvent += self._on_ib_error
+        # ADR-0002 ⑫: stamp the receipt time of each portfolio update so a holding's mark carries real
+        # availability provenance (not the account read time). Guarded — older ib_async may lack the event.
+        portfolio_event = getattr(self._ib, "updatePortfolioEvent", None)
+        if portfolio_event is not None:
+            portfolio_event += self._on_update_portfolio
         self._events_wired = True
+
+    def _on_update_portfolio(self, item: object, *_args: object) -> None:
+        contract = getattr(item, "contract", None)
+        con_id = getattr(contract, "conId", None)
+        if con_id is not None:
+            self._portfolio_mark_at[int(con_id)] = self._clock.now()
 
     def _on_ib_disconnect(self, *_args: object) -> None:
         self._schedule(self._on_disconnect())
@@ -107,7 +155,7 @@ class IbkrAccountGateway(_BaseAccountGateway):
         return [a for a in (getter() or []) if a]
 
     async def _fetch_summary(self) -> Mapping[str, object]:
-        rows = await self._ib.reqAccountSummaryAsync()
+        rows = await self._ib.reqAccountSummaryAsync() or []
         acct = self._account
         summary: dict[str, object] = {}
         for row in rows:
@@ -122,13 +170,65 @@ class IbkrAccountGateway(_BaseAccountGateway):
             summary[row.tag] = value
         return summary
 
-    async def _fetch_positions(self) -> Mapping[str, object]:
-        positions: dict[str, object] = {}
-        for pos in self._ib.positions(self._account):
-            symbol = pos.contract.symbol
-            # Signed shares aggregate across any duplicate rows for the same symbol.
-            positions[symbol] = int(positions.get(symbol, 0)) + int(pos.position)
-        return positions
+    async def _warm_account_updates(self) -> None:
+        """Warm + verify the account-update subscription so ``ib.portfolio()`` is populated (ADR-0002 ⑫).
+
+        Held valuation is *account-sourced*, not a blind ``positions()``→``portfolio()`` swap: without a
+        warm subscription the portfolio is empty and every holding degrades to UNAVAILABLE. Guarded on the
+        method name (older ib_async spellings) — best-effort; a failure leaves marks absent, not fabricated.
+        """
+        if self._account_updates_warm:
+            return
+        warm = getattr(self._ib, "reqAccountUpdatesAsync", None)
+        if warm is not None:
+            try:
+                await warm(True, self._account or "")
+            except Exception:  # a warm failure degrades valuation to UNAVAILABLE, never fabricates it
+                return
+        self._account_updates_warm = True
+
+    async def _fetch_held_positions(self) -> Iterable[HeldPosition]:
+        """Held inventory from ``ib.portfolio()`` (valuation) verified against ``ib.positions()``.
+
+        Fail-closed: if portfolio inventory does not reconcile with position inventory (by conId, non-zero
+        quantities), the account-update subscription is not trustworthy for valuation — raise
+        ``SnapshotIncomplete`` rather than value a book we cannot verify (ADR-0002 ⑫). A holding with no
+        recorded ``updatePortfolio`` receipt time is surfaced UNAVAILABLE, never fabricated.
+        """
+        await self._warm_account_updates()
+        account = self._account or ""
+        portfolio_items = [
+            item for item in self._ib.portfolio(account) if int(item.position) != 0
+        ]
+        portfolio_qty = aggregate_signed(
+            (item.contract.conId, int(item.position)) for item in portfolio_items
+        )
+        position_qty = aggregate_signed(
+            (pos.contract.conId, int(pos.position)) for pos in self._ib.positions(account)
+        )
+        ok, mismatched = reconcile_inventory(portfolio_qty, position_qty)
+        self._emit(
+            STAGE_PORTFOLIO_RECONCILE,
+            metrics={"reconciled": ok, "mismatched_instruments": len(mismatched)},
+        )
+        if not ok:
+            raise SnapshotIncomplete(
+                f"portfolio inventory does not reconcile with positions for conIds {mismatched}"
+            )
+        held: list[HeldPosition] = []
+        for item in portfolio_items:
+            con_id = int(item.contract.conId)
+            held.append(
+                HeldPosition.from_broker(
+                    instrument_id=con_id,
+                    symbol=item.contract.symbol,
+                    quantity=int(item.position),
+                    market_value=_to_decimal(getattr(item, "marketValue", None)),
+                    market_price=_to_decimal(getattr(item, "marketPrice", None)),
+                    mark_available_at=self._portfolio_mark_at.get(con_id),
+                )
+            )
+        return held
 
     async def _fetch_broker_time(self) -> datetime | None:
         try:

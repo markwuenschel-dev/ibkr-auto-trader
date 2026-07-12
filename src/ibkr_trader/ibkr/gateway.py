@@ -35,7 +35,9 @@ from decimal import Decimal, InvalidOperation
 from typing import Protocol, runtime_checkable
 
 from ..config import Mode
-from ..domain import RiskContext
+from ..domain.models import InstrumentId, ValuationStatus
+from ..telemetry import TelemetrySink
+from .session import Session
 
 # --------------------------------------------------------------------------- #
 # telemetry stage names (§8 envelope) — named constants so they stay greppable
@@ -124,20 +126,34 @@ class FixedClock:
 
 
 # --------------------------------------------------------------------------- #
+# collaborator seams — typed Protocols so the money-critical path type-checks
+# --------------------------------------------------------------------------- #
+@runtime_checkable
+class _PositionStore(Protocol):
+    """The narrow PT-2 positions-cache seam the gateway reconciles against (conId-keyed; ADR-0002 ⑬)."""
+
+    def all_positions(self) -> Mapping[InstrumentId, int]: ...
+    def symbol_for_instrument_id(self, instrument_id: InstrumentId) -> str | None: ...
+    def instrument_id_for_symbol(self, symbol: str) -> InstrumentId | None: ...
+    def upsert_position(self, instrument_id: InstrumentId, symbol: str, quantity: int) -> None: ...
+
+
+# --------------------------------------------------------------------------- #
 # structured reconciliation result (decision ⑤) — report, don't gate
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class PositionReconciliation:
     """The broker-vs-PT-2-cache position diff. Broker is truth; this is *reported*, never a gate.
 
-    ``diffs`` maps a symbol to ``(cache_qty, broker_qty)`` for every symbol whose held quantity differs.
-    Both sides are normalized to non-zero holdings, so a stale cached ``0`` vs an absent broker symbol is
-    not a spurious divergence.
+    ``diffs`` maps an ``InstrumentId`` (conId) to ``(cache_qty, broker_qty)`` for every instrument whose
+    held quantity differs. Both sides are normalized to non-zero holdings, so a stale cached ``0`` vs an
+    absent broker instrument is not a spurious divergence. Held inventory now carries the broker ``conId``
+    (ADR-0002 ⑫/⑬), so reconciliation keys on identity — never a symbol, never a manufactured id.
     """
 
-    broker: dict[str, int]
-    cache: dict[str, int]
-    diffs: dict[str, tuple[int, int]]
+    broker: dict[InstrumentId, int]
+    cache: dict[InstrumentId, int]
+    diffs: dict[InstrumentId, tuple[int, int]]
 
     @property
     def diverged(self) -> bool:
@@ -145,19 +161,97 @@ class PositionReconciliation:
 
 
 # --------------------------------------------------------------------------- #
+# account snapshot (ADR-0002 ③/⑫) — the gateway's output; it NEVER builds RiskContext
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class HeldPosition:
+    """One broker-authoritative holding, valuation-classified (ADR-0002 ⑫).
+
+    ``valuation_status`` is a typed state: the snapshot is *complete about inventory* while explicitly
+    reporting valuation degradation. Held value uses ``broker_market_value`` (ib_async ``marketValue`` --
+    preserves broker multipliers), never ``quantity * price``. ``mark_available_at`` is the receipt time
+    of the ``updatePortfolio`` event, not the account read time.
+    """
+
+    instrument_id: InstrumentId
+    symbol: str
+    quantity: int
+    broker_mark: Decimal | None
+    broker_market_value: Decimal | None
+    mark_available_at: datetime | None
+    valuation_status: ValuationStatus
+
+    @classmethod
+    def from_broker(
+        cls,
+        *,
+        instrument_id: int,
+        symbol: str,
+        quantity: int,
+        market_value: Decimal | None,
+        market_price: Decimal | None,
+        mark_available_at: datetime | None,
+    ) -> HeldPosition:
+        """Classify a raw broker holding fail-closed.
+
+        AVAILABLE **only** when a market value *and* a mark receipt time are both present; otherwise
+        UNAVAILABLE, and value/mark/price are forced to ``None`` (never a fabricated zero or a
+        mark without provenance). This is the single shared classifier both adapters + the fake use.
+        """
+        available = market_value is not None and mark_available_at is not None
+        if available:
+            return cls(
+                instrument_id=int(instrument_id),
+                symbol=symbol,
+                quantity=int(quantity),
+                broker_mark=market_price,
+                broker_market_value=market_value,
+                mark_available_at=mark_available_at,
+                valuation_status=ValuationStatus.AVAILABLE,
+            )
+        return cls(
+            instrument_id=int(instrument_id),
+            symbol=symbol,
+            quantity=int(quantity),
+            broker_mark=None,
+            broker_market_value=None,
+            mark_available_at=None,
+            valuation_status=ValuationStatus.UNAVAILABLE,
+        )
+
+
+@dataclass(frozen=True)
+class AccountSnapshot:
+    """The gateway output (ADR-0002 ③): account money fields + ``observed_at`` + held inventory.
+
+    Internal to the gateway→assembler seam — it never crosses the Risk & Sizing seam (only the assembler's
+    sealed ``RiskContext`` does). ``generation`` is the ``IbkrSession`` generation this snapshot was read
+    under; the assembler's fence rejects a cycle that spans generations.
+    """
+
+    net_liquidation: Decimal
+    buying_power: Decimal
+    maintenance_margin: Decimal
+    held: tuple[HeldPosition, ...]
+    observed_at: datetime
+    generation: int
+
+
+# --------------------------------------------------------------------------- #
 # pure logic — shared by the real adapter and the fake (this is what CI actually tests)
 # --------------------------------------------------------------------------- #
-def build_risk_context(
+def build_account_snapshot(
     summary: Mapping[str, object],
-    positions: Mapping[str, object],
-    as_of: datetime,
-) -> RiskContext:
-    """Map a broker account summary + positions into a frozen ``RiskContext`` — or fail closed.
+    held: Iterable[HeldPosition],
+    observed_at: datetime,
+    generation: int,
+) -> AccountSnapshot:
+    """Map a broker account summary + held inventory into a frozen ``AccountSnapshot`` — or fail closed.
 
     Money fields parse straight from the summary *strings* to ``Decimal`` (never through ``float``, which
     would inject binary-rounding error into a money figure). Every required tag must be present and
-    parseable; a missing or garbled one raises ``SnapshotIncomplete`` so a partial/zero-filled context is
-    never handed downstream (decision ⑦/⑧).
+    parseable; a missing or garbled one raises ``SnapshotIncomplete`` so a partial/zero-filled snapshot is
+    never handed downstream (decision ⑦/⑧). The gateway never constructs ``RiskContext`` (ADR-0002 ③).
     """
     fields: dict[str, Decimal] = {}
     missing: list[str] = []
@@ -176,8 +270,7 @@ def build_risk_context(
         raise SnapshotIncomplete(
             f"account summary missing/unparseable required tags: {sorted(missing)}"
         )
-    signed_positions = {sym: int(qty) for sym, qty in positions.items()}
-    return RiskContext(as_of=as_of, positions=signed_positions, **fields)
+    return AccountSnapshot(held=tuple(held), observed_at=observed_at, generation=generation, **fields)
 
 
 def resolve_account(configured: str | None, available: Iterable[str], mode: Mode) -> str:
@@ -212,17 +305,17 @@ def resolve_account(configured: str | None, available: Iterable[str], mode: Mode
 
 
 def reconcile_positions(
-    broker: Mapping[str, object], cache: Mapping[str, object]
+    broker: Mapping[InstrumentId, int], cache: Mapping[InstrumentId, int]
 ) -> PositionReconciliation:
-    """Diff broker truth against the PT-2 cache. Non-zero holdings only; symbol -> (cache, broker)."""
-    broker_nz = {s: int(q) for s, q in broker.items() if int(q) != 0}
-    cache_nz = {s: int(q) for s, q in cache.items() if int(q) != 0}
-    diffs: dict[str, tuple[int, int]] = {}
-    for sym in set(broker_nz) | set(cache_nz):
-        b = broker_nz.get(sym, 0)
-        c = cache_nz.get(sym, 0)
+    """Diff broker truth against the PT-2 cache. Non-zero holdings only; conId -> (cache, broker)."""
+    broker_nz = {int(k): int(q) for k, q in broker.items() if int(q) != 0}
+    cache_nz = {int(k): int(q) for k, q in cache.items() if int(q) != 0}
+    diffs: dict[InstrumentId, tuple[int, int]] = {}
+    for con_id in set(broker_nz) | set(cache_nz):
+        b = broker_nz.get(con_id, 0)
+        c = cache_nz.get(con_id, 0)
         if b != c:
-            diffs[sym] = (c, b)
+            diffs[con_id] = (c, b)
     return PositionReconciliation(broker=broker_nz, cache=cache_nz, diffs=diffs)
 
 
@@ -253,16 +346,19 @@ def backoff_delays(attempts: int, base: float, cap: float) -> list[float]:
 # --------------------------------------------------------------------------- #
 @runtime_checkable
 class AccountGateway(Protocol):
-    """The domain port: a broker connection that yields a frozen ``RiskContext``.
+    """The domain port: a broker connection that yields an ``AccountSnapshot`` (ADR-0002 ③).
 
-    The risk pipeline holds one of these and calls ``snapshot()``; it never imports ib_async. The real
+    The ``DecisionContextAssembler`` holds one of these and calls ``snapshot()``; it never imports
+    ib_async. The gateway no longer constructs ``RiskContext`` — only the assembler mints one. The real
     (``IbkrAccountGateway``) and fake (``FakeAccountGateway``) implementations are interchangeable.
     """
 
     async def connect(self) -> None: ...
-    async def snapshot(self) -> RiskContext: ...
+    async def snapshot(self) -> AccountSnapshot: ...
     async def disconnect(self) -> None: ...
     def is_connected(self) -> bool: ...
+    @property
+    def generation(self) -> int: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -280,8 +376,9 @@ class _BaseAccountGateway:
         config: object,
         mode: Mode,
         clock: Clock | None = None,
-        store: object | None = None,
-        emitter: object | None = None,
+        store: _PositionStore | None = None,
+        emitter: TelemetrySink | None = None,
+        session: Session | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         reconnect_attempts: int = 5,
         backoff_base: float = 0.5,
@@ -293,6 +390,12 @@ class _BaseAccountGateway:
         self._clock: Clock = clock or SystemClock()
         self._store = store
         self._emitter = emitter
+        # ADR-0002 ⑨: the IbkrSession is the sole lifecycle owner of the generation. When one is injected
+        # (the real adapter, or a fake session shared with the market feed) generation is read from it so a
+        # reconnect fence spans both the account read and the quote batch. Absent a session (simple fake
+        # tests) the base owns a local counter bumped on reconnect.
+        self._session = session
+        self._generation = 0
         # Injected so tests drive backoff with zero wall-clock; defaults to real asyncio.sleep.
         self._sleep = sleep or asyncio.sleep
         self._reconnect_attempts = reconnect_attempts
@@ -316,7 +419,7 @@ class _BaseAccountGateway:
     async def _fetch_summary(self) -> Mapping[str, object]:  # pragma: no cover - overridden
         raise NotImplementedError
 
-    async def _fetch_positions(self) -> Mapping[str, object]:  # pragma: no cover - overridden
+    async def _fetch_held_positions(self) -> Iterable[HeldPosition]:  # pragma: no cover - overridden
         raise NotImplementedError
 
     async def _fetch_broker_time(self) -> datetime | None:  # pragma: no cover - overridden
@@ -332,6 +435,15 @@ class _BaseAccountGateway:
     def last_reconciliation(self) -> PositionReconciliation | None:
         """The structured result of the most recent ``snapshot()`` reconciliation (decision ⑤)."""
         return self._last_reconciliation
+
+    @property
+    def generation(self) -> int:
+        """The session generation (ADR-0002 ⑨). Bumped on every reconnect; the assembler's fence rejects
+        a cycle whose account snapshot and quotes disagree on it (a spliced pre-drop/post-reconnect read)."""
+        session = self._session
+        if session is not None:
+            return int(session.generation)
+        return self._generation
 
     def is_connected(self) -> bool:
         return self._connected
@@ -350,30 +462,35 @@ class _BaseAccountGateway:
         self._connected = True
         self._emit(STAGE_CONNECT, metrics={"readonly": self._is_readonly(), "reconnect": False})
 
-    async def snapshot(self) -> RiskContext:
-        """Read warm account/position state into a frozen ``RiskContext``; reconcile + emit as a side task.
+    async def snapshot(self) -> AccountSnapshot:
+        """Read warm account/held state into a frozen ``AccountSnapshot``; reconcile + emit as a side task.
 
-        Fail-closed: not connected -> ``NotConnected``; a missing field -> ``SnapshotIncomplete`` (raised
-        inside ``build_risk_context``). Reconciliation and clock-skew are *reported*, never gate the read.
+        The gateway **never** constructs ``RiskContext`` (ADR-0002 ③) — only the ``DecisionContextAssembler``
+        mints one. Fail-closed: not connected -> ``NotConnected``; a missing field -> ``SnapshotIncomplete``
+        (raised inside ``build_account_snapshot``). Reconciliation and clock-skew are *reported*, never gate.
         """
         if not self._connected:
             raise NotConnected("snapshot() called before connect() (or after the connection dropped)")
+        generation = self.generation
         summary = await self._fetch_summary()
-        positions = await self._fetch_positions()
-        as_of = self._clock.now()
-        ctx = build_risk_context(summary, positions, as_of)  # raises SnapshotIncomplete, fail-closed
-        self._reconcile(positions)
-        self._check_skew(await self._fetch_broker_time(), as_of)
+        held = tuple(await self._fetch_held_positions())
+        observed_at = self._clock.now()
+        account = build_account_snapshot(summary, held, observed_at, generation)  # fail-closed
+        self._reconcile(held)
+        self._check_skew(await self._fetch_broker_time(), observed_at)
+        unavailable = sum(1 for h in held if h.valuation_status is ValuationStatus.UNAVAILABLE)
         self._emit(
             STAGE_SNAPSHOT,
             metrics={
-                "net_liquidation": str(ctx.net_liquidation),
-                "buying_power": str(ctx.buying_power),
-                "maintenance_margin": str(ctx.maintenance_margin),
-                "position_count": len(ctx.positions),
+                "net_liquidation": str(account.net_liquidation),
+                "buying_power": str(account.buying_power),
+                "maintenance_margin": str(account.maintenance_margin),
+                "position_count": len(account.held),
+                "unavailable_valuations": unavailable,
+                "generation": generation,
             },
         )
-        return ctx
+        return account
 
     async def disconnect(self) -> None:
         self._connected = False
@@ -382,14 +499,31 @@ class _BaseAccountGateway:
 
     # ---- reactive resilience (decision ⑥) -------------------------------- #
     async def reconnect(self) -> None:
-        """Re-establish a dropped session (bounded backoff) and re-resolve the account; health recovers."""
+        """Re-establish a dropped session (bounded backoff) and re-resolve the account; health recovers.
+
+        Reconnect **bumps the generation** (ADR-0002 ⑨) so a cycle that spans the drop is fenced off. When
+        an ``IbkrSession`` is injected it owns the generation and bumps it during its own reconnect; absent
+        one, the base owns the counter and bumps it here.
+        """
         self._connected = False
         await self._connect_with_backoff()
         self._account = resolve_account(
             self._configured_account(), await self._fetch_accounts(), self._mode
         )
+        session = self._session
+        if session is not None:
+            session.bump_generation()
+        else:
+            self._generation += 1
         self._connected = True
-        self._emit(STAGE_CONNECT, metrics={"readonly": self._is_readonly(), "reconnect": True})
+        self._emit(
+            STAGE_CONNECT,
+            metrics={
+                "readonly": self._is_readonly(),
+                "reconnect": True,
+                "generation": self.generation,
+            },
+        )
 
     async def _on_disconnect(self) -> None:
         """Reactive drop handler (wired to ``disconnectedEvent`` / error 1100/1300 in the real adapter).
@@ -423,24 +557,38 @@ class _BaseAccountGateway:
         ) from last_exc
 
     # ---- reconciliation + skew (side effects, never gates) --------------- #
-    def _reconcile(self, broker_positions: Mapping[str, object]) -> PositionReconciliation:
-        cache = self._store.all_positions() if self._store is not None else {}
-        recon = reconcile_positions(broker_positions, cache)
+    def _reconcile(self, held: Iterable[HeldPosition]) -> PositionReconciliation:
+        # Held inventory now carries the broker conId (ADR-0002 ⑫/⑬), and the PT-4a store is conId-keyed,
+        # so reconciliation is identity-vs-identity — no symbol translation, no manufactured id. Broker is
+        # truth: divergence rewrites the cache by conId (carrying the display symbol) and emits, never gates.
+        held = tuple(held)
+        broker: dict[InstrumentId, int] = {h.instrument_id: h.quantity for h in held}
+        symbols: dict[InstrumentId, str] = {h.instrument_id: h.symbol for h in held}
+        cache: dict[InstrumentId, int] = {}
+        if self._store is not None:
+            cache = dict(self._store.all_positions())
+            for instrument_id in cache:
+                symbols.setdefault(
+                    instrument_id, self._store.symbol_for_instrument_id(instrument_id) or ""
+                )
+        recon = reconcile_positions(broker, cache)
         self._last_reconciliation = recon
         if recon.diverged:
             if self._store is not None:
-                # Broker is truth: rewrite the cache. Symbols the broker no longer holds go flat (0),
-                # since the PT-2 store has no delete and ``position()`` treats absent == 0.
-                for sym, qty in recon.broker.items():
-                    self._store.upsert_position(sym, qty)
-                for sym in recon.cache:
-                    if sym not in recon.broker:
-                        self._store.upsert_position(sym, 0)
+                for instrument_id, quantity in recon.broker.items():
+                    self._store.upsert_position(instrument_id, symbols.get(instrument_id, ""), quantity)
+                for instrument_id in recon.cache:
+                    if instrument_id not in recon.broker:
+                        self._store.upsert_position(
+                            instrument_id, symbols.get(instrument_id, ""), 0
+                        )
             self._emit(
                 STAGE_RECONCILE,
                 metrics={
-                    "diverged_symbols": len(recon.diffs),
-                    "diffs": {s: {"cache": c, "broker": b} for s, (c, b) in recon.diffs.items()},
+                    "diverged_instruments": len(recon.diffs),
+                    "diffs": {
+                        str(k): {"cache": c, "broker": b} for k, (c, b) in recon.diffs.items()
+                    },
                 },
             )
         return recon
