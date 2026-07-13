@@ -31,6 +31,7 @@ Layout::
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -408,3 +409,146 @@ def orphaned_ids(collab) -> list[str]:
         if m and p.stem not in have_content:
             out.append(p.stem)
     return sorted(out)
+
+
+# --------------------------------------------------------------------------- #
+# ActiveHandoffLease — the board-level exclusive control lease (ADR-0003 D2)
+# --------------------------------------------------------------------------- #
+#
+# `claim` is a PER-HANDOFF os.link CAS: it guarantees exactly one winner for ONE handoff, but it
+# does NOT stop two driver processes from each claiming a DIFFERENT handoff and running in parallel.
+# The one-handoff-at-a-time invariant (ADR-0001) was therefore only emergent — a property of the
+# single-driver loop shape, not an enforced lock. The lease makes it real: a run acquires the board
+# BEFORE it claims any handoff and holds it (renewed by the driver heartbeat) until done / a terminal
+# pause / reopen. A second run cannot acquire while a LIVE lease is held; a STALE lease (heartbeat
+# past its TTL — a crashed driver) is reclaimable, and every reclaim is audited.
+
+_LEASE_TTL_S = 90.0  # a lease whose heartbeat is older than this is stale and reclaimable
+
+
+class LeaseHeld(cc.CollabError):
+    """The board lease is held by another live run — this run may not select or claim work."""
+
+    def __init__(self, holder: dict) -> None:
+        super().__init__(
+            f"board lease held by run {holder.get('run_uid')!r} on handoff {holder.get('hid')!r} "
+            f"(pid {holder.get('pid')}) — refusing to start a second concurrent driver"
+        )
+        self.holder = holder
+
+
+def _lease_ts() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+class ActiveHandoffLease:
+    """One run's grip on the board. Every acquire/renew/release is serialised by the cross-process
+    ``collab_lock`` and persisted atomically to ``autopilot/active.lease``.
+
+    ``now`` (a ``time.time``-style float clock) is injectable so staleness is deterministic in tests.
+    """
+
+    def __init__(self, collab, run_uid: str, *, pid: int | None = None, ttl: float = _LEASE_TTL_S,
+                 now=time.time) -> None:
+        self._collab = Path(collab)
+        self._run_uid = str(run_uid)
+        self._pid = int(pid) if pid is not None else os.getpid()
+        self._ttl = float(ttl)
+        self._now = now
+        self._path = self._collab / "autopilot" / "active.lease"
+        self._lockdir = self._collab / "autopilot" / ".leaselock"
+        self._audit_path = self._collab / "autopilot" / "lease-audit.jsonl"
+
+    # ---- public API ------------------------------------------------------- #
+    def acquire(self, hid: str) -> dict:
+        """Acquire (or renew) the board for ``hid``. Raises ``LeaseHeld`` if a live foreign lease
+        exists, or ``CollabError`` if this run already holds the board for a DIFFERENT handoff."""
+        self._ensure()
+        with cc.collab_lock(self._lockdir):
+            rec = self._read()
+            if rec is not None and rec.get("run_uid") != self._run_uid:
+                if not self._is_stale(rec):
+                    raise LeaseHeld(rec)
+                self._audit("reclaim_stale", reclaimed_from=rec)  # crashed prior run — take the board
+            elif rec is not None and rec.get("run_uid") == self._run_uid and rec.get("hid") != hid:
+                raise cc.CollabError(
+                    f"run {self._run_uid!r} already holds the board lease for {rec.get('hid')!r}; "
+                    f"cannot claim {hid!r} too — release the current slice first (one board-level "
+                    f"claimed handoff, ADR-0003 D2)"
+                )
+            now = float(self._now())
+            ts = _lease_ts()
+            new = {
+                "run_uid": self._run_uid,
+                "hid": hid,
+                "pid": self._pid,
+                "acquired_ts": ts,
+                "acquired_epoch": now,
+                "heartbeat_ts": ts,
+                "heartbeat_epoch": now,
+            }
+            # A re-acquire of the SAME slice by the SAME run preserves the original acquire time.
+            if rec is not None and rec.get("run_uid") == self._run_uid and rec.get("hid") == hid:
+                new["acquired_ts"] = rec.get("acquired_ts", ts)
+                new["acquired_epoch"] = rec.get("acquired_epoch", now)
+            self._write(new)
+            return new
+
+    def renew(self) -> bool:
+        """Refresh the heartbeat iff this run still holds the lease. Returns False if it was lost."""
+        self._ensure()
+        with cc.collab_lock(self._lockdir):
+            rec = self._read()
+            if not rec or rec.get("run_uid") != self._run_uid:
+                return False
+            rec["heartbeat_ts"] = _lease_ts()
+            rec["heartbeat_epoch"] = float(self._now())
+            self._write(rec)
+            return True
+
+    def release(self) -> bool:
+        """Release the board iff this run holds it. Idempotent; returns False if it did not hold it."""
+        self._ensure()
+        with cc.collab_lock(self._lockdir):
+            rec = self._read()
+            if rec and rec.get("run_uid") == self._run_uid:
+                try:
+                    self._path.unlink()
+                except FileNotFoundError:
+                    pass
+                self._audit("release", hid=rec.get("hid"))
+                return True
+            return False
+
+    def holder(self) -> dict | None:
+        """The current lease record (no lock — a diagnostic snapshot), or None if the board is free."""
+        return self._read()
+
+    # ---- internals -------------------------------------------------------- #
+    def _ensure(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _is_stale(self, rec: dict) -> bool:
+        hb = rec.get("heartbeat_epoch")
+        if hb is None:
+            return True  # a record with no heartbeat can never prove liveness
+        return (float(self._now()) - float(hb)) >= self._ttl
+
+    def _read(self) -> dict | None:
+        try:
+            data = json.loads(self._path.read_text("utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            # A torn lease cannot be trusted to prove a live holder; treat as reclaimable rather than
+            # deadlocking the board forever. safe_write makes this near-impossible in practice.
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _write(self, rec: dict) -> None:
+        cc.safe_write(self._path, json.dumps(rec, indent=2, sort_keys=True) + "\n")
+
+    def _audit(self, event: str, **extra) -> None:
+        rec = {"ts": _lease_ts(), "event": event, "run_uid": self._run_uid, "pid": self._pid, **extra}
+        prior = self._audit_path.read_text("utf-8") if self._audit_path.exists() else ""
+        cc.safe_write(self._audit_path, prior + json.dumps(rec, sort_keys=True) + "\n")
