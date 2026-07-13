@@ -60,6 +60,22 @@ class Limits:
             # D5: raising this is a future ADR, never a config change.
             raise ValueError("max_review_decisions_per_candidate is a contract invariant fixed at 1")
 
+    @classmethod
+    def balanced(cls) -> Limits:
+        """The calibrated 'balanced' defaults (ADR-0002 Open questions; ADR-0003).
+
+        3 work attempts, 3 verification passes, 16 total model calls, 30 min wall-clock, and
+        4 findings verified per lane. These are calibration knobs, not contract — a run may
+        override them (and `control.json` may raise them mid-run for the current epoch).
+        """
+        return cls(
+            max_work_attempts=3,
+            max_verification_passes=3,
+            max_total_model_calls=16,
+            max_wall_clock_seconds=1800.0,
+            max_findings_per_lane=4,
+        )
+
 
 class BudgetExceeded(cc.CollabError):
     """A charge was denied because it would exceed a budget. Terminal: the driver pauses (ADR-0002 D9)."""
@@ -185,6 +201,19 @@ class RunBudget:
         if elapsed >= self._limits.max_wall_clock_seconds:
             raise BudgetExceeded("wall_clock", round(elapsed, 3), self._limits.max_wall_clock_seconds)
 
+    def cap_lane_findings(self, surfaced: int) -> dict:
+        """Split a lane's surfaced findings into the verifiable head and the overflow tail.
+
+        ADR-0002 D7 (fail-closed on overflow): a lane verifies at most `max_findings_per_lane`
+        findings; the un-verified excess is recorded explicitly (never silently dropped) and
+        forces the pass's verdict to `verification_incomplete`. This is the single place the
+        cap is applied, so `max_findings_per_lane` is enforced rather than merely stored.
+        """
+        cap = int(self._limits.max_findings_per_lane)
+        n = max(0, int(surfaced))
+        verify = min(n, cap)
+        return {"verify": verify, "overflow": n - verify, "cap": cap}
+
     # ---- terminal reporting ---------------------------------------------- #
     def exhausted(self) -> str | None:
         """The name of a *global* budget at/over its limit (for a proactive pause), or None.
@@ -269,15 +298,45 @@ class RunBudget:
         cc.safe_write(self._path, json.dumps(self._record, indent=2, sort_keys=True) + "\n")
 
     def _load_or_create(self) -> dict:
-        if self._path.exists():
+        """Load the persisted budget record, or bootstrap a fresh one — **fail closed**.
+
+        Mirrors `registry.load`'s three-case handling so a bad byte cannot silently reset the
+        budget (ADR-0002 [C16], ADR-0003):
+          * **absent** (`FileNotFoundError`) → a fresh record (normal first use);
+          * **transiently locked** (`PermissionError` — a concurrent writer's `os.replace` on
+            Windows) → bounded retry, then raise;
+          * **corrupt / torn** (invalid JSON) → **raise** `cc.CollabError` rather than
+            recreating fresh. A silent reset would zero the consumed counters and hand the run
+            a full new allowance with no audit trail — a budget bypass.
+        """
+        text = None
+        for attempt in range(5):
             try:
-                rec = json.loads(self._path.read_text("utf-8"))
-                rec.setdefault("epochs", [])
-                rec.setdefault("current", _fresh_epoch(self._now_ts()))
-                rec.setdefault("epoch", 0)
-                return rec
-            except (OSError, json.JSONDecodeError):
-                pass  # a torn record is replaced fresh rather than crashing the run
+                text = self._path.read_text("utf-8")
+                break
+            except FileNotFoundError:
+                return self._fresh_record()
+            except PermissionError as exc:
+                if attempt == 4:
+                    raise cc.CollabError(
+                        f"could not read budget {self._path} after retries "
+                        f"(locked by a concurrent writer?)"
+                    ) from exc
+                time.sleep(0.02 * (2**attempt))
+        try:
+            rec = json.loads(text)
+        except ValueError:
+            raise cc.CollabError(
+                f"budget record {self._path} is corrupt (invalid JSON) — refusing to proceed "
+                f"and overwrite it; inspect/repair or remove it (a silent reset would be a "
+                f"budget bypass)"
+            ) from None
+        rec.setdefault("epochs", [])
+        rec.setdefault("current", _fresh_epoch(self._now_ts()))
+        rec.setdefault("epoch", 0)
+        return rec
+
+    def _fresh_record(self) -> dict:
         return {
             "schema_version": SCHEMA_VERSION,
             "hid": self._hid,
