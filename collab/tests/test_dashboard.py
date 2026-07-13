@@ -99,9 +99,9 @@ class TestStatusAndControl:
         collab = str(tmp_path / "c")
         hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
         hc.claim(collab, "001")
-        ap._run_turn(collab, "reviewer", seats=_cli(["reviewer"]), runner=lambda *a, **k: "done",
-                     hid="001", transcript="y", round_no=2, counterpart_seat="builder",
-                     log=ap._log_default(collab), closeout=None, rid=ap._run_id(collab))
+        ap._dispatch_seat(collab, "reviewer", seats=_cli(["reviewer"]), runner=lambda *a, **k: "done",
+                          hid="001", transcript="y", log=ap._log_default(collab),
+                          rid=ap._run_id(collab), attempt=2, span_role="builder")
         st = dc.read_status(collab)
         assert st is not None
         assert st["round"] == 2

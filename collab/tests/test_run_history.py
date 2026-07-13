@@ -279,14 +279,22 @@ class TestDriverArchive:
         # live log reflects ONLY this run (the junk is gone).
         home = str(tmp_path)
         collab = str(tmp_path / "c")
-        hc.create(collab, to="reviewer", from_="builder", title="kickoff", body="review this")
+        hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="review this")
         live = Path(ap._log_default(collab))
         live.parent.mkdir(parents=True, exist_ok=True)
         live.write_text(json.dumps({"stage": "JUNK_FROM_PRIOR_RUN", "marker": "STALE"}) + "\n", "utf-8")
 
+        n = {"b": 0}
+
+        def runner(cmd, prompt, *, timeout, **kw):
+            if "builder" in cmd[0]:
+                n["b"] += 1
+                return f"rev {n['b']}"          # distinct output per attempt -> genuine progress
+            return "keep going"                 # reviewer withholds -> repair to the work-attempt budget
+
         rounds = ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=2, watch=False,
-                        runner=lambda *a, **k: "ok, continuing", home=home)
-        assert rounds == 2  # both automated, no sign-off -> capped at the budget
+                        runner=runner, home=home)
+        assert rounds >= 2  # no sign-off -> loops to the work-attempt budget, then escalates
 
         # run_uid was minted + stamped into status.json.
         run_uid = dc.read_status(collab)["run_uid"]
@@ -337,33 +345,47 @@ class TestLiveMaxRounds:
             p.write_text(json.dumps({"max_rounds": bad}), "utf-8")
             assert ap._read_control(collab)["max_rounds"] is None
 
+    @staticmethod
+    def _work_attempts(collab):
+        rec = json.loads((Path(collab) / "autopilot" / "budget" / "001.json").read_text("utf-8"))
+        return rec["current"]["work_attempts"]
+
     def test_loop_honors_a_raised_live_cap_beyond_launch_max(self, tmp_path):
-        # The strongest deterministic proof: launch with max_rounds=1, but a runner that RAISES the live cap
-        # to 3 on its first turn. The loop re-reads control.json every turn, so it must run 3 rounds — beyond
-        # the launch-time cap of 1 — proving the live max_rounds (not the launch value) governs the ceiling.
+        # The strongest deterministic proof: launch with max_rounds=1 (work_attempts budget = 1), but a runner
+        # that RAISES the live cap to 3 on each builder turn. The loop re-reads control.json every iteration
+        # and reconstructs the RunBudget with the new ceiling, so it charges 3 work attempts — beyond the
+        # launch-time cap of 1 — proving the live max_rounds (not the launch value) governs the budget.
         home = str(tmp_path)
         collab = str(tmp_path / "c")
-        hc.create(collab, to="reviewer", from_="builder", title="kickoff", body="review this")
-        calls = {"n": 0}
+        hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="review this")
+        n = {"b": 0}
 
-        def runner(*a, **k):
-            calls["n"] += 1
-            dc.set_max_rounds(collab, 3)  # bump the live ceiling mid-run
-            return "still working"
+        def runner(cmd, prompt, *, timeout, **kw):
+            if "builder" in cmd[0]:
+                n["b"] += 1
+                dc.set_max_rounds(collab, 3)  # bump the live ceiling mid-run
+                return f"rev {n['b']}"         # distinct output per attempt -> genuine progress
+            return "keep going"                # reviewer withholds
 
-        rounds = ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=1, runner=runner, home=home)
-        assert rounds == 3, "loop must re-read control.json each turn and honor the raised live cap"
-        assert calls["n"] == 3
+        ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=1, runner=runner, home=home)
+        assert self._work_attempts(collab) == 3  # loop honored the raised live cap beyond the launch max of 1
 
     def test_loop_honors_a_lowered_live_cap(self, tmp_path):
         # The inverse: a pre-set live cap of 1 must LOWER an otherwise-generous launch budget of 5.
         home = str(tmp_path)
         collab = str(tmp_path / "c")
-        hc.create(collab, to="reviewer", from_="builder", title="kickoff", body="review this")
+        hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="review this")
         dc.set_max_rounds(collab, 1)  # live cap lower than the launch max_rounds
-        rounds = ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=5,
-                        runner=lambda *a, **k: "still working", home=home)
-        assert rounds == 1  # the live cap (1) won over the launch cap (5)
+        n = {"b": 0}
+
+        def runner(cmd, prompt, *, timeout, **kw):
+            if "builder" in cmd[0]:
+                n["b"] += 1
+                return f"rev {n['b']}"
+            return "keep going"
+
+        ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=5, runner=runner, home=home)
+        assert self._work_attempts(collab) == 1  # the live cap (1) won over the launch cap (5)
 
 
 # --------------------------------------------------------------------------- #
