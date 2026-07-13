@@ -215,7 +215,16 @@ _TOOLS_SPEC = [
 ]
 
 
-_WRITE_TOOLS_SPEC = [
+_RUN_COMMAND_SPEC = [
+    {"type": "function", "function": {
+        "name": "run_command",
+        "description": "Run an allow-listed check command (pytest, ruff, python, uv) in the repo root; returns exit code + output. Use it to run the tests/linters.",
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string", "description": "e.g. 'python -m pytest -q' or 'ruff check'."}},
+            "required": ["command"]}}},
+]
+
+_WRITE_FILE_SPEC = [
     {"type": "function", "function": {
         "name": "write_file",
         "description": "Create or overwrite a UTF-8 text file in the repository (parent dirs auto-created). Provide the FULL new file contents.",
@@ -223,13 +232,11 @@ _WRITE_TOOLS_SPEC = [
             "path": {"type": "string", "description": "File path relative to repo root."},
             "content": {"type": "string", "description": "The full file contents to write."}},
             "required": ["path", "content"]}}},
-    {"type": "function", "function": {
-        "name": "run_command",
-        "description": "Run an allow-listed check command (pytest, ruff, python, uv) in the repo root; returns exit code + output. Use it to run the tests/linters after writing files.",
-        "parameters": {"type": "object", "properties": {
-            "command": {"type": "string", "description": "e.g. 'python -m pytest -q' or 'ruff check'."}},
-            "required": ["command"]}}},
 ]
+
+# A builder (--write) gets both write_file + run_command; a read_test lane (--run-checks) gets
+# run_command ONLY — it may run the allow-listed checks but can never write source it is judging.
+_WRITE_TOOLS_SPEC = _WRITE_FILE_SPEC + _RUN_COMMAND_SPEC
 
 
 _SYSTEM_BUILDER_NOTE = (
@@ -282,6 +289,15 @@ _SYSTEM_TOOL_NOTE = (
     "real source — open the files, grep for the symbols the builder names, and confirm a fix exists at a "
     "specific file:line rather than reasoning about the prose. When you have seen enough, write your final "
     "review as an ordinary message with no further tool calls."
+)
+
+
+_SYSTEM_READTEST_NOTE = (
+    "You are an ADVERSARIAL VERIFICATION agent (breaker/verifier). You have read-only tools to inspect the "
+    "ACTUAL repository (list_dir, read_file, search) AND run_command to run allow-listed checks "
+    "(pytest, ruff, python, uv) in the repo root. You do NOT have a write tool and you MUST NOT attempt to "
+    "modify the source you are judging — run the tests/linters to gather evidence, cite exact file:line "
+    "paths, and write your finding/verdict as an ordinary message with no further tool calls."
 )
 
 
@@ -399,8 +415,11 @@ def main(argv=None) -> int:
     p.add_argument("--max-bytes", type=int, default=100_000)
     p.add_argument("--write", action="store_true",
                    help="enable write_file + run_command (a BUILDER seat); default is read-only")
+    p.add_argument("--run-checks", action="store_true",
+                   help="enable run_command ONLY — allow-listed checks, NO write_file (a read_test "
+                        "breaker/verifier seat). Ignored if --write is also given.")
     p.add_argument("--run-timeout", type=float, default=600.0,
-                   help="per run_command timeout in seconds (only with --write)")
+                   help="per run_command timeout in seconds (only with --write / --run-checks)")
     p.add_argument("--api", choices=("auto", "chat", "responses"), default="auto",
                    help="which OpenAI-shaped API to drive the tool loop over; 'auto' tries chat, falls back to responses on 404")
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
@@ -417,8 +436,15 @@ def main(argv=None) -> int:
     prompt = sys.stdin.read()
     base = args.base.rstrip("/")
     try:
-        tools_spec = _TOOLS_SPEC + _WRITE_TOOLS_SPEC if args.write else _TOOLS_SPEC
-        system_note = _SYSTEM_BUILDER_NOTE if args.write else _SYSTEM_TOOL_NOTE
+        if args.write:
+            tools_spec = _TOOLS_SPEC + _WRITE_TOOLS_SPEC  # write_file + run_command
+            system_note = _SYSTEM_BUILDER_NOTE
+        elif args.run_checks:
+            tools_spec = _TOOLS_SPEC + _RUN_COMMAND_SPEC  # run_command only — no write_file
+            system_note = _SYSTEM_READTEST_NOTE
+        else:
+            tools_spec = _TOOLS_SPEC
+            system_note = _SYSTEM_TOOL_NOTE
         kw = dict(timeout=args.timeout, max_steps=args.max_steps, max_bytes=args.max_bytes,
                   tools_spec=tools_spec, system_note=system_note, run_timeout=args.run_timeout)
         if args.api == "responses":

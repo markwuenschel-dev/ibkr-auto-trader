@@ -40,6 +40,7 @@ from pathlib import Path
 
 _LIB = str(Path(__file__).resolve().parent)
 sys.path.insert(0, _LIB)
+import adapter_profiles  # noqa: E402
 import collab_common as cc  # noqa: E402
 import contracts  # noqa: E402
 import handoff_core as hc  # noqa: E402
@@ -232,18 +233,22 @@ def load_seats(home) -> dict:
         raise cc.CollabError(f"corrupt seats config {f}: {e}") from e
     models = doc.get("models") if isinstance(doc.get("models"), dict) else {}
     for name, cfg in seats.items():
-        if not (isinstance(cfg, dict) and cfg.get("model")):
-            continue  # explicit-cmd seat (or human seat) — leave untouched
-        spec = models.get(cfg["model"])
-        if not (isinstance(spec, dict) and isinstance(spec.get("cmd"), list) and spec["cmd"]):
-            raise cc.CollabError(
-                f"seat {name!r} references model {cfg['model']!r} absent from the 'models' catalog in {f}")
-        margs = cfg.get("model_args") or []
-        if not isinstance(margs, list):
-            raise cc.CollabError(f"seat {name!r}: 'model_args' must be a list")
-        cfg["cmd"] = [str(a) for a in spec["cmd"]] + [str(a) for a in margs]  # composed runnable argv
-        if spec.get("unset_env") and "unset_env" not in cfg:
-            cfg["unset_env"] = list(spec["unset_env"])  # inherit the model's env drops (e.g. subscription)
+        if not isinstance(cfg, dict):
+            continue
+        # compile_seat (ADR-0003 D3) resolves the model's adapter and renders a capability-checked
+        # argv: a managed seat (declares role/access) gets adapter-generated flags; a legacy
+        # model_args seat is composed as before but REFUSED if it carries a flag the adapter would
+        # choke on (the 030 --permission-mode crash). Enforced again here at run start, not only at
+        # dashboard-save time.
+        compiled = adapter_profiles.compile_seat(name, cfg, models)
+        if compiled.get("cmd") is not None:
+            cfg["cmd"] = compiled["cmd"]  # composed runnable argv
+        if compiled.get("unset_env") is not None and "unset_env" not in cfg:
+            cfg["unset_env"] = compiled["unset_env"]  # inherit the model's env drops (e.g. subscription)
+        cfg["adapter"] = compiled["adapter"]
+        cfg["switchable"] = compiled["switchable"]
+        if compiled.get("policy") is not None:
+            cfg["policy"] = compiled["policy"]
     return seats
 
 

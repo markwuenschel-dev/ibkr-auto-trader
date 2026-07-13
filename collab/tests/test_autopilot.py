@@ -300,14 +300,14 @@ class TestModelCatalog:
                 "gpt-5.5": {"cmd": ["adapter", "--model", "gpt-5.5"]},
             },
             "seats": {
-                "builder": {"backend": "cli", "model": "opus", "model_args": ["--repo-root", "/x"]},
+                "builder": {"backend": "cli", "model": "opus", "model_args": ["--add-dir", "/x"]},
                 "reviewer": {"backend": "cli", "model": "gpt-5.5", "can_sign_off": True},
             }}), encoding="utf-8")
         return str(tmp_path)
 
     def test_model_composes_cmd_and_inherits_unset_env(self, tmp_path):
         seats = ap.load_seats(self._write(tmp_path))
-        assert seats["builder"]["cmd"] == ["claude", "-p", "-", "--model", "opus", "--repo-root", "/x"]
+        assert seats["builder"]["cmd"] == ["claude", "-p", "-", "--model", "opus", "--add-dir", "/x"]
         assert seats["builder"]["unset_env"] == ["ANTHROPIC_API_KEY"]     # inherited from the catalog entry
         assert seats["reviewer"]["cmd"] == ["adapter", "--model", "gpt-5.5"]  # no model_args -> template only
         assert "unset_env" not in seats["reviewer"]                       # catalog entry declared none
