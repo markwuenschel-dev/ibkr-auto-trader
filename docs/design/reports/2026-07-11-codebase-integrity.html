@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IBKR auto-trader — codebase integrity audit — 2026-07-11</title>
+  <style>
+    :root { color-scheme: light; --ink:#172033; --muted:#596275; --paper:#f7f9fc; --card:#fff; --line:#d9e0ec; --red:#b42318; --amber:#9a6700; --green:#067647; --blue:#175cd3; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--paper); color:var(--ink); font:15px/1.55 Inter,Segoe UI,Arial,sans-serif; }
+    main { max-width:1160px; margin:0 auto; padding:42px 24px 72px; } h1 { font-size:32px; line-height:1.15; margin:0 0 8px; } h2 { margin:42px 0 12px; font-size:22px; } h3 { margin:0 0 8px; font-size:17px; } p { margin:8px 0; } .subtitle,.muted { color:var(--muted); } .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; margin:12px 0; box-shadow:0 2px 5px rgb(23 32 51 / 4%); } .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; } .metric { background:#f1f5fb; border-radius:10px; padding:14px; } .metric b { display:block; font-size:25px; } .grade { color:var(--red); font-size:42px; font-weight:800; line-height:1; } .tag { display:inline-block; margin:2px 4px 2px 0; padding:2px 8px; border-radius:99px; background:#eaf1ff; color:var(--blue); font-size:12px; font-weight:650; } .high { background:#ffebe9; color:var(--red); } .warn { background:#fff4e5; color:var(--amber); } .ok { background:#e8f7ee; color:var(--green); } table { border-collapse:collapse; width:100%; background:var(--card); border:1px solid var(--line); } th,td { padding:10px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); } th { background:#eef3fa; font-size:13px; } tr:last-child td { border-bottom:0; } code { font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; background:#f0f3f8; padding:1px 4px; border-radius:4px; overflow-wrap:anywhere; } ul { margin:8px 0; padding-left:22px; } .evidence li { margin:5px 0; } .score { font-weight:750; } details { border-top:1px solid var(--line); margin-top:14px; padding-top:12px; } summary { cursor:pointer; font-weight:700; } .mono { white-space:pre-wrap; font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; } .callout { border-left:4px solid var(--amber); padding:10px 14px; background:#fff9ed; } @media (max-width:700px) { main { padding:28px 15px 50px; } table { font-size:13px; } th,td { padding:8px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Codebase integrity audit</h1>
+    <p class="subtitle">ibkr-auto-trader · manual loop · 2026-07-11 · report-only stage</p>
+  </header>
+
+  <section id="executive-summary">
+    <h2>1. Executive summary</h2>
+    <div class="card">
+      <p><strong>Current state:</strong> the in-progress PT-4a domain contract is internally tested, but it is not integrated with the existing IBKR snapshot path. Every exercised gateway snapshot attempts the now-forbidden direct construction of <code>RiskContext</code>, so that path is deterministically red.</p>
+      <p>This is not evidence that PT-4a violated its own handoff: the current handoff explicitly says “No consumers wired here.” It is evidence that the whole checkout is not integration-ready until the planned AccountSnapshot/assembler consumer work lands. The safest next unit is that consumer seam, not a one-line authority bypass.</p>
+      <p>A separate, contained build-integrity issue is confirmed: the repository configures Pyright but does not declare it in the dev dependency group, and the active environment cannot run <code>python -m pyright</code>. Ruff also reports 301 findings when the changed <code>collab</code> source and tests are included; that is recorded as an intentionally rejected broad-cleanup opportunity rather than folded into this loop.</p>
+      <div class="callout"><strong>Scope boundary:</strong> this report does not alter the substantial pre-existing working-tree changes. It records their integration state and candidate ledger only.</div>
+    </div>
+    <div class="grid">
+      <div class="metric"><b>10</b><span>deterministic gateway test failures from the obsolete constructor</span></div>
+      <div class="metric"><b>9 passed</b><span>PT-4a domain-contract tests</span></div>
+      <div class="metric"><b>3</b><span>selectable integrity candidates</span></div>
+      <div class="metric"><b>1</b><span>candidate blocked by a deliberate release-gate decision</span></div>
+    </div>
+    <div class="card">
+      <h3>Health map</h3>
+      <p><span class="tag high">Gateway → RiskContext: red</span><span class="tag ok">PT-4a domain rules: green</span><span class="tag warn">Static type verification: unavailable</span><span class="tag warn">Full pytest verification: environment-limited</span><span class="tag warn">Mint seam hardening: intentionally deferred</span></p>
+      <p class="muted">The checkout was already dirty at recovery: 19 modified tracked files plus newly created handoff/domain/autopilot artifacts. No attempt was made to attribute those changes to this audit.</p>
+    </div>
+  </section>
+
+  <section id="overall-grade">
+    <h2>2. Overall repo grade</h2>
+    <div class="card grid">
+      <div><div class="grade">D</div><p><strong>Integration not currently runnable.</strong> The paper-gateway snapshot is a safety-relevant entry seam and fails before a sealed context can be assembled.</p></div>
+      <div><p><strong>Why not F:</strong> the failure is loud, deterministic, covered by existing gateway tests, and matches an explicitly staged migration boundary. The new contract’s focused tests pass.</p><p><strong>Why not C or higher:</strong> the ordinary project test command has 10 functional failures, type verification is unavailable, and full temporary-file tests are blocked by the local filesystem environment.</p></div>
+    </div>
+  </section>
+
+  <section id="scorecards">
+    <h2>3. Per-category scorecards</h2>
+    <table>
+      <thead><tr><th>Category</th><th>Health</th><th>Evidence</th><th>Interpretation</th></tr></thead>
+      <tbody>
+        <tr><td>Wiring / Integration</td><td><span class="tag high">1 / 5</span></td><td><code>src/ibkr_trader/ibkr/gateway.py:180</code> directly constructs guarded <code>RiskContext</code>; 10 gateway tests fail.</td><td>Migration seam is intentionally incomplete but currently blocks every snapshot.</td></tr>
+        <tr><td>Domain / Contract</td><td><span class="tag ok">4 / 5</span></td><td><code>tests/test_domain_models.py</code>: 9 passed.</td><td>Guarded construction, conId identity, derived positions, and valuation constraints have focused coverage.</td></tr>
+        <tr><td>Build / Static</td><td><span class="tag warn">1 / 5</span></td><td><code>pyproject.toml:44</code> configures Pyright; <code>pyproject.toml:18</code> does not install it; command reports no module named <code>pyright</code>. Ruff reports 301 findings when <code>collab</code> source/tests are included.</td><td>Declared type verification cannot run, and the in-tree collab code has no clean repository-wide lint baseline.</td></tr>
+        <tr><td>Test / CI</td><td><span class="tag warn">2 / 5</span></td><td>Root tests: 10 failed, 52 passed, 1 skipped, 14 temporary-directory errors. The collab subset: 32 passed, 99 temporary-directory errors.</td><td>Functional red is clear; complete test evidence awaits a writable pytest temp root.</td></tr>
+        <tr><td>Safety / Authority</td><td><span class="tag warn">2 / 5</span></td><td><code>tests/test_domain_models.py:158</code> proves <code>model_construct()</code> bypasses the provenance guard.</td><td>Known and documented as a release-gate concern, not a security claim of PT-4a.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="top-candidates">
+    <h2>4. Top merged candidates</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Candidate</th><th>Category</th><th>Priority</th><th>Recommended action</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td><strong>INT-001</strong></td><td>Complete the sealed RiskContext consumer/assembler seam</td><td>Wiring / Integration</td><td class="score">11</td><td>Design → connected-impact sweep</td><td><span class="tag high">open</span></td></tr>
+        <tr><td><strong>INT-002</strong></td><td>Declare and run Pyright as a development verifier</td><td>Build / CI</td><td class="score">18</td><td>Direct fix</td><td><span class="tag warn">open</span></td></tr>
+        <tr><td><strong>INT-003</strong></td><td>Specify the release gate that closes mint-provenance bypasses</td><td>Architecture fitness / Security</td><td class="score">5</td><td>Design</td><td><span class="tag high">needs human decision</span></td></tr>
+      </tbody>
+    </table>
+    <p class="muted">Priority is the canonical score: severity + confidence + leverage + locality + testability − blast radius − regression risk − human-decision risk.</p>
+  </section>
+
+  <section id="candidate-ledger">
+    <h2>5. Candidate ledger</h2>
+    <article class="card">
+      <h3>INT-001 — Complete the sealed RiskContext consumer/assembler seam</h3>
+      <p><span class="tag high">Wiring / Integration</span><span class="tag">design</span><span class="tag">connected-impact-sweep</span></p>
+      <p><strong>Current friction:</strong> the gateway’s <code>build_risk_context</code> still passes symbol-keyed <code>positions</code> into a direct <code>RiskContext(...)</code> constructor. PT-4a makes that type assembler-minted, conId-keyed, holdings-based, and requires additional causal metadata. Snapshot construction therefore raises before any paper-account context is returned.</p>
+      <p><strong>Root seam:</strong> PT-3 IBKR adapter / planned AccountSnapshot + decision-context assembler / sealed PT-4a domain contract.</p>
+      <p><strong>Integrity rule:</strong> a consumer may create a sealed causal snapshot only through its designated assembler; it must not retain a parallel legacy shape or bypass authority.</p>
+      <ul class="evidence">
+        <li><code>src/ibkr_trader/domain/models.py:160-207</code> defines the guarded, holdings-based <code>RiskContext</code>; <code>:148</code> rejects direct construction.</li>
+        <li><code>src/ibkr_trader/ibkr/gateway.py:152-180</code> constructs the old symbol-keyed shape directly.</li>
+        <li><code>tests/test_ibkr_gateway.py:86, 94, 104, 178, 293, 339, 363, 376, 392, 409</code> fail with the same <code>TypeError</code>.</li>
+        <li><code>handoffs/claimed/029-pt-4a-domain-riskcontext-holdings.md:57</code> deliberately defers consumer wiring; this is therefore a checkout-level integration finding, not a claim that PT-4a must shortcut its own scope.</li>
+      </ul>
+      <p><strong>Confirmed facts:</strong> the failure is deterministic; focused PT-4a tests pass; the existing gateway cannot populate the new contract. <strong>Plausible inference:</strong> the planned PT-4b AccountSnapshot and PT-4c assembler handoffs are the intended owning implementation. <strong>Unknown:</strong> whether either handoff’s current draft fully defines the migration of legacy test fixtures and fake broker values.</p>
+      <p><strong>Scores:</strong> severity 4, confidence 5, leverage 5, locality 2, testability 5, blast radius 5, regression risk 3, human-decision risk 2. <strong>Priority: 11.</strong></p>
+      <p><strong>Enforceable check:</strong> a fake-gateway → AccountSnapshot → assembler integration test that proves a valid broker response produces a sealed, conId-keyed context and that incomplete identity/mark data fails closed.</p>
+      <p><strong>Verification:</strong> add the seam test, run <code>pytest tests/test_ibkr_gateway.py tests/test_domain_models.py</code> with a writable temp root, then the full root suite plus Ruff and Pyright. <strong>Adjacent concerns out of scope:</strong> PT-5 rules, execution control, and closing the provenance-bypass release gate.</p>
+    </article>
+
+    <article class="card">
+      <h3>INT-002 — Declare and run Pyright as a development verifier</h3>
+      <p><span class="tag warn">Build / CI</span><span class="tag">direct fix</span><span class="tag">sequential delivery</span></p>
+      <p><strong>Current friction:</strong> the repository contains a Pyright configuration and the PT-4a definition of done requires Pyright green, but the dev dependency group does not include Pyright and the installed environment reports <code>No module named pyright</code>.</p>
+      <p><strong>Root seam:</strong> development dependency declaration ↔ configured static checker ↔ acceptance command.</p>
+      <p><strong>Integrity rule:</strong> every required verifier must be reproducibly installable from the project’s declared dev environment.</p>
+      <ul class="evidence">
+        <li><code>pyproject.toml:17-18</code> declares <code>pytest</code>, <code>pytest-subtests</code>, <code>ruff</code>, and <code>hypothesis</code>, but not Pyright.</li>
+        <li><code>pyproject.toml:44-49</code> configures Pyright, including the active <code>.venv</code>.</li>
+        <li><code>handoffs/claimed/029-pt-4a-domain-riskcontext-holdings.md:83</code> names “ruff + pyright green” as completion evidence.</li>
+        <li><code>.venv\Scripts\python.exe -m pyright src tests</code> failed in this audit because the module is unavailable.</li>
+      </ul>
+      <p><strong>Confirmed facts:</strong> the verifier is configured but unavailable. <strong>Plausible inference:</strong> its absence can let type/contract regressions reach review. <strong>Unknown:</strong> the intended version pinning and whether CI supplies Pyright out of band.</p>
+      <p><strong>Scores:</strong> severity 3, confidence 5, leverage 4, locality 5, testability 5, blast radius 2, regression risk 1, human-decision risk 1. <strong>Priority: 18.</strong></p>
+      <p><strong>Enforceable check:</strong> run Pyright from the lockfile-created environment in the project verification command. <strong>Verification:</strong> update the declared dependency/lock, recreate or sync the environment, then run the exact configured command. <strong>Adjacent concerns out of scope:</strong> choosing stricter Pyright policy and fixing type errors it may reveal.</p>
+    </article>
+
+    <article class="card">
+      <h3>INT-003 — Specify the release gate that closes mint-provenance bypasses</h3>
+      <p><span class="tag high">Architecture fitness / Security</span><span class="tag">design</span><span class="tag high">blocked-needs-human-decision</span></p>
+      <p><strong>Current friction:</strong> <code>RiskContext.model_construct()</code> bypasses the constructor guard and the authority remains importable from the implementation module. The code and ADR accurately label this as provenance rather than an in-process security boundary, but the project has not yet chosen the executable release-gate control that makes this acceptable before live use.</p>
+      <p><strong>Root seam:</strong> Python/Pydantic construction model ↔ authority-containment policy ↔ live-release governance.</p>
+      <p><strong>Integrity rule:</strong> safety claims must match their actual enforcement boundary; a live-release condition cannot remain merely documented.</p>
+      <ul class="evidence">
+        <li><code>src/ibkr_trader/domain/models.py:140-160</code> states the guard is not an in-process security boundary.</li>
+        <li><code>tests/test_domain_models.py:158-161</code> proves the <code>model_construct()</code> bypass.</li>
+        <li><code>docs/design/adr/0003-pt5-rules-ledger.md:249-252, 341</code> defers bypass closure to a release gate before live use.</li>
+      </ul>
+      <p><strong>Confirmed facts:</strong> the bypass exists and is intentionally documented. <strong>Plausible inference:</strong> an executable release gate is safer than a prose-only reminder. <strong>Unknown:</strong> whether the gate should be a static import rule, a packaging boundary, a capability-injection policy, an adversarial test suite, or a combination.</p>
+      <p><strong>Scores:</strong> severity 3, confidence 5, leverage 4, locality 2, testability 4, blast radius 4, regression risk 4, human-decision risk 5. <strong>Priority: 5.</strong></p>
+      <p><strong>Blocked by:</strong> the <em>security/trust-boundary and live-release-policy</em> decision. <strong>Enforceable check opportunity:</strong> selected only after that policy is decided. <strong>Adjacent concerns out of scope:</strong> implementing PT-4b/PT-4c and changing the present provenance claim.</p>
+    </article>
+  </section>
+
+  <section id="lane-findings">
+    <h2>6. Per-category findings</h2>
+    <div class="card"><h3>Wiring / integration</h3><p>The only non-test direct constructor search hit outside the domain test is <code>gateway.py:180</code>. This makes the break narrow and measurable, but it is not a valid direct-authority patch because the new contract also changes identity, holdings, mark provenance, and digest fields.</p></div>
+    <div class="card"><h3>Build / static</h3><p>Pyright is configured but not present. Ruff runs, but <code>ruff check src tests collab/tools/lib collab/tests</code> reports 301 findings (31 mechanically fixable). Those findings span many existing collab files, including tests and unrelated runtime helpers. This audit intentionally rejects a broad “fix all lint” cleanup: select a narrow lint-scope/ownership candidate later if the repository wants the collab tree to share the root quality bar.</p></div>
+    <div class="card"><h3>Test environment</h3><p>Tests using <code>tmp_path</code> could not create or scan the current user pytest temp directory because of <code>WinError 5</code>. This is an audit-environment limitation, not yet a repository defect. It prevented complete validation of state, reconciliation, and collab tests; it does not explain the 10 direct-constructor failures.</p></div>
+  </section>
+
+  <section id="duplicates">
+    <h2>7. Cross-category duplicate groups</h2>
+    <div class="card"><p><strong>DG-001 — RiskContext migration seam:</strong> all ten gateway failures share the single root cause at <code>gateway.py:180</code>; they are intentionally merged into INT-001 rather than treated as ten bugs.</p><p><strong>DG-002 — temporary directory permissions:</strong> root and collab pytest setup errors share the local <code>pytest-of-Nalakram</code> access failure. They are recorded as an environment constraint, not a code candidate.</p></div>
+  </section>
+
+  <section id="human-blockers">
+    <h2>8. Human-decision blockers</h2>
+    <div class="card"><p><strong>INT-003:</strong> choose the authority-containment / release-gate model before asking an implementation to close a documented bypass. This is a security-boundary and release-policy decision; auto-execution would invent a trust model.</p><p><strong>INT-001:</strong> no human decision is currently required to acknowledge the red seam, but its execution must follow the selected PT-4b/PT-4c contract rather than shortcut the staged migration.</p></div>
+  </section>
+
+  <section id="quick-wins">
+    <h2>9. Quick wins</h2>
+    <div class="card"><p><strong>INT-002</strong> is the only high-locality, high-testability candidate. Declaring the configured checker is small, independently verifiable, and does not alter trading behavior. It should not be bundled with any domain migration work.</p></div>
+  </section>
+
+  <section id="deep-work">
+    <h2>10. High-leverage deep work</h2>
+    <div class="card"><p><strong>INT-001</strong> is high-leverage because a correctly assembled causal context is the input to every later risk decision. Its larger blast radius is appropriate: identity resolution, holdings valuation, price provenance, fake broker fixtures, gateway tests, and the mint boundary must agree.</p></div>
+  </section>
+
+  <section id="unsafe">
+    <h2>11. Unsafe-to-auto-execute work</h2>
+    <div class="card"><p><strong>INT-003</strong> is unsafe to auto-execute due to human-decision risk 5. Any chosen policy must preserve the current honest distinction between provenance and security, and be reviewed before live execution.</p></div>
+  </section>
+
+  <section id="verification-readiness">
+    <h2>12. Verification readiness</h2>
+    <table>
+      <thead><tr><th>Check</th><th>Result in this audit</th><th>Readiness</th></tr></thead>
+      <tbody>
+        <tr><td><code>pytest tests/test_domain_models.py -q</code></td><td>9 passed</td><td><span class="tag ok">ready</span></td></tr>
+        <tr><td><code>pytest tests/test_ibkr_gateway.py -q</code></td><td>10 failed from INT-001; 2 errors from temporary-directory permissions</td><td><span class="tag high">failing / environment-limited</span></td></tr>
+        <tr><td>Root <code>pytest -q</code></td><td>10 failed, 52 passed, 1 skipped, 14 temporary-directory errors</td><td><span class="tag high">not green</span></td></tr>
+        <tr><td>Targeted changed collab tests</td><td>32 passed, 99 temporary-directory errors</td><td><span class="tag warn">environment-limited</span></td></tr>
+        <tr><td><code>ruff check src tests collab/tools/lib collab/tests</code></td><td>301 findings, 31 automatically fixable; root configuration declares only <code>src</code> and <code>tests</code></td><td><span class="tag warn">not a clean cross-tree baseline</span></td></tr>
+        <tr><td><code>python -m pyright src tests</code></td><td>module unavailable</td><td><span class="tag high">not ready</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section id="recommended-queue">
+    <h2>13. Recommended queue</h2>
+    <ol>
+      <li><strong>INT-002:</strong> restore the declared static-verification toolchain. This is the smallest safe independent loop.</li>
+      <li><strong>INT-001:</strong> select the planned AccountSnapshot/assembler consumer seam as one coherent connected-impact loop. Do not solve it by exposing or directly applying the assembler authority from the legacy gateway.</li>
+      <li><strong>INT-003:</strong> take a design decision for the release gate only when ready to define the live-release trust boundary.</li>
+    </ol>
+    <div class="callout"><strong>Manual-mode stopping point:</strong> one candidate must be explicitly selected before any production change. Next valid state: <strong>existing report candidate gate</strong>.</div>
+  </section>
+</main>
+</body>
+</html>

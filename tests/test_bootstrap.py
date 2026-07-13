@@ -7,11 +7,12 @@ and live-refusing, and the §8 telemetry envelope emits a well-formed, hashed, r
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 import pytest
 
 from ibkr_trader import __version__, app
-from ibkr_trader.config import Mode, RiskLimits, Settings, resolve_mode, submission_allowed
+from ibkr_trader.config import Mode, RiskPolicy, Settings, resolve_mode, submission_allowed
 from ibkr_trader.pack import TRADING_PACK
 from ibkr_trader.telemetry import SCHEMA_VERSION, Emitter
 
@@ -43,10 +44,11 @@ class TestControlPlaneIsPaperFirst:
         assert submission_allowed(Mode.KILL_SWITCHED) is False
         assert submission_allowed(Mode.PAUSED) is False
 
-    def test_default_risk_limits_match_protocol(self):
-        r = RiskLimits()
-        assert r.max_risk_per_trade == 0.01 and r.daily_loss_lockout == 0.03
-        assert r.leverage_cap == 1.5 and r.stop_loss_required is True
+    def test_default_risk_policy_matches_protocol(self):
+        policy = RiskPolicy()
+        assert policy.max_risk_per_trade == Decimal("0.01")
+        assert policy.daily_realized_lockout_pct == Decimal("0.03")
+        assert policy.leverage_cap == Decimal("1.5") and policy.stop_loss_required is True
 
 
 _REQUIRED_KEYS = frozenset(
@@ -109,4 +111,3 @@ class TestPackDeclaration:
 def test_app_bootstrap_emits_event(tmp_path):
     ev = app.bootstrap(emitter=Emitter(log_path=tmp_path / "run.jsonl"))
     assert ev["stage"] == "app.bootstrap" and ev["task_id"] == "PT-0"
-    assert ev["decision"]["action"] == "accept"

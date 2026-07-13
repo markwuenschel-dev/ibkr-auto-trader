@@ -1,36 +1,28 @@
-"""pack — the §12 domain-pack declaration for trading (the seam to the reusable core).
+"""The declared collab-kit domain pack for the trading system.
 
-A domain pack is *thin*: it inherits all control flow, risk math, telemetry, and promotion machinery
-from the core and supplies only domain gates + a checklet catalog. This file makes the §12 interface
-real from PT-0 — most lists are empty stubs that the pipeline slices fill in (deterministic_checks and
-executables grow with PT-1…PT-15). What matters now is the two load-bearing declarations:
-
-  * ``oracle = "execution"`` — trading has a sound oracle (tests + deterministic risk math), so per §5.7
-    the verifier authority ceiling is **auto-block** and R_fw is a true-correctness bound, not merely an
-    agreement bound. This is why the trader is a *safe* first pack on a fail-closed substrate.
-  * the account-level ``acceptance_thresholds`` — the PROTOCOL hard limits the Rules Ledger (PT-5) enforces.
+A pack is deliberately declarative: it names authority, artifacts, executable checks, and known failure
+modes before pipeline code exists. The orchestrator reads this rather than allowing an agent to invent its
+own acceptance bar mid-run.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
 class DomainPack:
+    """Minimal executable-pack declaration consumed by the orchestrator."""
+
     name: str
-    oracle: str  # "execution" | "structural" | "oracle_poor" (§5.7 ceiling)
-    artifact_types: tuple[str, ...] = ()
-    deterministic_checks: tuple[str, ...] = ()  # L1 (total functions -> pass/fail); grows per slice
-    static_analyzers: tuple[str, ...] = ()  # L2
-    executables: tuple[str, ...] = ()  # L3 (tests/sims); the oracle
-    source_rules: tuple[str, ...] = ()  # L4 (empty — trading has no external-claim layer)
-    rubric_dimensions: tuple[str, ...] = ()  # L5 residual subjective (minimal for a coding pack)
-    human_review_triggers: tuple[str, ...] = ()  # L6
-    checklet_catalog: tuple[dict, ...] = ()  # each: criterion/input/output/authority/calibration_target
-    acceptance_thresholds: dict = field(default_factory=dict)
-    known_failure_modes: tuple[str, ...] = ()
-    default_loop: tuple[str, ...] = ()  # recommended role set + ordering
+    oracle: str
+    artifact_types: tuple[str, ...]
+    executables: tuple[str, ...]
+    human_review_triggers: tuple[str, ...]
+    acceptance_thresholds: dict[str, Any]
+    known_failure_modes: tuple[str, ...]
+    default_loop: tuple[str, ...]
 
 
 TRADING_PACK = DomainPack(
@@ -53,7 +45,7 @@ TRADING_PACK = DomainPack(
         "risk_limit_config_change",
     ),
     acceptance_thresholds={
-        # PROTOCOL.md hard limits (mirrored in config.RiskLimits; the Rules Ledger enforces them).
+        # PROTOCOL.md hard limits (mirrored in config.RiskPolicy; the Rules Ledger enforces them).
         "max_risk_per_trade": 0.01,
         "daily_loss_lockout": 0.03,
         "leverage_cap": 1.5,
