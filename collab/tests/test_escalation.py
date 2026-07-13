@@ -171,3 +171,73 @@ class TestLoopPolicy:
         esc = next(e for e in _events(collab) if e["stage"] == "autopilot.escalation")
         assert "reason:budget_exhausted" in esc["decision"]["reason_codes"]
         assert hc.state_of(collab, "001") == "claimed"
+
+
+class TestOperatorRetry:
+    """ADR-0003 reopen=retry: a durable operator request re-drives a PAUSED handoff on a fresh budget
+    epoch. The driver consumes it even though the run that escalated it already exited."""
+
+    def test_retry_request_reopens_and_closes(self, tmp_path):
+        import operator_requests as opreq
+        home = tmp_path / "home"
+        home.mkdir()
+        collab = str(tmp_path / "c")
+        src = Path(collab) / "src" / "gateway.py"
+        phase = {"sign": False}
+        n = {"b": 0}
+
+        def runner(cmd, prompt, *, timeout, **kw):
+            who = cmd[0]
+            if "builder" in who:
+                n["b"] += 1
+                src.write_text(f"x = {n['b']}\n", encoding="utf-8")  # distinct (fixed) source each attempt
+                return "built"
+            if "reviewer" in who:
+                return "verified\n[[SIGNOFF]]" if phase["sign"] else "not yet — keep going"
+            if "grok" in who:
+                return "NO-FINDING"                            # breaker finds nothing -> clean lanes
+            return "ok"
+
+        TestLoopPolicy()._lane_slice(collab, home, tmp_path, runner)
+
+        # Phase 1: the reviewer withholds -> repair to the work-attempt budget -> escalation, still claimed.
+        ap.run(collab, seats=_closeout_seats(), limits=_bounded_limits(1), runner=runner, home=str(home))
+        assert escalation.pending(collab) == ["001"]
+        assert hc.state_of(collab, "001") == "claimed"
+
+        # The operator files a durable retry, then the reviewer will sign off; a NEW run consumes it.
+        opreq.write(collab, "001", opreq.RETRY, by="operator")
+        phase["sign"] = True
+        ap.run(collab, seats=_closeout_seats(), limits=_bounded_limits(2), runner=runner, home=str(home))
+
+        assert hc.state_of(collab, "001") == "done"            # retried, re-driven, and closed
+        assert opreq.get(collab, "001") is None                # the request was consumed
+        assert escalation.pending(collab) == []                # the stale escalation was cleared on reopen
+        assert any(e.get("stage") == "autopilot.reopen" for e in _events(collab))
+
+    def test_adopt_request_assesses_current_source_without_a_builder_turn(self, tmp_path):
+        import operator_requests as opreq
+        home = tmp_path / "home"
+        home.mkdir()
+        collab = str(tmp_path / "c")
+        calls = {"builder": 0}
+
+        def runner(cmd, prompt, *, timeout, **kw):
+            who = cmd[0]
+            if "builder" in who:
+                calls["builder"] += 1
+                return "built"
+            if "reviewer" in who:
+                return "verified\n[[SIGNOFF]]"
+            if "grok" in who:
+                return "NO-FINDING"
+            return "ok"
+
+        TestLoopPolicy()._lane_slice(collab, home, tmp_path, runner)
+        hc.claim(collab, "001")                                 # a paused, claimed handoff
+        (Path(collab) / "src" / "gateway.py").write_text("x = 1\n", encoding="utf-8")  # operator's known-good source
+        opreq.write(collab, "001", opreq.ADOPT, by="operator")
+
+        ap.run(collab, seats=_closeout_seats(), limits=_bounded_limits(2), runner=runner, home=str(home))
+        assert hc.state_of(collab, "001") == "done"            # adopted current source, contract satisfied -> done
+        assert calls["builder"] == 0                            # adopt skipped the builder turn entirely

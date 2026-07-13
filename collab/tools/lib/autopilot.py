@@ -52,6 +52,7 @@ import contracts  # noqa: E402
 import escalation as esc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
+import operator_requests as opreq  # noqa: E402
 import run_budget as rb  # noqa: E402
 
 
@@ -882,6 +883,26 @@ def _run_loop(collab, *, seats, base_limits, runner, watch, interval, home, log,
                        decision={"action": "resume", "reason_codes": [], "confidence": None})
             last_phase = None
 
+        # Durable operator requests (ADR-0003) take priority over fresh work: a human filed a retry/adopt on
+        # a PAUSED handoff (possibly while no driver was running), so honour it before selecting a new root.
+        req = _next_request(collab, seats)
+        if req is not None:
+            last_phase = None
+            outcome, calls = _drive_candidate(collab, req["hid"], seats=seats, closeout=closeout,
+                                              runner=runner, home=home, log=log, rid=rid, lease=lease,
+                                              base_limits=base_limits, reopen=req["action"])
+            opreq.consume(collab, req["hid"])  # acted on -> the request is spent (the operator re-files to repeat)
+            total_calls += calls
+            if outcome == "closed":
+                _promote_next_draft(collab, log=log, rid=rid)
+                continue
+            if outcome == "stopped" or _read_control(collab).get("stop"):
+                continue
+            if outcome in ("stalled", "human", "lease_held"):
+                _write_status(collab, phase="capped", last_error=f"{req['hid']} not closed ({outcome})")
+                _pause_note(collab, home, base_limits.max_work_attempts)
+            return total_calls
+
         root = _next_root(collab, seats, driven)
         if root is None:  # board drained of fresh work (only human-seat handoffs remain)
             idle_phase = "sleeping" if watch else "idle"
@@ -927,9 +948,29 @@ def _limits_from_control(collab, base_limits):
     return replace(base_limits, max_work_attempts=int(mr)) if mr else base_limits
 
 
-def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, lease, base_limits):
+def _next_request(collab, seats):
+    """The lowest-id consumable operator request (retry/adopt), or ``None``. A request whose handoff is gone,
+    already closed, or addressed to a human seat can never be re-driven, so it is consumed here and skipped."""
+    for req in opreq.pending(collab):
+        hid = req["hid"]
+        state, path = hc._reconcile(collab, hid)
+        to, _frm = _to_from(Path(path)) if path else (None, None)
+        if path is None or state not in ("pending", "claimed") or _cli_seat(seats, (to or "").strip()) is None:
+            opreq.consume(collab, hid)  # nothing to re-drive -> discard the stale request
+            continue
+        return req
+    return None
+
+
+def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, lease, base_limits,
+                     reopen=None):
     """Drive ONE handoff through the candidate lifecycle (ADR-0003 D1/D4). Returns ``(outcome, calls)``
     where ``calls`` is the number of seat turns dispatched (for run_history's per-run count).
+
+    ``reopen`` (``retry``/``adopt``) re-drives a PAUSED handoff on a human-authorized fresh budget epoch:
+    ``retry`` runs a fresh builder attempt; ``adopt`` skips the first builder attempt and assesses the
+    current on-disk source as the candidate (the §18.3 contract still gates the close — adopt cannot force
+    a done). A reopen clears the stale escalation record up front.
 
     Outcomes: ``closed`` (approved + contract satisfied -> the single ``hc.done``), ``stopped`` (control),
     ``stalled`` (backend fail / lost claim), ``human`` (next turn is a human seat), ``lease_held`` (a live
@@ -943,8 +984,11 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
     reviewer_seat = (from_seat or "").strip()  # the counterpart authors the work and reviews the result
     request = _substance(collab, Path(rpath)) if rpath else ""  # read BEFORE claim moves it out of pending/
     guardrails = _root_guardrails(rpath)
-    if rpath is None or _rstate != "pending":
-        return "stalled", calls  # the root vanished/advanced under us — a human needs to look
+    if rpath is None:
+        return "stalled", calls  # the root vanished under us — a human needs to look
+    drivable = ("pending", "claimed") if reopen else ("pending",)
+    if _rstate not in drivable:
+        return "stalled", calls  # a fresh drive needs pending; a reopen accepts the paused claimed state
     if _cli_seat(seats, builder_seat) is None:
         return "human", calls    # addressed to a human/web seat — left for the bridge
 
@@ -955,11 +999,13 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
     except hc.LeaseHeld:
         _write_status(collab, phase="capped", last_error=f"board lease held by another run; cannot drive {root}")
         return "lease_held", calls
-    try:
-        hc.claim(collab, root)  # the SINGLE claim for the whole exchange ([C36])
-    except cc.CollabError:
-        return "stalled", calls  # lost the claim race
-    _emit_safe(he.on_claim, log, rid, root, span_id=f"{root}:claim", parent_span_id=None, by=builder_seat)
+    if _rstate == "pending":
+        try:
+            hc.claim(collab, root)  # the SINGLE claim for the whole exchange ([C36])
+        except cc.CollabError:
+            return "stalled", calls  # lost the claim race
+        _emit_safe(he.on_claim, log, rid, root, span_id=f"{root}:claim", parent_span_id=None, by=builder_seat)
+    # else: a reopen of an already-claimed (paused) handoff keeps the existing claim.
 
     # closeout config drives the candidate's source manifest + adversarial lanes + test suite. Without a
     # source tree (a text-only handoff) there is nothing on disk to verify: the candidate's identity comes
@@ -972,10 +1018,20 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
     test_path = base.get("test_path")
 
     budget = rb.RunBudget(collab, root, _limits_from_control(collab, base_limits))
+    if reopen:
+        # A human-authorized fresh epoch (ADR-0002 D6): counters reset, the closed epoch stays immutable in
+        # the record. Clear the stale escalation — this pause is being retried.
+        budget.new_epoch(authorized_by=f"operator:{reopen}")
+        esc.clear(collab, root)
+        _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.reopen", role="human",
+                   artifact=f"handoff:{root}",
+                   decision={"action": reopen, "reason_codes": [f"epoch:{budget.epoch}", f"hid:{root}"],
+                             "confidence": None})
     transcript = request
     last_candidate_id = None
     last_blockers: list = []  # the most recent repair's blockers — embedded in a budget/no-progress escalation
     repaired = False
+    adopt_pending = (reopen == "adopt")  # adopt: skip the FIRST builder attempt, assess the current source
     attempt = 0
     while True:
         ctrl = _read_control(collab)
@@ -986,7 +1042,8 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
         live_limits = _limits_from_control(collab, base_limits)
         if live_limits != budget.limits:
             budget = rb.RunBudget(collab, root, live_limits)
-        _write_status(collab, max_rounds=live_limits.max_work_attempts)
+        _write_status(collab, max_rounds=live_limits.max_work_attempts, stage="builder",
+                      pause_reason=None, budget=budget.report())
         # Charge a work attempt BEFORE dispatch (ADR-0002 D6). A denial is a terminal budget pause.
         try:
             budget.charge(rb.WORK_ATTEMPT)
@@ -995,12 +1052,18 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
                             blockers=last_blockers)
             return "budget_exhausted", calls
         attempt += 1
-        builder_raw = _dispatch_seat(collab, builder_seat, seats=seats, runner=runner, hid=root,
-                                     transcript=transcript, log=log, rid=rid, attempt=attempt,
-                                     span_role="builder")
-        calls += 1
-        if builder_raw is None:
-            return "stalled", calls  # backend failed — handoff stays claimed; a human needs to look
+        if adopt_pending:
+            # adopt: the operator vouches the CURRENT on-disk source is the candidate — no builder dispatch,
+            # assess it as-is. The evidence contract still gates any close.
+            adopt_pending = False
+            builder_raw = "[operator adopted the current on-disk source as this candidate]"
+        else:
+            builder_raw = _dispatch_seat(collab, builder_seat, seats=seats, runner=runner, hid=root,
+                                         transcript=transcript, log=log, rid=rid, attempt=attempt,
+                                         span_role="builder")
+            calls += 1
+            if builder_raw is None:
+                return "stalled", calls  # backend failed — handoff stays claimed; a human needs to look
         transcript = f"{transcript}\n\n----- {builder_seat} -----\n{_sanitize(builder_raw)}"
 
         candidate = _compute_candidate(collab, root, seats=seats, builder_seat=builder_seat,
@@ -1008,6 +1071,7 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
                                        source_base=source_base, test_path=test_path, guardrails=guardrails,
                                        builder_output=builder_raw)
         cid = candidate.candidate_id
+        _write_status(collab, stage="assess", candidate=cid[5:17], current_hid=root)
         # No progress: a repair packet that produced a byte-identical candidate — the builder did not change
         # the source. Pause rather than reassess the identical work forever (ADR-0003).
         if repaired and cid == last_candidate_id:
@@ -1071,6 +1135,7 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
             last_candidate_id = cid
             last_blockers = blockers
             repaired = True
+            _write_status(collab, stage="repair", budget=budget.report())
             print(f"[autopilot] {root}: {len(blockers)} open blocker(s) -> repair packet to builder "
                   f"(attempt {attempt}/{live_limits.max_work_attempts})")
             continue  # loop -> another work attempt
@@ -1147,8 +1212,8 @@ def _escalate_pause(collab, hid, home, budget, *, reason, log, rid, cause=None, 
                artifact=f"handoff:{hid}",
                decision={"action": "escalate", "reason_codes": codes, "confidence": None},
                metrics={"budget": budget.report()})
-    _write_status(collab, phase="capped", last_error=f"{hid} paused ({reason}); awaiting human"[:200],
-                  budget=budget.report())
+    _write_status(collab, phase="capped", pause_reason=reason, stage=None, current_hid=hid,
+                  last_error=f"{hid} paused ({reason}); awaiting human"[:200], budget=budget.report())
     _pause_note(collab, home, int(budget.limits.max_work_attempts))
     print(f"[autopilot] {hid} ESCALATED ({reason}) — durable record written; human review needed")
 

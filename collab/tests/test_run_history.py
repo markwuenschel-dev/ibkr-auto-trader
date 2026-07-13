@@ -313,6 +313,28 @@ class TestDriverArchive:
         # the archived copy likewise carries this run and not the junk.
         assert "STALE" not in (hist / "events.jsonl").read_text("utf-8")
 
+    def test_run_json_records_truthful_terminal(self, tmp_path):
+        # ADR-0003: a run that escalates must record the truthful terminal in run.json — signoff.result
+        # "escalated", the terminal_reason, an escalation count, and the per-outcome tally.
+        home = str(tmp_path)
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="build it")
+        n = {"b": 0}
+
+        def runner(cmd, prompt, *, timeout, **kw):
+            if "builder" in cmd[0]:
+                n["b"] += 1
+                return f"rev {n['b']}"          # distinct output -> genuine progress, loops to the budget
+            return "not yet — keep going"        # reviewer withholds -> repair_required each attempt
+
+        ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=2, runner=runner, home=home)
+        run_uid = dc.read_status(collab)["run_uid"]
+        run_doc = json.loads((Path(collab) / "autopilot" / "history" / run_uid / "run.json").read_text("utf-8"))
+        assert run_doc["signoff"]["result"] == "escalated"
+        assert run_doc["terminal_reason"] == "budget_exhausted"
+        assert run_doc["escalations"] >= 1
+        assert run_doc["outcomes"].get("repair_required", 0) >= 1
+
     def test_archive_happens_even_on_stall_exit(self, tmp_path):
         # A backend stall is a non-graceful exit path; the finally-archival must still capture the run.
         home = str(tmp_path)

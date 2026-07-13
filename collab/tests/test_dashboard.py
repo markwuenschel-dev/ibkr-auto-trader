@@ -449,3 +449,65 @@ class TestHttpLayer:
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 7: durable reopen (retry/adopt) requests + start_driver guard
+# --------------------------------------------------------------------------- #
+
+
+class TestReopenAndStart:
+    def test_reopen_files_a_durable_retry_request(self, tmp_path):
+        import operator_requests as opreq
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        hc.claim(collab, "001")  # a paused/claimed handoff
+        res = dc.reopen_handoff(collab, "001", by="dashboard-web")
+        assert res == {"id": "001", "state": "claimed", "action": "retry", "queued": True}
+        assert opreq.get(collab, "001")["action"] == "retry"          # durable request written
+        assert any(e.get("stage") == "autopilot.control"
+                   and (e.get("decision") or {}).get("action") == "reopen" for e in _events(collab))
+
+    def test_reopen_adopt_action(self, tmp_path):
+        import operator_requests as opreq
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        dc.reopen_handoff(collab, "001", action="adopt")
+        assert opreq.get(collab, "001")["action"] == "adopt"
+
+    def test_reopen_unknown_handoff_raises(self, tmp_path):
+        with pytest.raises(hc.HandoffNotFound):
+            dc.reopen_handoff(str(tmp_path / "c"), "999")
+
+    def test_reopen_closed_handoff_conflicts(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        hc.claim(collab, "001")
+        hc.done(collab, "001")
+        with pytest.raises(hc.HandoffConflict):
+            dc.reopen_handoff(collab, "001")           # nothing to retry on a closed handoff
+
+    def test_start_driver_spawns_and_reports_pid(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        seen = {}
+
+        def fake_spawn(cmd):
+            seen["cmd"] = cmd
+            return 4242
+
+        res = dc.start_driver(collab, str(tmp_path), max_rounds=5, spawn=fake_spawn)
+        assert res["started"] is True and res["pid"] == 4242
+        assert "--collab" in seen["cmd"] and "--watch" in seen["cmd"]
+        assert "--max-rounds" in seen["cmd"] and "5" in seen["cmd"]
+
+    def test_start_driver_refuses_when_a_live_driver_holds_the_board(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        hc.ActiveHandoffLease(collab, "live-run").acquire("001")   # a live board lease
+
+        def boom(cmd):
+            raise AssertionError("must not spawn a second driver while one holds the board")
+
+        with pytest.raises(cc.CollabError):
+            dc.start_driver(collab, str(tmp_path), spawn=boom)

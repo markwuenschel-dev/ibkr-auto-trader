@@ -156,6 +156,11 @@ def build_summary(collab, run_uid, *, seats=None, started_ts=None, pid=None, max
     rounds_total = 0
     handoffs: list = []
     signoff = {"result": "none", "unmet": []}
+    # ADR-0003 candidate-lifecycle tallies (truthful terminals): per-outcome assessment counts, the number
+    # of durable escalations, and the reason of the LAST escalation this run wrote (the terminal cause).
+    outcomes: dict = {}
+    escalations = 0
+    terminal_reason = None
 
     for ev in events:
         stage = ev.get("stage")
@@ -199,13 +204,30 @@ def build_summary(collab, run_uid, *, seats=None, started_ts=None, pid=None, max
                 d["refuted"] += ref
             lanes_confirmed += conf
             lanes_refuted += ref
-        elif stage == "autopilot.signoff_blocked":
+        elif stage == "autopilot.assessment":
+            # ADR-0003: one candidate assessment. Tally outcomes for the run roll-up (approved/
+            # repair_required/infrastructure_blocked/verification_incomplete).
+            for code in (decision.get("reason_codes") or []):
+                if isinstance(code, str) and code.startswith("outcome:"):
+                    oc = code[len("outcome:"):]
+                    outcomes[oc] = outcomes.get(oc, 0) + 1
+        elif stage == "autopilot.escalation":
+            # A durable pause was written — the truthful terminal cause of this handoff's drive.
+            escalations += 1
+            for code in (decision.get("reason_codes") or []):
+                if isinstance(code, str) and code.startswith("reason:"):
+                    terminal_reason = code[len("reason:"):]
+            unmet = [c[len("unmet:"):] for c in (decision.get("reason_codes") or [])
+                     if isinstance(c, str) and c.startswith("unmet:")]
+            signoff = {"result": "escalated", "reason": terminal_reason, "unmet": unmet}
+        elif stage == "autopilot.signoff_blocked":  # legacy pre-candidate event — kept for old archives
             codes = decision.get("reason_codes") or []
             unmet = [c[len("unmet:"):] if isinstance(c, str) and c.startswith("unmet:") else c
                      for c in codes]
             signoff = {"result": "blocked", "unmet": unmet}
         elif stage in ("autopilot.autonomous_done", "handoff.autonomous_done"):
             signoff = {"result": "signed", "unmet": []}
+            terminal_reason = "closed"
 
     start_epoch = _parse_ts(started_ts)
     ended_ts = status.get("updated_ts") or status.get("ended_ts")
@@ -232,6 +254,9 @@ def build_summary(collab, run_uid, *, seats=None, started_ts=None, pid=None, max
         "seat_latency_ms": seat_latency,
         "lanes": {"confirmed": lanes_confirmed, "refuted": lanes_refuted, "by_lane": by_lane},
         "signoff": signoff,
+        "outcomes": outcomes,
+        "escalations": escalations,
+        "terminal_reason": terminal_reason if terminal_reason is not None else status.get("pause_reason"),
         "handoffs_touched": handoffs,
     }
 

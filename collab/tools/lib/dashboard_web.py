@@ -161,7 +161,12 @@ class _Handler(BaseHTTPRequestHandler):
                 hid = str(body.get("hid") or "").strip()
                 if not _HID_RE.fullmatch(hid):
                     return self._json(400, {"error": "bad hid"})
-                return self._json(200, dc.reopen_handoff(collab, hid))  # claimed -> pending (HandoffConflict -> 409)
+                action = str(body.get("action") or "retry")
+                if action not in ("retry", "adopt"):
+                    return self._json(400, {"error": "bad action"})
+                # RETRY/ADOPT a paused candidate: files a durable operator request the driver consumes
+                # (HandoffNotFound -> 404; already-closed -> HandoffConflict -> 409).
+                return self._json(200, dc.reopen_handoff(collab, hid, action=action, by="dashboard-web"))
             if self.path == "/api/seat-model":
                 seat, model = body.get("seat"), body.get("model")
                 if not (isinstance(seat, str) and isinstance(model, str)
