@@ -36,6 +36,7 @@ import collab_common as cc  # noqa: E402
 import contracts  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
+import operator_requests as opreq  # noqa: E402
 import registry  # noqa: E402
 import autopilot as ap  # reuse ap's path/telemetry helpers (single source of truth for the layout)  # noqa: E402
 
@@ -172,9 +173,10 @@ def _num(v):
 def run_stats(events: list[dict], *, series_n: int = 40) -> dict:
     """Aggregate ``autopilot.round`` telemetry into per-seat + overall stats and a latency series.
 
-    Pure function over an already-read event list (no I/O). Fails are counted but excluded from the
-    latency average and do not move ``last_ms`` (which stays the last successful reply). Defensive:
-    non-dict events and non-numeric metrics are skipped.
+    A completed round is the ``turn`` DONE event the driver emits (:func:`autopilot._dispatch_seat`); a
+    ``fail`` event is a backend failure. Pure function over an already-read event list (no I/O). Fails are
+    counted but excluded from the latency average and do not move ``last_ms`` (which stays the last
+    successful turn). Defensive: non-dict events and non-numeric metrics are skipped.
     """
     seats: dict[str, dict] = {}
     overall = {"rounds": 0, "fails": 0, "_sum": 0.0, "_n": 0}
@@ -191,7 +193,7 @@ def run_stats(events: list[dict], *, series_n: int = 40) -> dict:
         action = (ev.get("decision") or {}).get("action")
         metrics = ev.get("metrics") or {}
         lat = _num(metrics.get("latency_ms"))
-        if action == "reply":
+        if action == "turn":
             s = seat(name)
             s["rounds"] += 1
             overall["rounds"] += 1
@@ -385,7 +387,7 @@ def _run_dir(collab, run_uid) -> Path:
 # The list-UI summary fields carried out of a run.json (contract B). Missing keys default to None so a
 # partially-written archive never crashes the list.
 _SUMMARY_KEYS = ("run_uid", "started_ts", "ended_ts", "phase_final", "max_rounds", "rounds_total",
-                 "calls", "duration_ms", "lanes", "signoff", "seats")
+                 "calls", "duration_ms", "lanes", "signoff", "seats", "terminal_reason", "escalations")
 
 
 def _run_summary(doc: dict) -> dict:
@@ -424,6 +426,7 @@ def _current_summary(collab) -> dict | None:
         "max_rounds": ctrl.get("max_rounds") if isinstance(ctrl.get("max_rounds"), int) else st.get("max_rounds"),
         "rounds_total": st.get("round"),
         "lanes": _latest_lanes(collab),
+        "terminal_reason": st.get("pause_reason"),  # the live pause cause (candidate lifecycle), if any
         "current": True,
     })
     return summary
@@ -561,6 +564,10 @@ def snapshot(collab, home=None) -> dict:
         catalog = sorted(k for k in ap.load_models(home) if not str(k).startswith("_"))
     except Exception:
         catalog = []  # None/missing home — the model picker is optional, never fatal
+    try:
+        requests = opreq.pending(collab)  # durable operator retry/adopt requests awaiting the driver
+    except Exception:
+        requests = []
     return {
         "collab": str(collab),
         "ts": ap._now_utc(),
@@ -568,6 +575,8 @@ def snapshot(collab, home=None) -> dict:
         "control": ctrl,
         "paused": bool(ctrl.get("paused")),
         "stop": bool(ctrl.get("stop")),
+        "requests": requests,
+        "driver_running": driver_running(collab) is not None,
         "board": b,
         "counts": counts,
         "open": open_handoffs(collab),
@@ -666,3 +675,86 @@ def nudge(collab, hid: str) -> dict:
     body = f"Re-queued from {hid} by the dashboard; the original is stuck in claimed/."
     return hc.create(collab, to=to, from_=frm or "dashboard",
                      title=f"re-queue of {hid}", body=body)
+
+
+def reopen_handoff(collab, hid: str, *, action: str = "retry", by: str = "dashboard") -> dict:
+    """RETRY a paused candidate (ADR-0003 reopen=retry). This is the operator's "give it another go" on a
+    handoff the driver escalated and left in ``claimed`` (or one still ``pending``).
+
+    It does NOT move handoff state — it files a DURABLE operator request (:mod:`operator_requests`) the
+    driver consumes on its next loop pass (honoured even if no driver is running now). ``action="retry"``
+    runs a fresh builder attempt; ``action="adopt"`` adopts the current on-disk source as the candidate.
+    Either way the driver opens a new human-authorized budget epoch and the §18.3 contract still gates any
+    close — a reopen can never force a ``done`` ([C36]). Raises :class:`handoff_core.HandoffNotFound` for an
+    unknown id and :class:`handoff_core.HandoffConflict` for an already-closed one (nothing to retry)."""
+    act = opreq.RETRY if action == "retry" else opreq.ADOPT if action == "adopt" else None
+    if act is None:
+        raise cc.CollabError(f"unknown reopen action {action!r}; expected 'retry' or 'adopt'")
+    state = hc.state_of(collab, hid)
+    if state is None:
+        raise hc.HandoffNotFound(f"handoff {hid} not found")
+    if state not in ("pending", "claimed"):
+        raise hc.HandoffConflict(
+            f"handoff {hid} is {state}; only a paused (pending/claimed) handoff can be retried")
+    rec = opreq.write(collab, hid, act, by=by)
+    log, rid = ap._log_default(collab), ap._run_id(collab)
+    ap._emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.control", role="human",
+                  artifact=f"handoff:{hid}",
+                  decision={"action": "reopen", "reason_codes": [f"request:{act}", f"by:{by}"],
+                            "confidence": None})
+    return {"id": hid, "state": state, "action": rec["action"], "queued": True}
+
+
+def driver_running(collab) -> dict | None:
+    """The live driver's board-lease record if a driver is running (fresh heartbeat within the TTL), else
+    ``None``. A stale lease (crashed driver, heartbeat past the TTL) reads as not-running — the same rule
+    the lease itself uses to allow a reclaim."""
+    try:
+        holder = hc.ActiveHandoffLease(collab, "dashboard-probe").holder()
+    except Exception:
+        return None
+    if not isinstance(holder, dict):
+        return None
+    hb = holder.get("heartbeat_epoch")
+    if hb is None or (time.time() - float(hb)) >= hc._LEASE_TTL_S:
+        return None
+    return holder
+
+
+def _spawn_detached(cmd: list) -> int:
+    """Launch the driver as a detached background process and return its pid. Best-effort cross-platform
+    detach so the dashboard request returns immediately and the driver outlives it."""
+    import subprocess
+    kwargs: dict = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                                   | getattr(subprocess, "DETACHED_PROCESS", 0))
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **kwargs)
+    return proc.pid
+
+
+def start_driver(collab, home=None, *, max_rounds=None, by: str = "dashboard", watch: bool = True,
+                 spawn=None) -> dict:
+    """Launch the autopilot driver against ``collab`` as a detached background process — the dashboard's
+    "start" affordance. Refuses (``CollabError``) if a driver is already running (a live board lease), so a
+    second concurrent driver can never be spawned (ADR-0003 D2). ``spawn`` is injectable for tests; it
+    defaults to a detached :func:`subprocess.Popen`. Returns ``{collab, pid, started, by}``."""
+    holder = driver_running(collab)
+    if holder is not None:
+        raise cc.CollabError(
+            f"a driver is already running for this collab (run {holder.get('run_uid')!r}, "
+            f"pid {holder.get('pid')}) — stop it before starting another")
+    cmd = [sys.executable, str(Path(ap.__file__).resolve()), "--collab", str(collab)]
+    if home:
+        cmd += ["--home", str(home)]
+    if watch:
+        cmd += ["--watch"]
+    if max_rounds is not None:
+        cmd += ["--max-rounds", str(int(max_rounds))]
+    pid = (spawn or _spawn_detached)(cmd)
+    log, rid = ap._log_default(collab), ap._run_id(collab)
+    ap._emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.control", role="human",
+                  decision={"action": "start", "reason_codes": [f"by:{by}", f"pid:{pid}"], "confidence": None})
+    return {"collab": str(collab), "pid": pid, "started": True, "by": by}

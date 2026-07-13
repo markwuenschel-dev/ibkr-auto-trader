@@ -102,11 +102,13 @@ def _reviewer_preflight_ok(ledger: dict, reviewer_seat: str) -> tuple[bool, str]
 
 
 def evaluate(collab, hid: str, *, seats: dict, reviewer_seat: str, builder_seat: str,
-             lanes_cfg: dict | None = None) -> dict:
+             lanes_cfg: dict | None = None, candidate_id: str | None = None) -> dict:
     """Return ``{"satisfied": bool, "conditions": [{id,name,status,detail}...], "hash": sha256}``.
 
     Pure — never mutates handoff state. ``reviewer_seat`` is the seat proposing the sign-off; ``builder_seat``
-    is the handoff author (the driver passes the inbound's ``from``).
+    is the handoff author (the driver passes the inbound's ``from``). With a ``candidate_id`` it attests
+    the IMMUTABLE per-candidate ledger for that exact candidate (ADR-0002 D3); without one it reads the
+    legacy per-handoff ledger.
     """
     conds: list[dict] = []
 
@@ -115,7 +117,7 @@ def evaluate(collab, hid: str, *, seats: dict, reviewer_seat: str, builder_seat:
         return bool(ok)
 
     cfg = lanes_cfg if lanes_cfg is not None else lanes.load_lanes()
-    ledger = lanes.read_ledger(collab, hid)
+    ledger = lanes.read_ledger(collab, hid, candidate_id=candidate_id)
     rseat = (reviewer_seat or "").strip().casefold()
     bseat = (builder_seat or "").strip().casefold()
     state = hc.state_of(collab, hid)

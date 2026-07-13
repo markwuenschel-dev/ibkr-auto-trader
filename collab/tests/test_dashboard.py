@@ -99,9 +99,9 @@ class TestStatusAndControl:
         collab = str(tmp_path / "c")
         hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
         hc.claim(collab, "001")
-        ap._run_turn(collab, "reviewer", seats=_cli(["reviewer"]), runner=lambda *a, **k: "done",
-                     hid="001", transcript="y", round_no=2, counterpart_seat="builder",
-                     log=ap._log_default(collab), closeout=None, rid=ap._run_id(collab))
+        ap._dispatch_seat(collab, "reviewer", seats=_cli(["reviewer"]), runner=lambda *a, **k: "done",
+                          hid="001", transcript="y", log=ap._log_default(collab),
+                          rid=ap._run_id(collab), attempt=2, span_role="builder")
         st = dc.read_status(collab)
         assert st is not None
         assert st["round"] == 2
@@ -292,9 +292,9 @@ class TestStats:
     def test_run_stats_aggregates_per_seat_and_overall(self):
         evs = [
             _round_ev("reviewer", "start"),
-            _round_ev("reviewer", "reply", ms=100, rb=10, hid="001"),
-            _round_ev("builder", "reply", ms=200, rb=20, hid="002"),
-            _round_ev("reviewer", "reply", ms=300, rb=30, hid="003"),
+            _round_ev("reviewer", "turn", ms=100, rb=10, hid="001"),
+            _round_ev("builder", "turn", ms=200, rb=20, hid="002"),
+            _round_ev("reviewer", "turn", ms=300, rb=30, hid="003"),
             _round_ev("reviewer", "fail", hid="004"),
         ]
         st = dc.run_stats(evs, series_n=2)
@@ -302,7 +302,7 @@ class TestStats:
         assert st["overall"]["avg_ms"] == 200.0                          # (100+200+300)/3, fails excluded
         rv = st["seats"]["reviewer"]
         assert rv["rounds"] == 2 and rv["fails"] == 1
-        assert rv["avg_ms"] == 200.0 and rv["last_ms"] == 300.0          # last successful reply
+        assert rv["avg_ms"] == 200.0 and rv["last_ms"] == 300.0          # last successful turn
         assert rv["total_resp_bytes"] == 40
         assert st["seats"]["builder"]["rounds"] == 1
         assert len(st["latency_series"]) == 2                            # capped at series_n
@@ -311,8 +311,8 @@ class TestStats:
 
     def test_run_stats_defensive(self):
         evs = ["notadict", {"stage": "other"},
-               _round_ev("r", "reply", ms="nope"),   # non-numeric latency -> counted, no avg
-               _round_ev("r", "reply", ms=True)]      # bool is NOT a number -> counted, no avg
+               _round_ev("r", "turn", ms="nope"),   # non-numeric latency -> counted, no avg
+               _round_ev("r", "turn", ms=True)]      # bool is NOT a number -> counted, no avg
         st = dc.run_stats(evs)
         assert st["overall"]["rounds"] == 2 and st["overall"]["avg_ms"] is None
         assert st["latency_series"] == []
@@ -322,13 +322,13 @@ class TestStats:
     def test_snapshot_includes_stats_from_single_read(self, tmp_path):
         collab = str(tmp_path / "c")
         hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
-        # run_stats aggregates 'reply'-action round events (see TestStats). Emit one completed-round event
+        # run_stats aggregates 'turn'-action round events (see TestStats). Emit one completed-round event
         # onto the same event stream the driver appends to, so the snapshot has round telemetry to fold in;
         # the point of this test is that stats + the event feed come from ONE read, not from two.
         log = ap._log_default(collab)
         Path(log).parent.mkdir(parents=True, exist_ok=True)
         with open(log, "a", encoding="utf-8") as f:
-            f.write(json.dumps(_round_ev("reviewer", "reply", ms=12, rb=2)) + "\n")
+            f.write(json.dumps(_round_ev("reviewer", "turn", ms=12, rb=2)) + "\n")
         snap = dc.snapshot(collab)
         assert snap["stats"]["overall"]["rounds"] >= 1
         assert len(snap["events"]) <= 60
@@ -449,3 +449,65 @@ class TestHttpLayer:
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 7: durable reopen (retry/adopt) requests + start_driver guard
+# --------------------------------------------------------------------------- #
+
+
+class TestReopenAndStart:
+    def test_reopen_files_a_durable_retry_request(self, tmp_path):
+        import operator_requests as opreq
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        hc.claim(collab, "001")  # a paused/claimed handoff
+        res = dc.reopen_handoff(collab, "001", by="dashboard-web")
+        assert res == {"id": "001", "state": "claimed", "action": "retry", "queued": True}
+        assert opreq.get(collab, "001")["action"] == "retry"          # durable request written
+        assert any(e.get("stage") == "autopilot.control"
+                   and (e.get("decision") or {}).get("action") == "reopen" for e in _events(collab))
+
+    def test_reopen_adopt_action(self, tmp_path):
+        import operator_requests as opreq
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        dc.reopen_handoff(collab, "001", action="adopt")
+        assert opreq.get(collab, "001")["action"] == "adopt"
+
+    def test_reopen_unknown_handoff_raises(self, tmp_path):
+        with pytest.raises(hc.HandoffNotFound):
+            dc.reopen_handoff(str(tmp_path / "c"), "999")
+
+    def test_reopen_closed_handoff_conflicts(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        hc.claim(collab, "001")
+        hc.done(collab, "001")
+        with pytest.raises(hc.HandoffConflict):
+            dc.reopen_handoff(collab, "001")           # nothing to retry on a closed handoff
+
+    def test_start_driver_spawns_and_reports_pid(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        seen = {}
+
+        def fake_spawn(cmd):
+            seen["cmd"] = cmd
+            return 4242
+
+        res = dc.start_driver(collab, str(tmp_path), max_rounds=5, spawn=fake_spawn)
+        assert res["started"] is True and res["pid"] == 4242
+        assert "--collab" in seen["cmd"] and "--watch" in seen["cmd"]
+        assert "--max-rounds" in seen["cmd"] and "5" in seen["cmd"]
+
+    def test_start_driver_refuses_when_a_live_driver_holds_the_board(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        hc.ActiveHandoffLease(collab, "live-run").acquire("001")   # a live board lease
+
+        def boom(cmd):
+            raise AssertionError("must not spawn a second driver while one holds the board")
+
+        with pytest.raises(cc.CollabError):
+            dc.start_driver(collab, str(tmp_path), spawn=boom)
