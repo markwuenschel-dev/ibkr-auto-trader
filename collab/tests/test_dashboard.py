@@ -292,9 +292,9 @@ class TestStats:
     def test_run_stats_aggregates_per_seat_and_overall(self):
         evs = [
             _round_ev("reviewer", "start"),
-            _round_ev("reviewer", "reply", ms=100, rb=10, hid="001"),
-            _round_ev("builder", "reply", ms=200, rb=20, hid="002"),
-            _round_ev("reviewer", "reply", ms=300, rb=30, hid="003"),
+            _round_ev("reviewer", "turn", ms=100, rb=10, hid="001"),
+            _round_ev("builder", "turn", ms=200, rb=20, hid="002"),
+            _round_ev("reviewer", "turn", ms=300, rb=30, hid="003"),
             _round_ev("reviewer", "fail", hid="004"),
         ]
         st = dc.run_stats(evs, series_n=2)
@@ -302,7 +302,7 @@ class TestStats:
         assert st["overall"]["avg_ms"] == 200.0                          # (100+200+300)/3, fails excluded
         rv = st["seats"]["reviewer"]
         assert rv["rounds"] == 2 and rv["fails"] == 1
-        assert rv["avg_ms"] == 200.0 and rv["last_ms"] == 300.0          # last successful reply
+        assert rv["avg_ms"] == 200.0 and rv["last_ms"] == 300.0          # last successful turn
         assert rv["total_resp_bytes"] == 40
         assert st["seats"]["builder"]["rounds"] == 1
         assert len(st["latency_series"]) == 2                            # capped at series_n
@@ -311,8 +311,8 @@ class TestStats:
 
     def test_run_stats_defensive(self):
         evs = ["notadict", {"stage": "other"},
-               _round_ev("r", "reply", ms="nope"),   # non-numeric latency -> counted, no avg
-               _round_ev("r", "reply", ms=True)]      # bool is NOT a number -> counted, no avg
+               _round_ev("r", "turn", ms="nope"),   # non-numeric latency -> counted, no avg
+               _round_ev("r", "turn", ms=True)]      # bool is NOT a number -> counted, no avg
         st = dc.run_stats(evs)
         assert st["overall"]["rounds"] == 2 and st["overall"]["avg_ms"] is None
         assert st["latency_series"] == []
@@ -322,13 +322,13 @@ class TestStats:
     def test_snapshot_includes_stats_from_single_read(self, tmp_path):
         collab = str(tmp_path / "c")
         hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
-        # run_stats aggregates 'reply'-action round events (see TestStats). Emit one completed-round event
+        # run_stats aggregates 'turn'-action round events (see TestStats). Emit one completed-round event
         # onto the same event stream the driver appends to, so the snapshot has round telemetry to fold in;
         # the point of this test is that stats + the event feed come from ONE read, not from two.
         log = ap._log_default(collab)
         Path(log).parent.mkdir(parents=True, exist_ok=True)
         with open(log, "a", encoding="utf-8") as f:
-            f.write(json.dumps(_round_ev("reviewer", "reply", ms=12, rb=2)) + "\n")
+            f.write(json.dumps(_round_ev("reviewer", "turn", ms=12, rb=2)) + "\n")
         snap = dc.snapshot(collab)
         assert snap["stats"]["overall"]["rounds"] >= 1
         assert len(snap["events"]) <= 60

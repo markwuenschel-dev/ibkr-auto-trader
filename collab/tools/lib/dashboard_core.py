@@ -173,9 +173,10 @@ def _num(v):
 def run_stats(events: list[dict], *, series_n: int = 40) -> dict:
     """Aggregate ``autopilot.round`` telemetry into per-seat + overall stats and a latency series.
 
-    Pure function over an already-read event list (no I/O). Fails are counted but excluded from the
-    latency average and do not move ``last_ms`` (which stays the last successful reply). Defensive:
-    non-dict events and non-numeric metrics are skipped.
+    A completed round is the ``turn`` DONE event the driver emits (:func:`autopilot._dispatch_seat`); a
+    ``fail`` event is a backend failure. Pure function over an already-read event list (no I/O). Fails are
+    counted but excluded from the latency average and do not move ``last_ms`` (which stays the last
+    successful turn). Defensive: non-dict events and non-numeric metrics are skipped.
     """
     seats: dict[str, dict] = {}
     overall = {"rounds": 0, "fails": 0, "_sum": 0.0, "_n": 0}
@@ -192,7 +193,7 @@ def run_stats(events: list[dict], *, series_n: int = 40) -> dict:
         action = (ev.get("decision") or {}).get("action")
         metrics = ev.get("metrics") or {}
         lat = _num(metrics.get("latency_ms"))
-        if action == "reply":
+        if action == "turn":
             s = seat(name)
             s["rounds"] += 1
             overall["rounds"] += 1

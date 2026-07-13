@@ -96,6 +96,26 @@ No seat may approve its own work. Keep **builder** and **reviewer** on different
 vendors/models) — the done-contract enforces `reviewer != builder`, and the lane runner requires the
 breaker and verifier to be distinct from the builder too.
 
+## Budgets, escalation & reopen (the candidate lifecycle)
+
+The driver is **candidate-based** (see `CONTEXT.md`): it drives a handoff as a sequence of *candidates*,
+each **assessed** by the reviewer decision running in parallel with the adversarial lanes, then classified
+(`approved` / `repair_required` / `infrastructure_blocked` / `verification_incomplete`). A `repair_required`
+candidate sends the worker the exact findings and retries.
+
+Every retry is charged against a named **budget** (work attempts, review decisions per candidate,
+verification passes, total model calls, wall-clock — calibrated `balanced()` defaults). When the budget is
+exhausted — or a "fix" changes nothing (**no-progress**) — the driver writes a durable **escalation** to
+`autopilot/escalations/<hid>.md` (the reproduced defect + the terminal reason) and pauses, awaiting a human.
+It never thrashes to a silent stop and never ships on an unsatisfied contract.
+
+- **`--max-rounds`** on the driver CLI is a **deprecated alias** for the work-attempt budget. The dashboard's
+  "max turns" control (`control.json`) raises/lowers the same ceiling live.
+- The dashboard's **reopen** files a durable operator request (`autopilot/requests/<hid>.json`) the driver
+  consumes on its next pass — even if no driver is running now. `retry` re-drives on a fresh, human-authorized
+  budget epoch; `adopt` takes the current on-disk source as the candidate. Neither can force a `done` — the
+  evidence contract still gates the close.
+
 ## After editing
 
 Restart the driver so it reloads `seats.json`:
