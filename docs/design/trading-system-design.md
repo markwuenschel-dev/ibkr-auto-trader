@@ -4,8 +4,9 @@
 > Derived from [`../../CONTEXT.md`](../../CONTEXT.md) (domain model) and [`../../PROTOCOL.md`](../../PROTOCOL.md)
 > (safety rules). **Nothing here places even a paper order until reviewed** per the collab process.
 
-The design is a **two-deep-module** architecture with hard type seams: a strategy can *never*
-construct an executable object; every order flows Strategy → **Risk & Sizing** → **Execution
+The design is a **two-deep-module** architecture with provenance/type seams: the strategy interface
+emits `StrategyIntent`, and trusted execution code must enforce the `no-direct-strategy-orders`
+release gate before broker submission. Every order flows Strategy → **Risk & Sizing** → **Execution
 Control** → adapter. This internal safety layer is independent of, and complementary to, the
 collab-kit review gate (see [`README.md`](./README.md) → two-gate model).
 
@@ -58,14 +59,16 @@ has legitimately traveled — this is a safety mechanism, not just typing hygien
 | `RiskContext` | IBKR snapshot | n/a | mode, clock, equity, NLV, buying power, margin, daily P&L, positions, open orders, market data, risk config |
 | `ProposedTradePlan` | RiskPlanner | **No** | qty, notional, entry, stop, max-loss-if-stopped, resulting position/exposure/leverage, sizing explanation |
 | `ApprovalDecision` | RiskApprover | n/a | verdict (approved/reduced/rejected/pause), rule results, audit evidence |
-| `ApprovedOrderIntent` | RiskSizing (post-approval) | **No** (gateable) | the plan + approval provenance; *only constructible after approval* |
+| `ApprovedOrderIntent` | RiskSizing (post-approval) | **No** (gateable) | the plan + approval provenance; minted by Risk & Sizing in the trusted pipeline |
 | `ExecutionDecision` | ExecutionControl | n/a | authorized/rejected/paused, mode decision, routing decision, idempotency evidence, audit evidence |
-| `ExecutableOrder` | ExecutionGate (post-auth) | **Yes** | the only object an adapter may send; *only constructible after authorization* |
+| `ExecutableOrder` | ExecutionGate (post-auth) | **Yes** | the ordinary adapter input; minted by ExecutionGate in the trusted pipeline |
 
-**Constructibility rule:** `ApprovedOrderIntent` and `ExecutableOrder` have no public constructor
-usable from strategy code — they are minted only inside Risk & Sizing / Execution Control
-respectively (e.g. via a module-private token/factory). A strategy importing `domain` cannot build
-one.
+**Constructibility rule:** the trusted pipeline mints `ApprovedOrderIntent` and `ExecutableOrder`
+inside Risk & Sizing / Execution Control respectively (e.g. via a module-private token/factory).
+This makes ordinary direct API use detectable, but it is not a hard in-process security boundary:
+public authority imports and Pydantic `model_construct()` can bypass it. The current architecture
+permits trusted execution-core code in process only; a future less-trusted plugin requires a
+separate boundary design before it ships.
 
 ---
 
@@ -142,7 +145,8 @@ keys, §6.1), and **open-order constraints** — and only then mints the `Execut
 ### 4.3 Adapters (`ExecutionAdapter` protocol)
 `send(order: ExecutableOrder) -> Fill | Ack`. Implementations: `simulated` (default), `paper_ibkr`.
 `live_ibkr` is future-only and unavailable unless reviewed live-mode gates pass. **Adapters accept
-only `ExecutableOrder`** — the type makes bypass impossible.
+only `ExecutableOrder`** as their ordinary API contract; that does not make arbitrary in-process
+bypass impossible.
 
 ---
 
@@ -197,9 +201,9 @@ involved).
 
 | Invariant | Test |
 |---|---|
-| Strategy output never executable | Type test: `Strategy.propose` return type is `list[StrategyIntent]`; no path constructs `ExecutableOrder` from strategy scope |
+| Strategy output is non-executable | Type test: `Strategy.propose` return type is `list[StrategyIntent]`; trusted execution enforces the release gate |
 | Every executable order intent passes Risk & Sizing | Provenance test: `ExecutionGate` rejects any `ApprovedOrderIntent` lacking planner provenance |
-| Every executable order passes Execution Control | Adapter contract test: `send()` only accepts `ExecutableOrder`; gate is the sole minter |
+| Every executable order passes Execution Control | Adapter contract test: `send()` accepts `ExecutableOrder`; release-gate bypass tests cover the trusted-pipeline minter |
 | Adapters accept only `ExecutableOrder` | Static + runtime type test on every adapter |
 | ≤1% risk per trade | Property test: ∀ equity, ∀ stop distance → planner/approver never approves max-loss > 1% |
 | New opening risk rejected at realized daily loss (Control 1) | Test: `realized_daily_pnl ≤ −pct_a·E0` → opening intent rejected, strict exit allowed (`REDUCE_ONLY`) |
