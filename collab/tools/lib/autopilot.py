@@ -187,6 +187,50 @@ class _Heartbeat:
         return False
 
 
+_LEASE_RENEW_S = 30.0  # comfortably inside handoff_core._LEASE_TTL_S (90s), so a tick can be missed safely
+
+
+class _LeaseRenewer:
+    """Keep the board lease's heartbeat fresh for the WHOLE run, from one daemon thread.
+
+    ``handoff_core`` documents the lease as "renewed by the driver heartbeat", but nothing renewed it: a
+    healthy driver's lease went stale ``_LEASE_TTL_S`` (90 s) after ``acquire`` — i.e. during the first
+    agentic call of every real run. Two things then break, and the second is the dangerous one:
+      1. :func:`dashboard_core.driver_running` reports "no driver running" while the driver is working.
+      2. :func:`dashboard_core.start_driver` only refuses while a LIVE lease is held, so pressing Start
+         spawns a SECOND driver onto the same board — voiding ADR-0003 D2 exclusivity — and any other run
+         may reclaim the "stale" lease and claim the same handoff.
+
+    Run-lifetime rather than per-call: the gaps *between* calls count against the same TTL. ``renew()`` is
+    a no-op returning False whenever this run doesn't currently hold the lease (before ``acquire``, after
+    ``release``), so this is safe to run for the entire loop. Best-effort ([C15]) — a renew failure must
+    never take the run down; the loop's own lease checks remain authoritative.
+    """
+
+    def __init__(self, lease, interval: float = _LEASE_RENEW_S):
+        self._lease = lease
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self):
+        if self._lease is not None:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+        return self
+
+    def _run(self):
+        while not self._stop.wait(self._interval):
+            with suppress(Exception):
+                self._lease.renew()
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        return False
+
+
 def _read_control(collab) -> dict:
     """Read the dashboard-written control file. Missing/corrupt -> the safe default (running, not
     stopped). The driver only ever *obeys a pause/stop* from here; it never takes an action from it.
@@ -1062,6 +1106,10 @@ def run(
             cc.safe_write(_live_log, "")
     except (OSError, cc.CollabError) as _e:
         print(f"[autopilot] could not rotate events log: {_e}", file=sys.stderr)
+    # ``_write_status`` MERGES into the existing file, so every run-scoped field this run may never write
+    # has to be cleared HERE or it survives from the previous run and renders as current. That is not
+    # cosmetic: a stale ``pause_reason`` reads as this run's terminal cause, and a stale ``budget`` reads
+    # as this run's consumption. Reset the whole run-scoped surface, not just the fields we happen to set.
     _write_status(
         collab,
         pid=pid,
@@ -1078,22 +1126,33 @@ def run(
         current_hid=None,
         last_latency_ms=None,
         last_error=None,
+        stage=None,
+        candidate=None,
+        pause_reason=None,
+        budget=None,
+        active_since=None,
+        timeout=None,
+        ended_ts=None,
     )
     try:
-        return _run_loop(
-            collab,
-            seats=seats,
-            base_limits=base_limits,
-            runner=runner,
-            watch=watch,
-            interval=interval,
-            home=home,
-            log=log,
-            rid=rid,
-            closeout=closeout,
-            driven=driven,
-            lease=lease,
-        )
+        # Renew the board lease for the whole loop: without this it goes stale 90 s in (mid first agentic
+        # call), the dashboard reports "no driver running" while we work, and Start will spawn a SECOND
+        # driver onto this board (ADR-0003 D2). Daemon thread; released by the `finally` below.
+        with _LeaseRenewer(lease):
+            return _run_loop(
+                collab,
+                seats=seats,
+                base_limits=base_limits,
+                runner=runner,
+                watch=watch,
+                interval=interval,
+                home=home,
+                log=log,
+                rid=rid,
+                closeout=closeout,
+                driven=driven,
+                lease=lease,
+            )
     finally:
         # [C15] best-effort teardown on ANY exit (return, pause, stall, exception, kill): release the board
         # lease so the next run can start, then archive this run's evidence.

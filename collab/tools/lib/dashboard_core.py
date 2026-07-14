@@ -346,10 +346,17 @@ def set_seat_model(home, seat, model, *, by: str = "dashboard") -> dict:
     return {"seat": seat, "model": model, "by": by}
 
 
-def _latest_lanes(collab) -> dict | None:
+def _latest_lanes(collab, *, run_uid: str | None = None, hid: str | None = None) -> dict | None:
     """Summary of the most recent adversarial-lane ledger for the dashboard lane matrix. Best-effort:
-    ``None`` if no ledger exists yet. Surfaces only lane names, seat names, verdict counts, and the test
-    pass flag — no repo paths or finding text (those stay in the reply artifacts / handoff viewer)."""
+    ``None`` if no matching ledger exists. Surfaces only lane names, seat names, verdict counts, and the
+    test pass flag — no repo paths or finding text (those stay in the reply artifacts / handoff viewer).
+
+    ``run_uid``/``hid`` scope the search. Passing ``run_uid`` is what makes this honest: unscoped, this
+    returned the newest ledger ON DISK — any handoff, any run — so a previous run's lane matrix rendered
+    as the live one. A ledger with no ``run_uid`` predates the stamp and can never be proven to belong to
+    the asked-for run, so it is EXCLUDED rather than assumed current: absent evidence must read as absent,
+    not as someone else's evidence.
+    """
     vdir = Path(collab) / "autopilot" / "verification"
     try:
         # Candidate ledgers are immutable under ``verification/<hid>/``;
@@ -357,11 +364,21 @@ def _latest_lanes(collab) -> dict | None:
         ledgers = sorted(vdir.rglob("*.ledger.json"), key=lambda p: p.stat().st_mtime)
     except OSError:
         return None
-    if not ledgers:
-        return None
-    try:
-        data = json.loads(ledgers[-1].read_text(encoding="utf-8"))
-    except OSError, ValueError:
+    data = None
+    for p in reversed(ledgers):  # newest first; take the newest that actually belongs to the asked-for run
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            continue
+        if not isinstance(doc, dict):
+            continue
+        if run_uid is not None and doc.get("run_uid") != run_uid:
+            continue
+        if hid is not None and str(doc.get("hid")) != str(hid):
+            continue
+        data = doc
+        break
+    if data is None:
         return None
     lanes = []
     for ln in data.get("lanes") or []:
@@ -387,6 +404,7 @@ def _latest_lanes(collab) -> dict | None:
         )
     return {
         "hid": data.get("hid"),
+        "run_uid": data.get("run_uid"),
         "lanes": lanes,
         "tests_passed": bool((data.get("tests") or {}).get("passed")),
         "blockers": len(data.get("blockers") or []),
@@ -473,7 +491,13 @@ def _load_run_json(collab, run_uid) -> dict:
 
 def _current_summary(collab) -> dict | None:
     """Synthesize a list summary for the LIVE run from status.json, flagged ``current`` — or ``None``
-    if no run is active (never ran, or the last run reached a terminal phase)."""
+    if no run is active (never ran, crashed, or the last run reached a terminal phase).
+
+    The live lease — not ``phase`` — decides. A driver killed mid-round leaves a non-terminal phase
+    behind forever, which made this synthesize a "current" row for a process that no longer exists.
+    """
+    if driver_running(collab) is None:
+        return None  # nothing holds the board: there is no current run, whatever status.json still says
     st = read_status(collab)
     if not isinstance(st, dict):
         return None
@@ -492,7 +516,7 @@ def _current_summary(collab) -> dict | None:
             if isinstance(ctrl.get("max_rounds"), int)
             else st.get("max_rounds"),
             "rounds_total": st.get("round"),
-            "lanes": _latest_lanes(collab),
+            "lanes": _latest_lanes(collab, run_uid=st.get("run_uid"), hid=st.get("current_hid")),
             "terminal_reason": st.get("pause_reason"),  # the live pause cause (candidate lifecycle), if any
             "current": True,
         }
@@ -616,16 +640,47 @@ def _seat_model_deltas(a, b) -> dict:
     return {seat: _delta_cat(a.get(seat), b.get(seat)) for seat in sorted(set(a) | set(b))}
 
 
+def _last_run(status: dict | None) -> dict | None:
+    """The epitaph for a run that is no longer live: just enough to say WHICH run ended and WHEN, for the
+    "no run active — last: 030 · ended 20:04" line. Deliberately not the run's data — the live panels go
+    empty instead of rendering a corpse (see :func:`snapshot`)."""
+    if not isinstance(status, dict):
+        return None
+    return {
+        "run_uid": status.get("run_uid"),
+        "hid": status.get("current_hid"),
+        "phase_final": status.get("phase"),
+        "pause_reason": status.get("pause_reason"),
+        "started_ts": status.get("started_ts"),
+        "ended_ts": status.get("ended_ts") or status.get("updated_ts"),
+        "last_error": status.get("last_error"),
+    }
+
+
 def snapshot(collab, home=None) -> dict:
     """The single poll call both readers use — a self-contained view of the run right now.
 
     Merges the live status heartbeat, the control flags, the grouped board + counts, a tail of the
     event stream, the seat->model map, and (best-effort) the cross-collab registry rollup.
+
+    LIVENESS IS THE BOARD LEASE, NOT ``status.json``. A driver that crashed, was killed, or exited never
+    got to write a terminal status, so status.json keeps describing a run that stopped hours ago — which
+    is exactly how a dead run's phase, feed, and lane matrix kept rendering as "now". The lease heartbeat
+    is the only surface a dead process cannot keep fresh, so it is the one we trust.
+
+    When no driver is live, every RUN-SCOPED panel is emptied (``status``, ``events``, ``stats``,
+    ``lanes``) and ``last_run`` carries the epitaph. DURABLE state is NOT run-scoped and stays: the board
+    (pending/claimed/done is true regardless of who is running), operator ``requests`` (queued intent for
+    the next driver), ``seats``, and the ``runs`` history. Emptying those would be its own lie.
     """
+    holder = driver_running(collab)  # the live lease, or None
+    live = holder is not None
+    status = read_status(collab)
+    run_uid = (status or {}).get("run_uid") if live else None
     b = board(collab)
     counts = {s: len(rows) for s, rows in b.items()}
     ctrl = read_control(collab)
-    evs = read_events(collab)  # one read feeds both the feed tail and the stats aggregation
+    evs = read_events(collab) if live else []  # one read feeds both the feed tail and the stats aggregation
     try:
         rollup = registry.status(home)
     except Exception:
@@ -641,20 +696,27 @@ def snapshot(collab, home=None) -> dict:
     return {
         "collab": str(collab),
         "ts": ap._now_utc(),
-        "status": read_status(collab),
+        # --- run-scoped: present ONLY while a driver holds a live lease ---
+        "live": live,
+        "run_uid": run_uid,
+        "status": status if live else None,
+        "last_run": None if live else _last_run(status),
+        "events": evs[-60:],
+        "stats": run_stats(evs),
+        "lanes": _latest_lanes(collab, run_uid=run_uid, hid=(status or {}).get("current_hid"))
+        if live
+        else None,
+        # --- durable: true regardless of whether anything is running ---
         "control": ctrl,
         "paused": bool(ctrl.get("paused")),
         "stop": bool(ctrl.get("stop")),
         "requests": requests,
-        "driver_running": driver_running(collab) is not None,
+        "driver_running": live,
         "board": b,
         "counts": counts,
         "open": open_handoffs(collab),
-        "events": evs[-60:],
-        "stats": run_stats(evs),
         "seats": _seat_models(home),
         "models_catalog": catalog,
-        "lanes": _latest_lanes(collab),
         "rollup": rollup,
         "runs": list_runs(collab)[:25],  # newest ~25 for the history/compare UI (best-effort; kept cheap)
     }
@@ -833,6 +895,14 @@ def start_driver(
             f"a driver is already running for this collab (run {holder.get('run_uid')!r}, "
             f"pid {holder.get('pid')}) — stop it before starting another"
         )
+    # "Start" and a leftover ``stop`` are contradictory intents, and stop is STICKY: nothing else clears it
+    # (no /api/unstop; set_stop is only ever called with True), so a stop from a previous session survives
+    # indefinitely. Spawning over it yields a driver that returns at its first loop pass having touched
+    # nothing, and reports phase="done" — a FALSE green that reads as "there was no work to do". The
+    # operator pressed Start; that is unambiguous. Clear it here, where the intent is expressed. ([C36]:
+    # this only ever un-idles the loop — no handoff is touched.)
+    if read_control(collab).get("stop"):
+        _write_control(collab, stop=False, requested_by=f"start:{by}")
     cmd = [sys.executable, str(Path(ap.__file__).resolve()), "--collab", str(collab)]
     if home:
         cmd += ["--home", str(home)]

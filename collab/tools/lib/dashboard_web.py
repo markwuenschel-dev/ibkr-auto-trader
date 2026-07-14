@@ -321,6 +321,12 @@ _PAGE = r"""<!doctype html>
   .statepill{ display:inline-flex; align-items:center; gap:7px; padding:5px 12px; border-radius:999px;
     font-size:12px; font-weight:600; border:1px solid var(--muted); color:var(--muted); }
   .statepill .d{ width:7px; height:7px; border-radius:50%; background:currentColor; }
+  /* Disconnected: the poll is dead, so every panel below is a FROZEN snapshot. Say so loudly and grey the
+     stale content — an untouched-looking page is indistinguishable from a live one and lies by omission. */
+  #offline{ display:none; position:sticky; top:0; z-index:50; background:var(--bad,#b3261e); color:#fff;
+    font-size:13px; font-weight:600; padding:8px 14px; text-align:center; letter-spacing:.01em; }
+  body.disconnected #offline{ display:block; }
+  body.disconnected .wrap{ opacity:.45; filter:grayscale(1); pointer-events:none; }
   .live{ display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
   .live .dot{ width:7px; height:7px; border-radius:50%; background:var(--faint); }
   .live.ok .dot{ background:var(--ok); } .live.warn .dot{ background:var(--warn); }
@@ -502,6 +508,7 @@ _PAGE = r"""<!doctype html>
   @media (prefers-reduced-motion:reduce){ *{ animation:none!important; transition:none!important; } }
 </style></head>
 <body>
+<div id="offline" role="alert">⚠ DISCONNECTED — the dashboard server is not responding. Everything below is a frozen snapshot, not live.</div>
 <header class="cmd">
   <div class="brand">
     <span class="beacon" id="beacon" aria-hidden="true"></span>
@@ -591,13 +598,21 @@ _PAGE = r"""<!doctype html>
 const TOKEN="__TOKEN__";
 let last=null, connected=true;
 let narrHid=null, narrData=null;   // the handoff the "What happened" card is showing + its fetched narrative
+let narrSigLast=null;              // last work-signature we fetched for -> refetch when the story actually moves
 const $=id=>document.getElementById(id);
 const esc=s=>(s==null?"":String(s));
 function el(tag,cls,txt){const e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e;}
 function fmtms(ms){ if(ms==null) return "-"; return ms<1000? Math.round(ms)+"ms" : (ms/1000).toFixed(1)+"s"; }
 function fmtage(s){ if(s==null) return ""; s=Math.floor(s); return s<60? s+"s" : s<3600? Math.floor(s/60)+"m" : Math.floor(s/3600)+"h"; }
 // Timestamps are stored UTC; the dashboard shows them in US Eastern (America/New_York — handles EST/EDT).
-function fmtET(iso){ if(!iso) return ""; try{ return new Date(iso).toLocaleTimeString("en-US",{timeZone:"America/New_York",hour12:false}); }catch(e){ return (iso||"").slice(11,19); } }
+// Time-only for TODAY; date-stamped otherwise. A bare "18:20" on a run from a previous day reads as "just
+// now" and turns stale history into an apparent live failure — always say the day when it isn't today.
+function fmtET(iso){ if(!iso) return ""; try{
+    const d=new Date(iso), TZ="America/New_York";
+    const day=x=>x.toLocaleDateString("en-US",{timeZone:TZ});
+    const t=d.toLocaleTimeString("en-US",{timeZone:TZ,hour12:false});
+    return day(d)===day(new Date())? t : d.toLocaleDateString("en-US",{timeZone:TZ,month:"short",day:"numeric"})+" "+t;
+  }catch(e){ return (iso||"").slice(11,19); } }
 function fmtdur(s){ if(s==null||s<0) return "-"; s=Math.floor(s); const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;
   return h? h+"h"+m+"m" : m? m+"m"+ss+"s" : ss+"s"; }
 function fmtbytes(b){ if(b==null) return ""; return b<1024? b+"B" : (b/1024).toFixed(1)+"KB"; }
@@ -743,8 +758,16 @@ function render(s){
 
 // ---- "What happened" narrative card ------------------------------------- //
 // Picks the handoff worth narrating (the one being worked, else the newest done/claimed) and lazy-loads its
-// human-readable story from /api/narrative — re-fetched only when the focus handoff changes, not every poll.
+// human-readable story from /api/narrative. Re-fetched when the focus handoff changes OR when the run's
+// work-signature moves (a round lands, the stage/phase/candidate turns over) — NOT on every poll, so an idle
+// heartbeat costs nothing but a live run's story keeps up on its own.
+function narrSig(s,hid){ const st=s.status||{}; const b=s.board||{};
+  return [hid, st.round, st.stage, st.phase, st.candidate, (b.claimed||[]).length, (b.done||[]).length].join("|"); }
 function focusHid(s){
+  // No live run -> no live story. /api/narrative knowingly falls back to ARCHIVED runs' event logs and
+  // labels those turns with whatever seats status.json currently names, so narrating while idle prints a
+  // previous run's work under the current models. History has the per-run detail; this card stays empty.
+  if(!s.live) return null;
   const st=s.status||{};
   if(st.current_hid) return String(st.current_hid);
   const b=s.board||{};
@@ -756,9 +779,15 @@ function focusHid(s){
 }
 function renderNarrative(s){
   const card=$("narrCard"); const hid=focusHid(s);
-  if(!hid){ card.style.display="none"; narrHid=null; narrData=null; return; }
+  if(!hid){ card.style.display="none"; narrHid=null; narrData=null; narrSigLast=null; return; }
   card.style.display=""; applyNarrCollapse();
-  if(hid!==narrHid){ narrHid=hid; narrData=null; paintNarrative(); fetchNarrative(hid); }
+  const sig=narrSig(s,hid);
+  if(hid!==narrHid){  // focus moved -> blank + reload (a spinner here is honest: it's a different story)
+    narrHid=hid; narrData=null; narrSigLast=sig; paintNarrative(); fetchNarrative(hid); return;
+  }
+  if(sig!==narrSigLast){  // same handoff, work moved -> refetch in place, no "loading…" flash
+    narrSigLast=sig; fetchNarrative(hid);
+  }
 }
 function narrCollapsed(){ try{ return localStorage.getItem("ap-narr-collapsed")==="1"; }catch(e){ return false; } }
 function applyNarrCollapse(){ const c=narrCollapsed();
@@ -837,8 +866,30 @@ function renderHero(s){
   const eb=$("heroEyebrow"), ti=$("heroTitle"), sub=$("heroSub"), cta=$("heroCta"), mx=$("heroMetrics"), stripe=$("heroStripe");
   eb.textContent=""; ti.textContent=""; sub.textContent=""; cta.textContent=""; mx.textContent="";
   const ph=s.paused?"paused":(st.phase||"");
-  if(!s.status){ stripe.style.background="var(--faint)"; eb.textContent="offline"; ti.textContent="Driver not running";
-    sub.textContent="Start autopilot against this collab to see live activity."; return; }
+  // NO RUN ACTIVE. The server sends status=null whenever no driver holds the board lease, so there is
+  // nothing live to draw and we must not invent it from the last run's leftovers. Say what ended, say
+  // what is queued, and offer the one useful action — Start. The board below is durable and stays.
+  if(!s.status){
+    stripe.style.background="var(--faint)";
+    const lr=s.last_run||null, pend=((s.board||{}).pending||[]), claimed=((s.board||{}).claimed||[]);
+    eb.textContent="no run active";
+    const next=pend.length?String(pend[0].id):(claimed.length?String(claimed[claimed.length-1].id):null);
+    if(pend.length){ ti.textContent=next+" is queued — press ▶ Start to run it"; }
+    else if(claimed.length){ ti.textContent=next+" is claimed but nothing is running it"; }
+    else { ti.textContent="No run active"; }
+    if(lr && lr.run_uid){
+      const bits=["last: "+(lr.hid?lr.hid+" · ":"")+"ended "+(fmtET(lr.ended_ts)||"?")];
+      if(lr.phase_final) bits.push(lr.phase_final+(lr.pause_reason?(" ("+lr.pause_reason+")"):""));
+      sub.textContent=bits.join(" · ")+" — see History for its detail.";
+    } else {
+      sub.textContent="Start autopilot against this collab to see live activity.";
+    }
+    const b=el("button","primary","▶ Start"); b.onclick=()=>startRun(); cta.appendChild(b);
+    if(claimed.length && !pend.length){
+      const r=el("button","warn ghost","↻ Re-run "+next); r.onclick=()=>reopen(next); cta.appendChild(r);
+    }
+    return;
+  }
   const active = st.active_seat && st.current_hid && !s.paused && ph==="thinking";
   const pendingCt=((s.board||{}).pending||[]).length;
   let color="var(--faint)";
@@ -963,19 +1014,14 @@ function renderSeats(s){
 let laneOpen=new Set();  // lane names the user expanded — persists across the 1s poll re-render so detail stays open
 function renderLanes(s){
   const L=s.lanes; const card=$("lanesCard"), box=$("lanes"), head=$("lanehead");
-  if(!L||!L.lanes||!L.lanes.length){ card.style.display="none"; return; }
+  // CLEAR before hiding. Hiding alone left the previous run's lane DOM in the document, so it reappeared
+  // intact the moment anything un-hid the card. The server now only ever sends lanes belonging to the
+  // live run (scoped by run_uid), so "no lanes" genuinely means there is nothing to show.
+  if(!L||!L.lanes||!L.lanes.length){ box.textContent=""; head.textContent=""; card.style.display="none"; return; }
   card.style.display=""; head.textContent="";
   const tp=el("span","chip "+(L.tests_passed?"ok":"crit"),L.tests_passed?"tests ✓":"tests ✗"); head.appendChild(tp);
   head.appendChild(el("span","chip "+((L.blockers||0)?"crit":""),(L.blockers||0)+" blocker"+((L.blockers||0)===1?"":"s")));
   box.textContent="";
-  // The ledger carries no run_uid, so a lane panel that predates the current run's start is stale evidence
-  // (generated_ts < status.started_ts). Flag it so a prior run's findings aren't read as this run's.
-  const started=(s.status||{}).started_ts;
-  if(L.generated_ts && started && String(L.generated_ts) < String(started)){
-    const ban=el("div",null,"⚠ Lane results are from a previous run.");
-    ban.style.cssText="margin:0 0 9px;padding:5px 9px;border-radius:6px;font-size:11.5px;background:rgba(230,172,72,.14);color:var(--warn,#e6ac48);";
-    box.appendChild(ban);
-  }
   L.lanes.forEach(ln=>{
     const hit=(ln.confirmed||0)>0;
     const incomplete=!!ln.incomplete;
@@ -1246,7 +1292,8 @@ async function doCompare(){
 
 async function refresh(){ let s;
   try{ s=await(await fetch("/api/state")).json(); connected=true; last=s; }
-  catch(e){ connected=false; if(last) render(last); return; }
+  catch(e){ connected=false; document.body.classList.add("disconnected"); if(last) render(last); return; }
+  document.body.classList.remove("disconnected");
   render(s);
 }
 document.addEventListener("keydown",e=>{ const tag=(e.target.tagName||"").toLowerCase();

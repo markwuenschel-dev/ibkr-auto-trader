@@ -555,6 +555,10 @@ def _run_resolved_plan(
         "hid": hid,
         "candidate_id": candidate_id,
         "generated_ts": ap._now_utc(),
+        # Which run produced this evidence. Without it a reader can only compare timestamps, so the
+        # dashboard had to guess "is this ledger mine?" from generated_ts vs started_ts — a guess that
+        # silently fails whenever either side is absent, and shows a prior run's findings as current.
+        "run_uid": ap._status_run_uid(collab),
         "guardrails": list(verification_plan.guardrails),
         "builder_seat": builder_seat,
         "reviewer_seat": reviewer_seat,
@@ -922,6 +926,7 @@ def run_lanes(
         "hid": hid,
         "candidate_id": candidate_id,
         "generated_ts": ap._now_utc(),
+        "run_uid": ap._status_run_uid(collab),  # see the note on the other ledger site
         "guardrails": list(guardrails),
         "builder_seat": builder_seat,
         "reviewer_seat": reviewer_seat or verifier_seat,

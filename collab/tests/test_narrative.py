@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ import pytest
 _LIB = Path(__file__).resolve().parent.parent / "tools" / "lib"
 sys.path.insert(0, str(_LIB))
 
+import autopilot as ap  # noqa: E402
 import contracts  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import narrative  # noqa: E402
@@ -312,21 +314,53 @@ class TestUnits:
         assert narrative._conformance("Looks good to me.\n[[SIGNOFF]]") == []
         assert narrative._conformance(None) == []
 
-    def test_clock_extracts_hh_mm(self):
-        assert narrative._clock("2026-07-09T00:18:44Z") == "00:18"
+    def test_clock_is_bare_hh_mm_for_today(self):
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        assert narrative._clock(f"{today}T00:18:44Z") == "00:18"
         assert narrative._clock("nonsense") == "nonsense"
         assert narrative._clock(None) == ""
 
+    def test_clock_date_stamps_any_other_day(self):
+        """A bare clock time on an older run reads as 'just now', so stale history renders as a live
+        failure. Anything not from today must carry its date."""
+        assert narrative._clock("2026-07-09T00:18:44Z") == "Jul 9, 00:18"
+        assert narrative._clock("2025-12-25T23:59:00Z") == "Dec 25, 23:59"
+        assert narrative._clock("2026-13-99T00:18:44Z") == "00:18"  # bad date -> still give the clock
+
     def test_run_label_current_vs_previous(self):
+        today = time.strftime("%Y-%m-%d", time.gmtime())
         assert (
-            narrative._run_label("20260709T001844Z-42", "2026-07-09T00:18:44Z", is_current=True)
-            == "Current run · 00:18"
+            narrative._run_label("x-42", f"{today}T00:18:44Z", is_current=True) == "Current run · 00:18"
         )
         assert (
-            narrative._run_label("20260709T001844Z-42", "2026-07-09T00:18:44Z", is_current=False)
-            == "Previous run · 00:18"
+            narrative._run_label("x-42", f"{today}T00:18:44Z", is_current=False) == "Previous run · 00:18"
         )
         assert narrative._run_label(None, None) == "the live run"
+
+    def test_turns_from_an_unidentifiable_run_are_not_narrated_as_this_runs(self, tmp_path):
+        # A run is live and its log still holds turns from BEFORE it started (the run-start truncate is
+        # best-effort and can fail). Events carry no run_uid, so those turns cannot be attributed to
+        # anyone. They must not be told as the current run's story.
+        collab = str(tmp_path / "c")
+        hid = _handoff(collab)
+        _two_turns(collab, hid)  # turns stamped 2026-01-01, i.e. before the run below
+        ap._write_status(
+            collab, run_uid="live-1", started_ts="2026-07-14T00:00:00Z", phase="thinking", run_seats={}
+        )
+        _label, events, is_current = narrative._choose_events(collab, hid)
+        assert events == [], "pre-run turns must not be served as the live run's"
+        assert is_current is True
+
+    def test_a_previous_runs_turns_are_not_labelled_with_the_live_runs_models(self, tmp_path):
+        # _model_map reads the LIVE status.run_seats. Applying it to an archived run's turns prints them
+        # under models that never produced them.
+        assert narrative._model_map("/nonexistent", is_current=False) == {}
+
+    def test_run_label_of_an_older_run_carries_its_date(self):
+        assert (
+            narrative._run_label("20260709T001844Z-42", "2026-07-09T00:18:44Z", is_current=False)
+            == "Previous run · Jul 9, 00:18"
+        )
 
     def test_render_surfaces_conformance_and_dod(self):
         d = {

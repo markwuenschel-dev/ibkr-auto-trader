@@ -29,6 +29,19 @@ def _cli(seat_names):
     return {s: {"backend": "cli", "cmd": [f"model-{s}"], "system": f"You are the {s}."} for s in seat_names}
 
 
+def _live_run(collab, *, hid="001", run_uid="20260714T000000Z-4242", **status):
+    """Make ``collab`` look like a driver is genuinely running, for the run-scoped panels.
+
+    ``dc.snapshot`` trusts the board LEASE for liveness, not status.json — a dead driver can leave any
+    status behind, but only a live one keeps a heartbeat fresh. So a test that wants the run-scoped
+    surface populated has to hold the lease, exactly as a real driver does. Returns the lease.
+    """
+    lease = hc.ActiveHandoffLease(collab, run_uid, pid=4242)
+    lease.acquire(hid)
+    ap._write_status(collab, run_uid=run_uid, current_hid=hid, phase="thinking", **status)
+    return lease
+
+
 def _events(collab):
     return dc.tail_events(collab, 500)
 
@@ -441,7 +454,7 @@ class TestStats:
 
     def test_snapshot_includes_stats_from_single_read(self, tmp_path):
         collab = str(tmp_path / "c")
-        hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
+        hid = hc.create(collab, to="reviewer", from_="builder", title="x", body="y")["id"]
         # run_stats aggregates 'turn'-action round events (see TestStats). Emit one completed-round event
         # onto the same event stream the driver appends to, so the snapshot has round telemetry to fold in;
         # the point of this test is that stats + the event feed come from ONE read, not from two.
@@ -449,10 +462,90 @@ class TestStats:
         Path(log).parent.mkdir(parents=True, exist_ok=True)
         with open(log, "a", encoding="utf-8") as f:
             f.write(json.dumps(_round_ev("reviewer", "turn", ms=12, rb=2)) + "\n")
+        _live_run(collab, hid=hid)  # run-scoped panels are populated only while a driver holds the board
         snap = dc.snapshot(collab)
         assert snap["stats"]["overall"]["rounds"] >= 1
         assert len(snap["events"]) <= 60
         assert dc.run_stats(dc.read_events(collab)) == snap["stats"]  # feed + stats from ONE read
+
+
+class TestNoStaleRunSurface:
+    """The dashboard must NEVER present a dead run's data as live.
+
+    Liveness is the board lease. Everything run-scoped (status/events/stats/lanes) is gated on it;
+    everything durable (board/requests/seats/runs) is not, because it stays true between runs.
+    """
+
+    def _round(self, collab):
+        log = ap._log_default(collab)
+        Path(log).parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(json.dumps(_round_ev("reviewer", "turn", ms=12, rb=2)) + "\n")
+
+    def test_dead_run_leaves_no_live_surface(self, tmp_path):
+        # The exact ghost: a driver wrote status + events, then died WITHOUT ever reaching a terminal
+        # phase (killed / crashed). status.json still says "thinking" forever. Nothing may render as live.
+        collab = str(tmp_path / "c")
+        hid = hc.create(collab, to="reviewer", from_="builder", title="x", body="y")["id"]
+        self._round(collab)
+        lease = _live_run(collab, hid=hid)
+        assert dc.snapshot(collab)["live"] is True  # sanity: while held, the surface IS live
+        lease.release()  # the driver goes away; status.json is untouched and still says phase=thinking
+
+        snap = dc.snapshot(collab)
+        assert snap["live"] is False
+        assert snap["status"] is None, "a dead run's status must not render as the live run"
+        assert snap["events"] == []
+        assert snap["stats"]["overall"]["rounds"] == 0
+        assert snap["lanes"] is None
+        assert dc._current_summary(collab) is None, "a dead run must not synthesize a 'current' run row"
+
+    def test_dead_run_still_reports_durable_state_and_an_epitaph(self, tmp_path):
+        # Emptying the live panels must not empty the BOARD — pending/claimed/done is true no matter who
+        # is running, and blanking it would be its own lie. The epitaph names the run that ended.
+        collab = str(tmp_path / "c")
+        hid = hc.create(collab, to="reviewer", from_="builder", title="x", body="y")["id"]
+        lease = _live_run(collab, hid=hid, run_uid="20260714T000000Z-4242")
+        lease.release()
+
+        snap = dc.snapshot(collab)
+        assert snap["counts"]["pending"] == 1, "the board is durable, not run-scoped"
+        assert snap["last_run"]["run_uid"] == "20260714T000000Z-4242"
+        assert snap["last_run"]["hid"] == hid
+
+    def test_lanes_from_another_run_are_not_shown(self, tmp_path):
+        # _latest_lanes used to take the newest ledger ON DISK — any run, any handoff. A ledger stamped
+        # with a different run_uid belongs to that run and must never populate this run's lane matrix.
+        collab = str(tmp_path / "c")
+        hid = hc.create(collab, to="reviewer", from_="builder", title="x", body="y")["id"]
+        lanes.write_ledger(
+            collab,
+            hid,
+            {"hid": hid, "run_uid": "SOME-OTHER-RUN", "lanes": [{"lane": "l", "ran": True}], "blockers": []},
+        )
+        _live_run(collab, hid=hid, run_uid="THIS-RUN")
+        assert dc.snapshot(collab)["lanes"] is None
+
+    def test_unstamped_legacy_ledger_is_not_claimed_by_this_run(self, tmp_path):
+        # A ledger predating the run_uid stamp cannot be PROVEN to be ours. Absent evidence must read as
+        # absent, not as someone else's evidence — so it is excluded, not assumed current.
+        collab = str(tmp_path / "c")
+        hid = hc.create(collab, to="reviewer", from_="builder", title="x", body="y")["id"]
+        lanes.write_ledger(collab, hid, {"hid": hid, "lanes": [{"lane": "l", "ran": True}], "blockers": []})
+        _live_run(collab, hid=hid, run_uid="THIS-RUN")
+        assert dc.snapshot(collab)["lanes"] is None
+
+    def test_this_runs_lanes_are_shown(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hid = hc.create(collab, to="reviewer", from_="builder", title="x", body="y")["id"]
+        lanes.write_ledger(
+            collab,
+            hid,
+            {"hid": hid, "run_uid": "THIS-RUN", "lanes": [{"lane": "l", "ran": True}], "blockers": []},
+        )
+        _live_run(collab, hid=hid, run_uid="THIS-RUN")
+        got = dc.snapshot(collab)["lanes"]
+        assert got is not None and got["run_uid"] == "THIS-RUN" and len(got["lanes"]) == 1
 
 
 class TestHandoffView:
@@ -671,3 +764,24 @@ class TestReopenAndStart:
 
         with pytest.raises(cc.CollabError):
             dc.start_driver(collab, str(tmp_path), spawn=boom)
+
+    def test_start_driver_clears_a_sticky_stop_so_start_actually_starts(self, tmp_path):
+        """A stop is sticky (nothing else clears it). Starting over one spawns a driver that returns at its
+        first loop pass and reports a FALSE phase="done" with the board untouched — the operator sees a
+        green no-op instead of a run. Start must clear it: pressing Start is an unambiguous intent to run."""
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        dc.set_stop(collab, True, by="a-previous-session")
+        assert dc.read_control(collab)["stop"] is True
+
+        res = dc.start_driver(collab, str(tmp_path), spawn=lambda cmd: 4242)
+
+        assert res["started"] is True
+        msg = "Start left the stop flag set -> the driver exits instantly with a false 'done'"
+        assert dc.read_control(collab)["stop"] is False, msg
+
+    def test_start_driver_leaves_an_unset_stop_alone(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        dc.start_driver(collab, str(tmp_path), spawn=lambda cmd: 4242)
+        assert dc.read_control(collab)["stop"] is False

@@ -305,7 +305,9 @@ class TestListRuns:
     def test_live_current_entry_synthesized_from_status(self, tmp_path):
         collab = str(tmp_path / "c")
         _write_run(collab, "20260709T000000Z-1", {"run_uid": "20260709T000000Z-1", "rounds_total": 1})
-        # an active (non-terminal) status -> a synthesized current entry in front.
+        # an active (non-terminal) status + a HELD board lease -> a synthesized current entry in front.
+        # The lease is what makes it "live": status alone is just a file a dead driver left behind.
+        hc.ActiveHandoffLease(collab, "live-99", pid=99).acquire("001")
         ap._write_status(
             collab, run_uid="live-99", phase="thinking", started_ts="2026-07-09T02:00:00Z", round=2
         )
@@ -314,12 +316,25 @@ class TestListRuns:
         assert runs[0]["rounds_total"] == 2
         assert [r["run_uid"] for r in runs[1:]] == ["20260709T000000Z-1"]
 
+    def test_crashed_run_is_not_current_despite_live_looking_status(self, tmp_path):
+        # A driver killed mid-round never writes a terminal phase, so status.json says "thinking"
+        # forever. With no lease held there is no run — the phase must not resurrect it.
+        collab = str(tmp_path / "c")
+        _write_run(collab, "20260709T000000Z-1", {"run_uid": "20260709T000000Z-1", "rounds_total": 1})
+        ap._write_status(
+            collab, run_uid="crashed-1", phase="thinking", started_ts="2026-07-09T02:00:00Z", round=2
+        )
+        runs = dc.list_runs(collab)
+        assert all(not r.get("current") for r in runs)
+        assert [r["run_uid"] for r in runs] == ["20260709T000000Z-1"]
+
     def test_terminal_status_is_not_current(self, tmp_path):
         collab = str(tmp_path / "c")
         _write_run(collab, "20260709T000000Z-1", {"run_uid": "20260709T000000Z-1", "rounds_total": 1})
+        hc.ActiveHandoffLease(collab, "done-run", pid=98).acquire("001")  # even holding the board...
         ap._write_status(collab, run_uid="done-run", phase="done")
         runs = dc.list_runs(collab)
-        assert all(not r.get("current") for r in runs)  # a done run is history, not "current"
+        assert all(not r.get("current") for r in runs)  # ...a done run is history, not "current"
 
 
 # --------------------------------------------------------------------------- #

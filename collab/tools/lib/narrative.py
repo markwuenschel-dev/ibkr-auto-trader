@@ -28,6 +28,8 @@ import contextlib
 import json
 import re
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 _LIB = str(Path(__file__).resolve().parent)
@@ -257,9 +259,23 @@ def _deliverable_lines(text: str, cap: int = 8) -> list[str]:
 
 
 def _clock(started: str | None) -> str:
-    """Return ``HH:MM`` from an ISO-ish timestamp, or the raw string when it cannot be parsed."""
+    """``HH:MM`` for a timestamp from TODAY; ``Mon D, HH:MM`` for any other day. Unparseable -> raw string.
+
+    The date is load-bearing, not decoration: a bare ``18:20`` on a run from a previous day reads as "just
+    now", so stale history renders as a live failure and the operator debugs a ghost. Say the day whenever
+    it isn't today. Timestamps are UTC (``...Z``), so compare against UTC today.
+    """
     s = str(started or "")
-    return s[11:16] if ("T" in s and len(s) >= 16) else s
+    if not ("T" in s and len(s) >= 16):
+        return s
+    hhmm = s[11:16]
+    if s[:10] == time.strftime("%Y-%m-%d", time.gmtime()):
+        return hhmm
+    try:
+        d = datetime.strptime(s[:10], "%Y-%m-%d")
+    except ValueError:
+        return hhmm  # time parsed but the date didn't — a bare clock beats nothing
+    return f"{d.strftime('%b')} {d.day}, {hhmm}"
 
 
 def _run_label(uid: str | None, started: str | None, is_current: bool = False) -> str:
@@ -299,32 +315,50 @@ def _read_status(collab) -> dict:
         return {}
 
 
-def _model_map(collab) -> dict:
+def _model_map(collab, *, is_current: bool = True) -> dict:
     """``{role: model}`` for the run being narrated, from status.json's ``run_seats`` — used only to label
-    turns (e.g. "builder (gpt-5.6-terra)"). Valid for the LIVE run; a stale status can mislabel a past
-    run's turns, which is why :func:`_choose_events` prefers the live run when one is active."""
+    turns (e.g. "builder (gpt-5.6-terra)").
+
+    ``run_seats`` describes the run status.json currently names, so it is ONLY valid when we are narrating
+    that run. Applying it to an archived run's turns prints those turns under models that never produced
+    them — a fabricated attribution. When the story is not the current run's, label the roles plainly and
+    say nothing about the model rather than say something false.
+    """
+    if not is_current:
+        return {}
     rs = _read_status(collab).get("run_seats")
     return rs if isinstance(rs, dict) else {}
 
 
 def _choose_events(collab, hid: str) -> tuple:
-    """``(run_label, events)`` for the run whose story to tell.
+    """``(run_label, events, is_current)`` for the run whose story to tell.
 
     Prefer the **LIVE** run first: its turns are in ``logs/events.jsonl`` but NOT yet archived to history, so
     a lookup that only scanned history would fall back to a PRIOR run of the same hid and show its (possibly
     failed) turns — mislabeled with the current run's models. We scope the live log to events at/after the
     run's ``started_ts`` so an earlier run's turns for the same hid can't bleed in. Only if no live run is
-    driving this hid do we fall back to the newest archived run, then the whole log."""
+    driving this hid do we fall back to the newest archived run, which is labelled as the past run it is.
+
+    Once a run HAS started, exhausting both lookups means this hid has no turns in the current run and
+    none in any archived run — so any turns still sitting in the log belong to a run we cannot identify
+    (``_run_id`` is the collab slug, not the run_uid, so events carry no run field). Returning that pile
+    labelled "the live run" would present unattributable work as this run's, so we return no turns at
+    all. Only when NO run has ever started here — no status.json, nothing to be confused with — is the
+    unscoped log safe to narrate.
+    """
     log_events = _read_jsonl(Path(ap._log_default(collab)))
-    started = _read_status(collab).get("started_ts")
+    status = _read_status(collab)
+    started = status.get("started_ts")
     if started:
         live = [e for e in log_events if str(e.get("ts") or "") >= str(started)]
         if any(_is_turn(e, hid) for e in live):
-            return _run_label(_read_status(collab).get("run_uid"), started, is_current=True), live
+            return _run_label(status.get("run_uid"), started, is_current=True), live, True
     for uid, s, events in _run_feeds(collab):
         if any(_is_turn(e, hid) for e in events):
-            return _run_label(uid, s, is_current=False), events
-    return "the live run", log_events
+            return _run_label(uid, s, is_current=False), events, False
+    if not started:
+        return _run_label(None, None), log_events, True  # no run ever ran: nothing to mistake this for
+    return _run_label(status.get("run_uid"), started, is_current=True), [], True
 
 
 def collect(collab, hid: str) -> dict:
@@ -353,8 +387,8 @@ def collect(collab, hid: str) -> dict:
     except Exception:
         esc = None
 
-    run_label, events = _choose_events(collab, hid)
-    models = _model_map(collab)
+    run_label, events, is_current = _choose_events(collab, hid)
+    models = _model_map(collab, is_current=is_current)
     turns = []
     conformance: list[
         dict
