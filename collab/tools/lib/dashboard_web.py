@@ -971,13 +971,17 @@ function renderLanes(s){
   }
   L.lanes.forEach(ln=>{
     const hit=(ln.confirmed||0)>0;
+    const incomplete=!!ln.incomplete;
     const cf=ln.confirmed_findings||[], rf=ln.refuted_findings||[]; const hasDetail=(cf.length+rf.length)>0;
     const wrap=el("div","lanewrap");
     const d=el("div","lane "+(ln.ran?(hit?"hit":"clean"):""));
-    d.appendChild(el("div","verdict",hit?"!":"✓"));
-    const c=el("div","ln"); c.appendChild(el("div","name",(ln.lane||"?")+(hasDetail?"  ▸":"")));
+    d.appendChild(el("div","verdict",hit?"!":(incomplete?"?":"✓")));
+    const pass=ln.pass||ln.lane||"?";
+    const c=el("div","ln"); c.appendChild(el("div","name",pass+(hasDetail?"  ▸":"")));
     const flow=el("div","flow"); flow.appendChild(el("span","g",ln.breaker||"breaker"));
     flow.appendChild(el("span","arrow"," → ")); flow.appendChild(el("span","g",ln.verifier||"verifier")); c.appendChild(flow);
+    const tags=[ln.profile,ln.composite?"composite":null,(ln.contracts||[]).length?((ln.contracts||[]).length+" contract"+((ln.contracts||[]).length===1?"":"s")):null].filter(Boolean);
+    if(tags.length){ const meta=el("div","flow",tags.join(" · ")); meta.style.fontSize="10px"; c.appendChild(meta); }
     d.appendChild(c);
     const t=el("div","tally"); t.appendChild(el("span","c",(ln.confirmed||0)+" confirmed")); t.appendChild(el("br"));
     t.appendChild(el("span","r",(ln.refuted||0)+" refuted")); d.appendChild(t);

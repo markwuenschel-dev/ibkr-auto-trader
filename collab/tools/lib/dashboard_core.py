@@ -34,10 +34,12 @@ if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 import collab_common as cc  # noqa: E402
 import contracts  # noqa: E402
+import adapter_profiles as adapter_profiles  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
 import operator_requests as opreq  # noqa: E402
 import registry  # noqa: E402
+import verification_plan as verification_plan  # noqa: E402
 import autopilot as ap  # reuse ap's path/telemetry helpers (single source of truth for the layout)  # noqa: E402
 
 _trace = ap._trace  # the by-path-loaded local trace module (stdlib-shadowing safe)
@@ -312,9 +314,21 @@ def set_seat_model(home, seat, model, *, by: str = "dashboard") -> dict:
     if model not in models:
         valid = ", ".join(sorted(str(k) for k in models)) or "(none)"
         raise cc.CollabError(f"model {model!r} is not in the 'models' catalog; valid ids: {valid}")
-    cfg["model"] = model
-    cfg.pop("cmd", None)  # composition from the catalog takes over any explicit argv
-    cc.safe_write(f, json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    # Work on a detached candidate document.  The switch is only persisted
+    # after both the selected seat and (for a v2 four-role config) the whole
+    # managed assurance topology compile safely.
+    candidate = json.loads(json.dumps(doc))
+    candidate_cfg = candidate["seats"][seat]
+    candidate_cfg["model"] = model
+    candidate_cfg.pop("cmd", None)  # composition from the catalog takes over any explicit argv
+    try:
+        candidate_models = candidate.get("models") if isinstance(candidate.get("models"), dict) else {}
+        adapter_profiles.compile_seat(seat, candidate_cfg, candidate_models)
+        if "assessment_profiles" in candidate:
+            verification_plan.resolve_assessment_profiles(candidate)
+    except cc.CollabError as exc:
+        raise cc.CollabError(f"refusing model switch for {seat!r}: {exc}") from exc
+    cc.safe_write(f, json.dumps(candidate, indent=2, ensure_ascii=False) + "\n")
     return {"seat": seat, "model": model, "by": by}
 
 
@@ -324,7 +338,9 @@ def _latest_lanes(collab) -> dict | None:
     pass flag — no repo paths or finding text (those stay in the reply artifacts / handoff viewer)."""
     vdir = Path(collab) / "autopilot" / "verification"
     try:
-        ledgers = sorted(vdir.glob("*.ledger.json"), key=lambda p: p.stat().st_mtime)
+        # Candidate ledgers are immutable under ``verification/<hid>/``;
+        # include their one-level descendants as well as the pre-v2 flat path.
+        ledgers = sorted(vdir.rglob("*.ledger.json"), key=lambda p: p.stat().st_mtime)
     except OSError:
         return None
     if not ledgers:
@@ -333,15 +349,26 @@ def _latest_lanes(collab) -> dict | None:
         data = json.loads(ledgers[-1].read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    lanes = [
-        {"lane": ln.get("lane"), "ran": bool(ln.get("ran")),
-         "confirmed": len(ln.get("confirmed") or []), "refuted": len(ln.get("refuted") or []),
-         "breaker": ln.get("breaker_seat"), "verifier": ln.get("verifier_seat")}
-        for ln in (data.get("lanes") or [])
-    ]
+    lanes = []
+    for ln in (data.get("lanes") or []):
+        if not isinstance(ln, dict):
+            continue
+        profile = ln.get("profile") if isinstance(ln.get("profile"), dict) else {}
+        breaker = ln.get("breaker_seat") or ((profile.get("breaker") or {}).get("seat"))
+        verifier = ln.get("verifier_seat") or ((profile.get("verifier") or {}).get("seat"))
+        lanes.append({
+            "lane": ln.get("pass") or ln.get("lane"), "pass": ln.get("pass") or ln.get("lane"),
+            "profile": profile.get("id"), "contracts": ln.get("contracts") or [],
+            "composite": bool(ln.get("composite")), "ran": bool(ln.get("ran")),
+            "incomplete": bool(ln.get("incomplete")),
+            "confirmed": len(ln.get("confirmed") or []), "refuted": len(ln.get("refuted") or []),
+            "breaker": breaker, "verifier": verifier,
+        })
     return {"hid": data.get("hid"), "lanes": lanes,
             "tests_passed": bool((data.get("tests") or {}).get("passed")),
             "blockers": len(data.get("blockers") or []),
+            "incomplete": bool(data.get("incomplete")),
+            "plan_digest": data.get("verification_plan_digest"),
             "generated_ts": data.get("generated_ts")}
 
 

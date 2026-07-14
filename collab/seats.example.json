@@ -1,33 +1,111 @@
 {
-  "version": 1,
-  "_readme": "Copy to $COLLAB_HOME/seats.json and edit. A seat with backend 'cli' is automated: its 'cmd' is run with the prompt on STDIN and the reply read from STDOUT (no shell). The driver prepends 'system' into the prompt, so a backend only needs its bare read-stdin/print-stdout mode. A seat WITHOUT a cli backend (omit it, or backend != 'cli') is the human/web seat: the driver leaves its handoffs for the Telegram bridge. 'timeout' is per-invocation seconds. Exact argv is tool/version specific; the contract is: read prompt on stdin, write reply on stdout, exit 0.",
+  "version": 2,
+  "_readme": "Copy to $COLLAB_HOME/seats.json and set only local paths/credentials. The assurance resolver recognizes exactly four logical roles: builder, reviewer, breaker, verifier. Profiles select model overlays for the existing breaker/verifier roles; profiles are not additional seats or dashboard cards.",
+  "assessment_profile_revision": "risk-tiered-assurance-v1",
+  "models": {
+    "gpt-5.6-terra": {
+      "provider": "openai",
+      "cmd": [
+        "python",
+        "tools/adapters/openai-repo-seat.py",
+        "--base",
+        "https://api.openai.com/v1",
+        "--model",
+        "gpt-5.6-terra",
+        "--key-env",
+        "OPENAI_API_KEY",
+        "--repo-root",
+        "."
+      ]
+    },
+    "opus-4.8": {
+      "provider": "anthropic",
+      "cmd": ["claude", "-p", "--model", "opus-4.8"],
+      "unset_env": ["ANTHROPIC_API_KEY"]
+    },
+    "sonnet-5": {
+      "provider": "anthropic",
+      "cmd": ["claude", "-p", "--model", "sonnet-5"],
+      "unset_env": ["ANTHROPIC_API_KEY"]
+    },
+    "gpt-5.6-luna": {
+      "provider": "openai",
+      "cmd": [
+        "python",
+        "tools/adapters/openai-repo-seat.py",
+        "--base",
+        "https://api.openai.com/v1",
+        "--model",
+        "gpt-5.6-luna",
+        "--key-env",
+        "OPENAI_API_KEY",
+        "--repo-root",
+        "."
+      ]
+    },
+    "grok-4.5": {
+      "provider": "xai",
+      "cmd": [
+        "python",
+        "tools/adapters/openai-repo-seat.py",
+        "--base",
+        "https://api.x.ai/v1",
+        "--model",
+        "grok-4.5",
+        "--key-env",
+        "XAI_API_KEY",
+        "--repo-root",
+        "."
+      ]
+    }
+  },
   "seats": {
     "builder": {
       "backend": "cli",
-      "cmd": ["python", "C:\\Users\\Nalakram\\Documents\\GitHub\\ibkr-auto-trader\\collab\\tools\\adapters\\openai-compatible-seat.py",
-              "--base", "https://api.x.ai/v1", "--model", "grok-4.5", "--key-env", "XAI_API_KEY"],
-      "system": "You are the BUILDER in a collab-kit handoff loop. Read the reviewer's handoff below and respond with your implementation notes / decisions. Do not restate the whole design; answer the reviewer's points.",
-      "timeout": 600
+      "role": "builder",
+      "access": "write",
+      "model": "gpt-5.6-terra",
+      "tool_policy": {"api": "responses"},
+      "system": "You are the BUILDER in a collab-kit handoff loop. Make the requested source changes, preserve paper-trading safety, and report concrete evidence.",
+      "timeout": 900
     },
-
     "reviewer": {
       "backend": "cli",
-      "cmd": ["python", "C:\\Users\\Nalakram\\Documents\\GitHub\\ibkr-auto-trader\\collab\\tools\\adapters\\openai-compatible-seat.py",
-              "--base", "https://api.openai.com/v1", "--model", "gpt-5-codex", "--key-env", "OPENAI_API_KEY", "--api", "responses"],
-      "system": "You are the independent REVIEWER in a collab-kit handoff loop. Be skeptical and specific: verify claims against the described behavior, name concrete blockers with failing scenarios, and do not sign off unless it is genuinely production-grade.",
-      "timeout": 600
+      "role": "reviewer",
+      "access": "read_test",
+      "model": "grok-4.5",
+      "can_sign_off": true,
+      "system": "You are the independent REVIEWER. Inspect the actual repository and allowed test results. Do not edit source; provide evidence-backed blockers or a justified sign-off.",
+      "timeout": 900
     },
-
-    "_other_backends_you_could_use": {
-      "note": "The adapter (tools/adapters/openai-compatible-seat.py) reads keys from .env and speaks any OpenAI-shaped API. Swap --base/--model/--key-env per provider. Use --api responses for OpenAI models that reject /chat/completions (gpt-5-codex etc.); leave it off (auto) and it falls back on the 404 anyway.",
-      "gemini": ["python", "...\\openai-compatible-seat.py", "--base", "https://generativelanguage.googleapis.com/v1beta/openai", "--model", "gemini-2.5-pro", "--key-env", "GEMINI_API_KEY"],
-      "claude_direct": ["claude", "-p"],
-      "any_stdin_cli": "Any command that reads the prompt on stdin and prints the reply on stdout drops in with zero code changes ([C34]) — the adapter is just the version-proof option for HTTP APIs."
+    "breaker": {
+      "backend": "cli",
+      "role": "breaker",
+      "access": "read_test",
+      "model": "opus-4.8",
+      "system": "You are the adversarial BREAKER. Inspect the repository and allowed tests, but never edit source. Report only concrete, reproducible findings.",
+      "timeout": 900
     },
-
-    "_web_seat_example": {
-      "backend": "bridge",
-      "note": "A non-cli seat is NOT automated. Its handoffs are left in place so the Telegram bridge delivers them to a human (or a browser agent) who replies with /c <project> <message>. Use this for the seat you want to keep a human/web agent on."
+    "verifier": {
+      "backend": "cli",
+      "role": "verifier",
+      "access": "read_test",
+      "model": "sonnet-5",
+      "system": "You are the independent VERIFIER. Inspect the repository and allowed tests, but never edit source. Confirm only evidence-backed findings.",
+      "timeout": 900
+    }
+  },
+  "assessment_profiles": {
+    "baseline": {
+      "breaker": {"seat": "breaker"},
+      "verifier": {"seat": "verifier"}
+    },
+    "high-risk-diverse": {
+      "extends": "baseline",
+      "overrides": {
+        "breaker": {"model": "gpt-5.6-luna"},
+        "verifier": {"model": "grok-4.5"}
+      }
     }
   }
 }

@@ -145,10 +145,14 @@ def evaluate(collab, hid: str, *, seats: dict, reviewer_seat: str, builder_seat:
        bool(rseat) and bool(bseat) and rseat != bseat and l_reviewer and l_builder and l_reviewer != l_builder,
        f"reviewer={reviewer_seat!r} builder={builder_seat!r} ledger(reviewer={l_reviewer!r},builder={l_builder!r})")
 
-    # 3 — required lanes ran
-    required = set(lanes.required_lanes(ledger.get("guardrails") or [], cfg))
-    ran = {ln.get("lane") for ln in (ledger.get("lanes") or []) if ln.get("ran")}
-    _c(3, "lanes-ran", required <= ran, f"required={sorted(required)} ran={sorted(ran)}")
+    # 3 — every pass in the immutable resolved plan ran.  A v2 ledger owns
+    # its plan, so a later config edit cannot change what this candidate had to
+    # prove.  Incomplete/tool-error evidence cannot be treated as a clean pass.
+    required = set(lanes.ledger_required_passes(ledger, cfg))
+    ran = lanes.ledger_ran_passes(ledger)
+    complete = not bool(ledger.get("incomplete")) and not bool(ledger.get("tool_error"))
+    _c(3, "lanes-ran", required <= ran and complete,
+       f"required={sorted(required)} ran={sorted(ran)} complete={complete}")
 
     # 4 — every confirmed blocker fixed
     unfixed = [b.get("id") for b in blockers if not b.get("fixed")]

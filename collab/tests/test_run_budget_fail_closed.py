@@ -130,10 +130,10 @@ class TestBalancedDefaults:
     def test_balanced_profile(self):
         lim = rb.Limits.balanced()
         assert lim.max_work_attempts == 3
-        assert lim.max_verification_passes == 3
-        assert lim.max_total_model_calls == 16
+        assert lim.max_verification_passes == 6
+        assert lim.max_total_model_calls == 18
         assert lim.max_wall_clock_seconds == 1800.0
-        assert lim.max_findings_per_lane == 4
+        assert lim.max_findings_per_lane == 3
         assert lim.max_review_decisions_per_candidate == 1
 
 

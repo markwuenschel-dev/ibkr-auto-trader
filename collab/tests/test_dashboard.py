@@ -22,6 +22,7 @@ import autopilot as ap  # noqa: E402
 import collab_common as cc  # noqa: E402
 import dashboard_core as dc  # noqa: E402
 import handoff_core as hc  # noqa: E402
+import lanes  # noqa: E402
 
 
 def _cli(seat_names):
@@ -268,6 +269,45 @@ class TestSeatModelControl:
         hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
         snap = dc.snapshot(collab, home=home)
         assert snap["models_catalog"] == ["gpt-5.5", "opus"]            # sorted, underscore ids excluded
+
+    def test_v2_switch_fails_before_write_when_it_breaks_profile_diversity(self, tmp_path):
+        example = Path(__file__).resolve().parent.parent / "seats.example.json"
+        target = tmp_path / "seats.json"
+        target.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+
+        with pytest.raises(cc.CollabError, match="disjoint"):
+            # The baseline profile inherits breaker.model.  Making it OpenAI
+            # would overlap the OpenAI high-risk breaker, so the dashboard must
+            # leave the durable config untouched.
+            dc.set_seat_model(str(tmp_path), "breaker", "gpt-5.6-luna")
+
+        persisted = json.loads(target.read_text(encoding="utf-8"))
+        assert persisted["seats"]["breaker"]["model"] == "opus-4.8"
+
+
+class TestRiskTieredLaneEvidence:
+    def test_latest_lanes_reads_nested_candidate_ledger_and_profile_badges(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
+        lanes.write_ledger(collab, "001", {
+            "hid": "001", "tests": {"passed": True}, "blockers": [],
+            "verification_plan_digest": "plan:abc",
+            "lanes": [{
+                "pass": "high-risk-diverse", "contracts": ["order-risk-and-idempotency"],
+                "profile": {"id": "high-risk-diverse",
+                            "breaker": {"seat": "breaker"}, "verifier": {"seat": "verifier"}},
+                "ran": True, "confirmed": [], "refuted": [], "composite": True,
+            }],
+        }, candidate_id="cand:v2")
+
+        latest = dc._latest_lanes(collab)
+        assert latest is not None and latest["plan_digest"] == "plan:abc"
+        assert latest["lanes"] == [{
+            "lane": "high-risk-diverse", "pass": "high-risk-diverse",
+            "profile": "high-risk-diverse", "contracts": ["order-risk-and-idempotency"],
+            "composite": True, "ran": True, "incomplete": False,
+            "confirmed": 0, "refuted": 0, "breaker": "breaker", "verifier": "verifier",
+        }]
 
 
 # --------------------------------------------------------------------------- #

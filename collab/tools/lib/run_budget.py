@@ -40,7 +40,7 @@ SCHEMA_VERSION = "0.1"
 WORK_ATTEMPT = "work_attempt"
 REVIEW_DECISION = "review_decision"
 VERIFICATION_PASS = "verification_pass"
-VERIFICATION_CALL = "verification_call"  # a breaker or a per-finding verifier invocation
+VERIFICATION_CALL = "verification_call"  # one breaker or one batched-verifier model invocation
 
 
 @dataclass(frozen=True)
@@ -64,16 +64,17 @@ class Limits:
     def balanced(cls) -> Limits:
         """The calibrated 'balanced' defaults (ADR-0002 Open questions; ADR-0003).
 
-        3 work attempts, 3 verification passes, 16 total model calls, 30 min wall-clock, and
-        4 findings verified per lane. These are calibration knobs, not contract — a run may
+        Three work attempts permit a normal run to top out at 12 model calls and a high-risk run at
+        18: 3/6 verification passes, 30 min wall-clock, and three findings per bounded batch. These
+        are calibration knobs, not contract — a run may
         override them (and `control.json` may raise them mid-run for the current epoch).
         """
         return cls(
             max_work_attempts=3,
-            max_verification_passes=3,
-            max_total_model_calls=16,
+            max_verification_passes=6,
+            max_total_model_calls=18,
             max_wall_clock_seconds=1800.0,
-            max_findings_per_lane=4,
+            max_findings_per_lane=3,
         )
 
 

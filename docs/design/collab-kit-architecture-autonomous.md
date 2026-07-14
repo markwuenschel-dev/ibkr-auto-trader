@@ -520,7 +520,27 @@ autonomy slices this revision adds:
 | 016 | `done_contract` + wire into the driver; reframe [C36] docstrings (§18.3) | — |
 | 017 | negative-fixture sweep + end-to-end autonomous-done | — |
 
+## 22. Four-role, risk-tiered assurance (ADR-0004)
+
+ADR-0004 supersedes the historical string-lane fan-out described in §10 and §18.2 without changing the
+accepted reviewer ∥ lanes lifecycle in §18. The visible topology is exactly four seats: builder (write),
+reviewer (read_test), breaker (read_test), and verifier (read_test). read_test means a repository-capable
+adapter receives the full configured repository and may run bounded checks; it never means a text-only
+reviewer or a write-capable assessor.
+
+For each candidate, verification_plan.py resolves immutable typed contracts from guardrails and config.
+There is always one baseline breaker-to-verifier pair; any safety-critical guardrail adds exactly one
+provider-diverse composite pair, regardless of how many contracts match. Breakers return at most three
+identified findings and one verifier call handles the complete batch. Missing or malformed batch evidence
+is verification_incomplete, never a clean lane. The candidate id and immutable ledger carry the resolved
+plan/profile/policy fingerprints, so configuration drift cannot reuse old evidence.
+
+The dashboard still has four role cards. Pass/profile badges appear only in lane evidence, and a model
+switch is rejected before save if it makes a managed policy invalid or collapses high-risk provider
+diversity. See collab/docs/adr/0004-four-role-risk-tiered-assurance.md and collab/SEATS.md for the
+normative configuration and failure semantics.
+
 **Renumber hazard (must-read for future edits):** code cites this spec by `§` (e.g. `gate_runner.py`
 → §5.4/§13; `autopilot.py`, `handoff_events.py` → §7.x/§8). This revision is safe **only because it
-appends** §15–§21 and preserves §1–§14 and §10. Reflowing the original numbering would break ~37 in-code
+appends** §15–§22 and preserves §1–§14 and §10. Reflowing the original numbering would break ~37 in-code
 citations across 8 library files — do not.

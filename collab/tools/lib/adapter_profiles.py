@@ -62,7 +62,10 @@ _TEST_BASH_TOOLS = (
 
 _ROLE_DEFAULT_ACCESS = {
     "builder": WRITE,
-    "reviewer": READ,
+    # A reviewer must be able to inspect the whole repository and run the same
+    # bounded checks it relies on for a sign-off.  ``read`` remains available
+    # for non-assessment utility seats, but it is not the four-role default.
+    "reviewer": READ_TEST,
     "breaker": READ_TEST,
     "verifier": READ_TEST,
 }
@@ -94,6 +97,10 @@ class AdapterProfile:
 
     id = LEGACY
     switchable = False
+    # Whether the adapter can read the repository the driver launches from.  This is deliberately
+    # separate from an access policy: an API-only adapter can be read-only but still cannot assess
+    # source, run an allowed test, or attest the candidate it was given.
+    repository_capable = False
     # capability flags this adapter owns, by arity, for stripping + foreign detection.
     _zero: frozenset[str] = frozenset()  # store_true flags (no argument)
     _one: frozenset[str] = frozenset()  # flags taking exactly one argument
@@ -120,6 +127,7 @@ class AdapterProfile:
 class ClaudeAdapter(AdapterProfile):
     id = CLAUDE
     switchable = True
+    repository_capable = True
     _one = frozenset({"--permission-mode"})
     _variadic = frozenset({"--allowedTools", "--disallowedTools"})
 
@@ -147,6 +155,7 @@ class ClaudeAdapter(AdapterProfile):
 class OpenAIRepoAdapter(AdapterProfile):
     id = OPENAI_REPO
     switchable = True
+    repository_capable = True
     _zero = frozenset({"--write", "--run-checks"})
 
     def __init__(self, *, run_checks_supported: bool = True) -> None:
@@ -186,13 +195,14 @@ class OpenAICompatibleAdapter(AdapterProfile):
 
     id = OPENAI_COMPAT
     switchable = True
+    repository_capable = False
 
     def supports(self, policy: SeatPolicy) -> tuple[bool, str]:
         if policy.access == READ:
             return True, ""
         return False, (
             f"the text-only OpenAI adapter has no repo access, so it cannot enforce "
-            f"{policy.access!r} (it can only back a read-only reviewer)"
+            f"{policy.access!r} (it can only back a non-assessment read-only seat)"
         )
 
     def render_argv(self, policy: SeatPolicy) -> list[str]:
@@ -212,6 +222,7 @@ class LegacyCommandAdapter(AdapterProfile):
 
     id = LEGACY
     switchable = False
+    repository_capable = False
 
 
 _CLAUDE_ONLY_FLAGS = frozenset({"--permission-mode", "--allowedTools", "--disallowedTools"})
@@ -288,6 +299,8 @@ def compile_seat(name: str, cfg: dict, models: dict, *, run_checks_supported: bo
             "switchable": False,
             "policy": None,
             "model": None,
+            "provider": None,
+            "repository_capable": False,
             "unset_env": list(cfg["unset_env"]) if cfg.get("unset_env") else None,
         }
 
@@ -298,6 +311,9 @@ def compile_seat(name: str, cfg: dict, models: dict, *, run_checks_supported: bo
         )
     template = [str(a) for a in spec["cmd"]]
     adapter = adapter_for(template, run_checks_supported=run_checks_supported)
+    provider = spec.get("provider")
+    if provider is not None:
+        provider = str(provider).strip().casefold() or None
     # The model's env drops (e.g. dropping ANTHROPIC_API_KEY for the subscription) are inherited if
     # the seat doesn't set its own — same precedence as the old load_seats.
     unset_env = (
@@ -321,6 +337,8 @@ def compile_seat(name: str, cfg: dict, models: dict, *, run_checks_supported: bo
             "switchable": adapter.switchable,
             "policy": {"role": role, "access": access, "tool_policy": policy.tool_policy},
             "model": cfg["model"],
+            "provider": provider,
+            "repository_capable": adapter.repository_capable,
             "unset_env": unset_env,
         }
 
@@ -334,7 +352,7 @@ def compile_seat(name: str, cfg: dict, models: dict, *, run_checks_supported: bo
         raise cc.CollabError(
             f"seat {name!r}: model {cfg['model']!r} uses the {adapter.id} adapter, but its "
             f"model_args {reason}. Migrate this seat to a managed 'access' policy "
-            f"(builder=write, reviewer=read, breaker/verifier=read_test) so the adapter renders "
+            f"(builder=write, reviewer/breaker/verifier=read_test) so the adapter renders "
             f"its own flags — see SEATS.md."
         )
     return {
@@ -343,6 +361,8 @@ def compile_seat(name: str, cfg: dict, models: dict, *, run_checks_supported: bo
         "switchable": adapter.switchable,
         "policy": None,
         "model": cfg["model"],
+        "provider": provider,
+        "repository_capable": adapter.repository_capable,
         "unset_env": unset_env,
     }
 
@@ -353,10 +373,34 @@ def seat_profile_fingerprint(compiled: dict) -> str:
     payload = {
         "adapter": compiled.get("adapter"),
         "model": compiled.get("model"),
+        "provider": compiled.get("provider"),
+        "repository_capable": bool(compiled.get("repository_capable")),
         "policy": compiled.get("policy"),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return "seat:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def execution_fingerprint(compiled: dict) -> str:
+    """Stable execution identity for an assessment executor.
+
+    It intentionally excludes the logical role name: assigning the same model/adapter/policy to
+    both breaker and verifier must *not* look independent merely because their seat labels differ.
+    The resolved argv is included so a material adapter/template change mints a new fingerprint even
+    if a catalog id was accidentally reused.
+    """
+    policy = compiled.get("policy") or {}
+    payload = {
+        "adapter": compiled.get("adapter"),
+        "cmd": list(compiled.get("cmd") or []),
+        "model": compiled.get("model"),
+        "provider": compiled.get("provider"),
+        "repository_capable": bool(compiled.get("repository_capable")),
+        "access": policy.get("access"),
+        "tool_policy": policy.get("tool_policy") or {},
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return "exec:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 def audit_seat_change(collab, name: str, old: dict | None, new: dict | None, *, by: str, ts: str) -> Path:

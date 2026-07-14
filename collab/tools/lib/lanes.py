@@ -5,10 +5,9 @@ that was never built — against the stdlib-only tenet (§1). This is that pipel
 over the driver's already-hardened backend substrate (``autopilot._cli_runner``: ``shell=False``, prompt on
 stdin, output capped at the process boundary, under a timeout — [C39]):
 
-    per required lane:
+    per resolved assurance pass:
       stage 1 breaker  → an agent tries to BREAK the change (concrete trigger, not opinion)
-      stage 2 verify   → an INDEPENDENT verifier tries to REFUTE each finding, defaulting REJECTED
-                         unless it cites an exact code path + a concrete trigger
+      stage 2 verify   → one INDEPENDENT verifier call refutes or confirms the bounded finding batch
     → verification ledger  <collab>/autopilot/verification/<hid>.ledger.json
 
 **Independence is structural** ([C36] separation of authority, §18): the builder (`from`), the breaker, and
@@ -35,23 +34,36 @@ import contracts  # noqa: E402
 import gate_runner as gr  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import run_budget as rb  # noqa: E402
+import verification_plan as vp  # noqa: E402
 
 # Machine-parseable verdict markers (agent stdout is DATA — only these drive control state, [C38]).
 _FINDING_RE = re.compile(r"^\s*FINDING:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 _NOFINDING_RE = re.compile(r"^\s*NO-?FINDING\b", re.IGNORECASE | re.MULTILINE)
 _CONFIRMED_RE = re.compile(r"^\s*VERDICT:\s*CONFIRMED\b", re.IGNORECASE | re.MULTILINE)
+_BATCH_FINDING_RE = re.compile(
+    r"^\s*FINDING:\s*(F\d+)\s*\|\s*([^|]+)\|\s*([^|]+)\|\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
+_BATCH_VERDICT_RE = re.compile(
+    r"^\s*VERDICT:\s*(CONFIRMED|REFUTED)\s+(F\d+)(?:\s*\|\s*(.+?))?\s*$",
+    re.IGNORECASE,
+)
 
 #: Cap on concurrently-running guardrail lanes (each is an independent breaker->verifier subprocess pair).
 _MAX_LANE_WORKERS = 6
 
 
 # --------------------------------------------------------------------------- #
-# lane configuration (risk class -> required lanes)
+# lane configuration and ledger-facing plan helpers
 # --------------------------------------------------------------------------- #
 
 
 def load_lanes(path: str | Path | None = None) -> dict:
-    """Load ``telemetry/lanes.json`` (risk classes + guardrail→lane map). ``{}`` if absent/unresolvable."""
+    """Load the version-2 typed assurance-contract document.
+
+    Parsing/validation stays in :mod:`verification_plan`; this small loader remains
+    for legacy read-only consumers that need the raw document for a report.
+    """
     if path is None:
         try:
             path = Path(cc.resolve_kit_root()) / "telemetry" / "lanes.json"
@@ -64,18 +76,62 @@ def load_lanes(path: str | Path | None = None) -> dict:
 
 
 def required_lanes(guardrails, cfg: dict) -> list[str]:
-    """The lanes a handoff must pass, from its ``guardrails``: the union of every risk class whose trigger
-    guardrails are a subset of the handoff's, plus any per-guardrail lanes. Sorted, deterministic."""
-    g = {str(x).strip().casefold() for x in (guardrails or [])}
-    lanes: set[str] = set()
-    for rc in (cfg.get("risk_classes") or {}).values():
-        trig = {str(x).casefold() for x in rc.get("guardrails", [])}
-        if trig and trig <= g:
-            lanes.update(rc.get("required_lanes", []))
-    gmap = cfg.get("guardrail_lanes") or {}
-    for guard in g:
-        lanes.update(gmap.get(guard, []))
-    return sorted(lanes)
+    """Return the selected version-2 contract ids for a compatibility caller.
+
+    The autonomous candidate runner never calls this helper: it dispatches one
+    frozen :class:`verification_plan.VerificationPlan` instead.  Keeping this
+    static selector lets older read-only reporting/direct-call surfaces explain
+    the baseline portion of a v2 document without pretending that it ran the
+    required provider-diverse high-risk pair.  A v1 document is rejected
+    explicitly rather than being interpreted loosely.
+    """
+    try:
+        specs = vp.parse_lane_specs(cfg)
+        selected = set(vp.normalize_guardrails(guardrails))
+    except vp.VerificationPlanError as exc:
+        raise cc.CollabError(f"obsolete or invalid lane configuration: {exc}") from exc
+    if not selected:
+        # A true v2 candidate still receives change-regression through its
+        # resolved plan.  This branch is solely pre-v2 direct-call compatibility.
+        return []
+    return [
+        spec.id
+        for spec in specs
+        if spec.always_baseline
+        or bool(set(spec.baseline_guardrails) & selected)
+    ]
+
+
+def ledger_required_passes(ledger: dict, cfg: dict | None = None) -> list[str]:
+    """Return the exact pass ids an evidence ledger is required to contain.
+
+    New ledgers carry the resolved plan itself, which is authoritative for
+    closeout: re-resolving current config could otherwise reinterpret historic
+    evidence after a config edit.  Old ledgers retain the compatibility selector
+    above so already-written evidence remains readable.
+    """
+    plan = ledger.get("verification_plan") if isinstance(ledger, dict) else None
+    raw_passes = plan.get("passes") if isinstance(plan, dict) else None
+    if isinstance(raw_passes, list):
+        ids = [entry.get("id") for entry in raw_passes if isinstance(entry, dict)]
+        if len(ids) == len(raw_passes) and all(isinstance(item, str) and item for item in ids):
+            return sorted(set(ids))
+        return ["__invalid_verification_plan__"]  # fail closed in the done contract
+    guardrails = (ledger or {}).get("guardrails") or []
+    # Pre-v2 ledgers never promised an unconditional baseline; preserve their
+    # historical semantics while every v2 ledger carries an explicit plan.
+    if not guardrails:
+        return []
+    return required_lanes(guardrails, cfg if cfg is not None else load_lanes())
+
+
+def ledger_ran_passes(ledger: dict) -> set[str]:
+    """Pass/lane ids that completed, normalized across v2 and pre-v2 ledgers."""
+    return {
+        str(item.get("pass") or item.get("lane"))
+        for item in (ledger.get("lanes") or [])
+        if isinstance(item, dict) and item.get("ran") and (item.get("pass") or item.get("lane"))
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -150,7 +206,261 @@ def _verifier_system(lane: str, seat_system: str | None) -> str:
     base = (seat_system.strip() + "\n\n") if seat_system else ""
     return (base + f"You are an INDEPENDENT VERIFIER for the '{lane}' lane. Try to REFUTE the finding below. "
             "Default to REJECTED. Emit 'VERDICT: CONFIRMED <path> <trigger>' ONLY if you can cite an exact "
-            "code path AND a concrete reproducing trigger; otherwise emit 'VERDICT: REFUTED'.")
+             "code path AND a concrete reproducing trigger; otherwise emit 'VERDICT: REFUTED'.")
+
+
+def _batch_breaker_system(lane_pass: vp.LanePass, seat_system: str | None) -> str:
+    base = (seat_system.strip() + "\n\n") if seat_system else ""
+    contracts = json.dumps(lane_pass.composite_payload, sort_keys=True)
+    return (
+        base
+        + f"You are the BREAKER for the '{lane_pass.id}' assurance pass. Its selected contracts are:\n"
+        + contracts
+        + "\n\nTry to break the change using the repository and allowed tests. Return either exactly "
+        "'NO-FINDING' or at most three lines in exactly this form: "
+        "'FINDING: F<n> | <exact code path> | <concrete trigger> | <impact>'. "
+        "Use F1, F2, F3 in order. Do not emit opinions or prose."
+    )
+
+
+def _batch_verifier_system(lane_pass: vp.LanePass, seat_system: str | None) -> str:
+    base = (seat_system.strip() + "\n\n") if seat_system else ""
+    return (
+        base
+        + f"You are the independent VERIFIER for the '{lane_pass.id}' assurance pass. "
+        "Refute each breaker finding using the repository and allowed tests. For every supplied finding ID, "
+        "emit exactly one line: 'VERDICT: CONFIRMED F<n> | <exact code path> | <concrete trigger>' only "
+        "when independently reproduced, otherwise 'VERDICT: REFUTED F<n> | <evidence>'. "
+        "Do not add or omit IDs and do not emit prose."
+    )
+
+
+def _parse_batch_findings(raw: str) -> tuple[list[dict], str | None]:
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if any(line.upper() in {"NO-FINDING", "NOFINDING"} for line in lines):
+        if len(lines) != 1 or lines[0].upper() not in {"NO-FINDING", "NOFINDING"}:
+            return [], "breaker mixed NO-FINDING with findings or prose"
+        return [], None
+    findings: list[dict] = []
+    bad: list[str] = []
+    for line in lines:
+        if not line.upper().startswith("FINDING:"):
+            bad.append(line[:160])
+            continue
+        match = _BATCH_FINDING_RE.match(line)
+        if not match:
+            bad.append(line.strip()[:160])
+            continue
+        finding_id, path, trigger, impact = (part.strip() for part in match.groups())
+        if not all((path, trigger, impact)):
+            bad.append(line[:160])
+            continue
+        findings.append({"id": finding_id.upper(), "path": path, "trigger": trigger,
+                         "impact": impact, "description": f"{path} -> {trigger} ({impact})"})
+    if bad or not findings:
+        reason = (
+            "breaker batch protocol malformed"
+            if bad
+            else "breaker emitted neither NO-FINDING nor findings"
+        )
+        return [], reason
+    expected_ids = [f"F{i}" for i in range(1, len(findings) + 1)]
+    ids = [finding["id"] for finding in findings]
+    if len(findings) > 3 or ids != expected_ids:
+        return findings, "breaker finding IDs must be contiguous F1..F3 and capped at three"
+    return findings, None
+
+
+def _parse_batch_verdicts(raw: str, findings: list[dict]) -> tuple[dict[str, dict], str | None]:
+    expected = {finding["id"] for finding in findings}
+    verdicts: dict[str, dict] = {}
+    for line in (line.strip() for line in raw.splitlines() if line.strip()):
+        if not line.upper().startswith("VERDICT:"):
+            return {}, "verifier batch protocol malformed"
+        match = _BATCH_VERDICT_RE.match(line)
+        if not match:
+            return {}, "verifier batch protocol malformed"
+        verdict, finding_id, evidence = match.groups()
+        finding_id = finding_id.upper()
+        if finding_id not in expected or finding_id in verdicts:
+            return {}, "verifier returned an unknown or duplicate finding ID"
+        evidence = (evidence or "").strip()
+        if not evidence:
+            return {}, "verifier verdict lacks evidence"
+        verdicts[finding_id] = {"verdict": verdict.upper(), "evidence": evidence}
+    if set(verdicts) != expected:
+        return {}, "verifier did not return exactly one verdict for every finding"
+    return verdicts, None
+
+
+def _plan_incomplete(lane_pass: vp.LanePass, reason: str, *, findings=None, unverified=None,
+                     overflow: int = 0, breaker_artifact=None, verifier_artifact=None) -> dict:
+    findings = findings or []
+    unverified = unverified if unverified is not None else findings
+    return {
+        "lane": lane_pass.id,
+        "pass": lane_pass.id,
+        "contracts": list(lane_pass.contract_ids),
+        "profile": lane_pass.profile.identity_data(),
+        "breaker_seat": lane_pass.profile.breaker_seat,
+        "verifier_seat": lane_pass.profile.verifier_seat,
+        "composite": lane_pass.composite,
+        "ran": False,
+        "confirmed": [],
+        "refuted": [],
+        "overflow": max(0, int(overflow)),
+        "unverified": unverified,
+        "incomplete": {"reason": reason},
+        "breaker_artifact": breaker_artifact,
+        "verifier_artifact": verifier_artifact,
+    }
+
+
+def run_plan_pass(collab, hid: str, lane_pass: vp.LanePass, *, builder_seat: str, runner=ap._cli_runner,
+                  log: str | None = None, budget=None) -> dict:
+    """Run one bounded, pre-resolved breaker→verifier assurance pair."""
+    profile = lane_pass.profile
+    _assert_independent(builder_seat, profile.breaker_seat, profile.verifier_seat)
+    log = log or ap._log_default(collab)
+    _, path = hc._reconcile(collab, hid)
+    if path is None:
+        raise hc.HandoffNotFound(f"handoff {hid} not found")
+    content = ap._substance(collab, Path(path))
+    rid = ap._run_id(collab)
+    base = {
+        "lane": lane_pass.id,
+        "pass": lane_pass.id,
+        "contracts": list(lane_pass.contract_ids),
+        "profile": profile.identity_data(),
+        "breaker_seat": profile.breaker_seat,
+        "verifier_seat": profile.verifier_seat,
+        "composite": lane_pass.composite,
+        "confirmed": [],
+        "refuted": [],
+        "overflow": 0,
+        "unverified": [],
+    }
+    try:
+        if budget is not None:
+            budget.charge(rb.VERIFICATION_PASS)
+        braw = _dispatch(
+            runner,
+            list(profile.breaker_cmd),
+            ap._build_prompt(_batch_breaker_system(lane_pass, profile.breaker_system), content),
+            timeout=profile.breaker_timeout,
+            unset_env=list(profile.breaker_unset_env) or None,
+            budget=budget,
+        )
+    except rb.BudgetExceeded as exc:
+        return _plan_incomplete(lane_pass, f"budget:{exc.which}")
+    except cc.CollabError as exc:
+        return {**base, "ran": False, "tool_error": {
+            "lane": lane_pass.id, "seat": profile.breaker_seat,
+            "cmd": _cmd_str(profile.breaker_cmd), "error": str(exc)}}
+    breaker_artifact = ap._write_reply(collab, f"{profile.breaker_seat}-breaker-{lane_pass.id}",
+                                       ap._sanitize(braw))
+    findings, finding_error = _parse_batch_findings(braw)
+    if finding_error:
+        return _plan_incomplete(lane_pass, finding_error, findings=findings,
+                                overflow=max(0, len(findings) - 3), breaker_artifact=breaker_artifact)
+    if not findings:
+        return {**base, "ran": True, "breaker_artifact": breaker_artifact, "verifier_artifact": None}
+    if budget is not None:
+        split = budget.cap_lane_findings(len(findings))
+        if split["overflow"]:
+            unverified = findings[split["verify"]:]
+            findings = findings[:split["verify"]]
+        else:
+            unverified = []
+    else:
+        unverified = []
+    if len(findings) > 3:
+        unverified = findings[3:] + unverified
+        findings = findings[:3]
+    prompt_findings = "\n".join(
+        f"FINDING: {f['id']} | {f['path']} | {f['trigger']} | {f['impact']}" for f in findings
+    )
+    try:
+        vraw = _dispatch(
+            runner,
+            list(profile.verifier_cmd),
+            ap._build_prompt(_batch_verifier_system(lane_pass, profile.verifier_system),
+                             f"Breaker findings:\n{prompt_findings}\n\nChange under test:\n{content}"),
+            timeout=profile.verifier_timeout,
+            unset_env=list(profile.verifier_unset_env) or None,
+            budget=budget,
+        )
+    except rb.BudgetExceeded as exc:
+        return _plan_incomplete(lane_pass, f"budget:{exc.which}", findings=findings,
+                                unverified=unverified + findings, breaker_artifact=breaker_artifact)
+    except cc.CollabError as exc:
+        return {**base, "ran": False, "breaker_artifact": breaker_artifact, "tool_error": {
+            "lane": lane_pass.id, "seat": profile.verifier_seat,
+            "cmd": _cmd_str(profile.verifier_cmd), "error": str(exc)}}
+    verifier_artifact = ap._write_reply(collab, f"{profile.verifier_seat}-verify-{lane_pass.id}",
+                                        ap._sanitize(vraw))
+    verdicts, verdict_error = _parse_batch_verdicts(vraw, findings)
+    if verdict_error:
+        return _plan_incomplete(lane_pass, verdict_error, findings=findings,
+                                unverified=unverified + findings, breaker_artifact=breaker_artifact,
+                                verifier_artifact=verifier_artifact)
+    confirmed, refuted = [], []
+    for finding in findings:
+        verdict = verdicts[finding["id"]]
+        record = {**finding, "verifier_evidence": verdict["evidence"]}
+        (confirmed if verdict["verdict"] == "CONFIRMED" else refuted).append(record)
+    ap._emit_safe(ap._trace.emit, log, run_id=rid, stage="autopilot.lane",
+                  role=profile.verifier_seat, artifact=f"handoff:{hid}",
+                  span_id=f"{hid}:lane:{lane_pass.id}",
+                  decision={"action": "lane", "reason_codes": [f"pass:{lane_pass.id}",
+                            f"confirmed:{len(confirmed)}", f"refuted:{len(refuted)}"], "confidence": None})
+    result = {**base, "ran": not unverified, "breaker_artifact": breaker_artifact,
+              "verifier_artifact": verifier_artifact, "confirmed": confirmed, "refuted": refuted,
+              "overflow": len(unverified), "unverified": unverified}
+    if unverified:
+        result["incomplete"] = {"reason": "finding_cap"}
+    return result
+
+
+def _run_resolved_plan(collab, hid: str, verification_plan: vp.VerificationPlan, *, builder_seat: str,
+                       reviewer_seat: str | None, source_roots, source_base, test_path, tests, runner,
+                       log: str | None, budget, candidate_id: str | None) -> dict:
+    manifest = gr.source_manifest(source_roots, source_base) if (source_roots and source_base) else {}
+    log = log or ap._log_default(collab)
+    if candidate_id is not None:
+        existing = read_ledger(collab, hid, candidate_id=candidate_id)
+        if existing is not None:
+            return existing
+    with ThreadPoolExecutor(max_workers=len(verification_plan.passes)) as executor:
+        results = list(executor.map(
+            lambda lane_pass: run_plan_pass(collab, hid, lane_pass, builder_seat=builder_seat,
+                                             runner=runner, log=log, budget=budget),
+            verification_plan.passes,
+        ))
+    blockers = [
+        {"id": f"{result['pass']}-{finding['id']}", "lane": result["pass"],
+         "contracts": list(result["contracts"]), "description": finding["description"],
+         "fixed": False, "regression_test": None, "evidence": finding.get("verifier_evidence", "")}
+        for result in results for finding in result.get("confirmed") or []
+    ]
+    tool_error = next((result["tool_error"] for result in results if result.get("tool_error")), None)
+    overflow = sum(int(result.get("overflow", 0) or 0) for result in results)
+    unverified = [item for result in results for item in (result.get("unverified") or [])]
+    incomplete = bool(overflow) or any(result.get("incomplete") for result in results)
+    preflight = (ap._capture_preflight(source_base, test_path, reviewer_seat, manifest)
+                 if reviewer_seat and source_base else None)
+    ledger = {
+        "hid": hid, "candidate_id": candidate_id, "generated_ts": ap._now_utc(),
+        "guardrails": list(verification_plan.guardrails), "builder_seat": builder_seat,
+        "reviewer_seat": reviewer_seat, "source_base": str(source_base) if source_base else None,
+        "source_manifest": manifest, "tests": tests or {"passed": None, "run_id": None},
+        "reviewer_preflight": preflight, "verification_plan": verification_plan.identity_data(),
+        "verification_plan_digest": verification_plan.identity_digest,
+        "lanes": results, "blockers": blockers, "accepted_residuals": [], "tool_error": tool_error,
+        "overflow": overflow, "unverified": unverified, "incomplete": incomplete,
+    }
+    write_ledger(collab, hid, ledger, candidate_id)
+    return ledger
 
 
 # --------------------------------------------------------------------------- #
@@ -161,7 +471,11 @@ def _verifier_system(lane: str, seat_system: str | None) -> str:
 def run_lane(collab, hid: str, lane: str, *, seats: dict, breaker_seat: str, verifier_seat: str,
              builder_seat: str, runner=ap._cli_runner, log: str | None = None,
              budget=None) -> dict:
-    """Run one adversarial lane (breaker → independent verifier) and return its result dict.
+    """Run one legacy string lane (breaker → independent verifier) and return its result dict.
+
+    New candidate execution uses :func:`run_plan_pass`, which has one bounded
+    verifier batch per resolved pass. This compatibility helper is kept so
+    historical ledgers and direct callers remain readable.
 
     When a ``budget`` is supplied, every breaker/verifier dispatch is charged a ``VERIFICATION_CALL``
     BEFORE it runs and the verifier loop is capped at ``max_findings_per_lane`` (ADR-0002 D7); the
@@ -251,11 +565,12 @@ def run_lane(collab, hid: str, lane: str, *, seats: dict, breaker_seat: str, ver
 
 
 def run_lanes(collab, hid: str, *, seats: dict, breaker_seat: str, verifier_seat: str,
-              builder_seat: str | None = None, guardrails=None, lanes_cfg: dict | None = None,
-              source_roots=None, source_base=None, tests: dict | None = None,
-              reviewer_seat: str | None = None, test_path=None,
-              runner=ap._cli_runner, log: str | None = None,
-              budget=None, candidate_id: str | None = None) -> dict:
+               builder_seat: str | None = None, guardrails=None, lanes_cfg: dict | None = None,
+               source_roots=None, source_base=None, tests: dict | None = None,
+               reviewer_seat: str | None = None, test_path=None,
+               runner=ap._cli_runner, log: str | None = None,
+               budget=None, candidate_id: str | None = None,
+               verification_plan: vp.VerificationPlan | None = None) -> dict:
     """Run every required lane for a handoff, assemble the verification ledger, write it, and return it.
 
     ``builder_seat``/``guardrails`` default to the handoff's ``from``/``guardrails`` frontmatter. Confirmed
@@ -268,7 +583,6 @@ def run_lanes(collab, hid: str, *, seats: dict, breaker_seat: str, verifier_seat
     a lane tool-failure surfaces as ``tool_error`` (infrastructure_blocked) and an over-cap or
     budget-exhausted lane as ``incomplete``/``overflow`` (verification_incomplete) — never a silent pass.
     """
-    cfg = lanes_cfg if lanes_cfg is not None else load_lanes()
     _, path = hc._reconcile(collab, hid)
     if path is None:
         raise hc.HandoffNotFound(f"handoff {hid} not found")
@@ -277,6 +591,16 @@ def run_lanes(collab, hid: str, *, seats: dict, breaker_seat: str, verifier_seat
         builder_seat = (fm.get("from") or "").strip()
     if guardrails is None:
         guardrails = fm.get("guardrails") or []
+
+    if verification_plan is not None:
+        return _run_resolved_plan(
+            collab, hid, verification_plan, builder_seat=builder_seat,
+            reviewer_seat=reviewer_seat, source_roots=source_roots, source_base=source_base,
+            test_path=test_path, tests=tests, runner=runner, log=log, budget=budget,
+            candidate_id=candidate_id,
+        )
+
+    cfg = lanes_cfg if lanes_cfg is not None else load_lanes()
 
     lanes = required_lanes(guardrails, cfg)
     manifest = gr.source_manifest(source_roots, source_base) if (source_roots and source_base) else {}
@@ -346,7 +670,7 @@ def run_lanes(collab, hid: str, *, seats: dict, breaker_seat: str, verifier_seat
         "generated_ts": ap._now_utc(),
         "guardrails": list(guardrails),
         "builder_seat": builder_seat,
-        "reviewer_seat": verifier_seat,
+        "reviewer_seat": reviewer_seat or verifier_seat,
         "source_base": str(source_base) if source_base else None,
         "source_manifest": manifest,
         "tests": tests or {"passed": None, "run_id": None},

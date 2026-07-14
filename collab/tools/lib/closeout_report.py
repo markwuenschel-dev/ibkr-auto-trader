@@ -91,9 +91,8 @@ def collect(collab, hid: str) -> dict:
     breaker = next((ln.get("breaker_seat") for ln in lane_list if ln.get("breaker_seat")), None)
     verifier = next((ln.get("verifier_seat") for ln in lane_list if ln.get("verifier_seat")), None) \
         or led.get("reviewer_seat")
-    guardrails = led.get("guardrails") or []
-    required = lanes.required_lanes(guardrails, lanes.load_lanes())
-    ran = sorted({ln.get("lane") for ln in lane_list if ln.get("ran")})
+    required = lanes.ledger_required_passes(led, lanes.load_lanes())
+    ran = sorted(lanes.ledger_ran_passes(led))
     manifest = led.get("source_manifest") or {}
     tests = led.get("tests") or {}
     blockers = led.get("blockers") or []
@@ -113,7 +112,9 @@ def collect(collab, hid: str) -> dict:
         "source_base": led.get("source_base"),
         "source_manifest": {"file_count": len(manifest), "digest12": _manifest_digest(manifest)[:12]},
         "tests": {"passed": tests.get("passed"), "run_id": tests.get("run_id")},
-        "lanes": {"required": required, "ran": ran, "missing": sorted(set(required) - set(ran))},
+        "lanes": {"required": required, "ran": ran, "missing": sorted(set(required) - set(ran)),
+                  "incomplete": bool(led.get("incomplete")),
+                  "plan_digest": led.get("verification_plan_digest")},
         "reviewer_preflight": {
             "present": bool(led.get("reviewer_preflight")),
             "seat": pre.get("seat"), "repo_access": pre.get("repo_access"),

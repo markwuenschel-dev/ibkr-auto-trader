@@ -40,13 +40,13 @@ def _fake(breaker_out, verifier_out):
 
 
 class TestRequiredLanes:
-    def test_autopilot_risk_class_yields_five_lanes(self):
+    def test_v2_compatibility_selector_returns_matching_baseline_contracts(self):
         cfg = lanes.load_lanes()  # the shipped telemetry/lanes.json
         got = lanes.required_lanes(
             ["path-safety", "data-integrity", "bounded-autonomy", "untrusted-agent-output"], cfg)
         assert set(got) == {
             "untrusted-agent-output", "bounded-autonomy", "path-pointer-safety",
-            "process-isolation", "data-integrity-under-concurrent-autopilots"}
+            "change-regression", "data-integrity-under-concurrent-autopilots"}
 
     def test_no_guardrails_requires_no_lanes(self):
         assert lanes.required_lanes([], lanes.load_lanes()) == []
@@ -97,15 +97,14 @@ class TestRunLanes:
         ledger = lanes.run_lanes(
             collab, "001", seats=_seats(["b", "v"]), breaker_seat="b", verifier_seat="v",
             builder_seat="builder",
-            guardrails=["bounded-autonomy", "untrusted-agent-output"],  # -> the 5 autopilot lanes
+            guardrails=["bounded-autonomy", "untrusted-agent-output"],  # -> baseline + matching generic contracts
             runner=_fake("FINDING: X -> concrete trigger", "VERDICT: CONFIRMED X trigger"))
         # ledger on disk, one blocker per (lane, confirmed finding)
         on_disk = lanes.read_ledger(collab, "001")
         assert on_disk == ledger
         assert lanes.ledger_path(collab, "001").exists()
         assert {b["lane"] for b in ledger["blockers"]} == {
-            "untrusted-agent-output", "bounded-autonomy", "path-pointer-safety",
-            "process-isolation", "data-integrity-under-concurrent-autopilots"}
+            "change-regression", "untrusted-agent-output", "bounded-autonomy"}
         assert all(b["fixed"] is False and b["regression_test"] is None for b in ledger["blockers"])
         assert ledger["builder_seat"] == "builder" and ledger["reviewer_seat"] == "v"
 
@@ -117,7 +116,7 @@ class TestRunLanes:
             builder_seat="builder", guardrails=["bounded-autonomy", "untrusted-agent-output"],
             source_roots=None, source_base=None, runner=_fake("NO-FINDING", "unused"))
         assert ledger["blockers"] == []
-        assert len(ledger["lanes"]) == 5 and all(x["ran"] for x in ledger["lanes"])
+        assert len(ledger["lanes"]) == 3 and all(x["ran"] for x in ledger["lanes"])
 
     def test_ledger_carries_source_manifest_when_roots_given(self, tmp_path):
         collab = tmp_path / "c"

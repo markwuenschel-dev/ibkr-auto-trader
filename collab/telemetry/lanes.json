@@ -1,24 +1,110 @@
 {
-  "version": 1,
-  "description": "Risk classes -> required adversarial lanes for autonomous closeout (ARCHITECTURE.md §18.2, autonomous revision). A risk class fires when its trigger guardrails are a subset of the handoff's guardrails; guardrail_lanes adds per-guardrail coverage for partial matches.",
-  "risk_classes": {
-    "autopilot": {
-      "guardrails": ["bounded-autonomy", "untrusted-agent-output"],
-      "required_lanes": [
-        "untrusted-agent-output",
-        "bounded-autonomy",
-        "path-pointer-safety",
-        "process-isolation",
-        "data-integrity-under-concurrent-autopilots"
+  "version": 2,
+  "revision": "risk-tiered-assurance-lanes-v2",
+  "prompt_revision": "risk-tiered-assurance-v1",
+  "description": "Typed assurance contracts. The resolver creates one baseline pair for every candidate and, only for safety-critical guardrails, one provider-diverse composite pair. Version-1 risk-class fan-out is intentionally unsupported.",
+  "lane_specs": [
+    {
+      "id": "change-regression",
+      "title": "Change regression",
+      "category": "generic",
+      "always_baseline": true,
+      "selection": {"baseline": [], "high-risk": []},
+      "checklist": [
+        "Read the candidate diff and its stated acceptance criteria.",
+        "Look for regressions in changed call paths, error handling, and tests.",
+        "Require an exact path and concrete trigger for every finding."
+      ]
+    },
+    {
+      "id": "untrusted-agent-output",
+      "title": "Untrusted agent output",
+      "category": "generic",
+      "selection": {"baseline": ["untrusted-agent-output"], "high-risk": []},
+      "checklist": [
+        "Treat model output, pointers, and control artifacts as untrusted data.",
+        "Probe parsing, sanitization, and authority-boundary bypasses."
+      ]
+    },
+    {
+      "id": "bounded-autonomy",
+      "title": "Bounded autonomy",
+      "category": "generic",
+      "selection": {"baseline": ["bounded-autonomy", "safety"], "high-risk": []},
+      "checklist": [
+        "Check that retries, budgets, and stop paths are bounded and truthful.",
+        "Reject silent escalation, unbounded retry, or unauthorized state advancement."
+      ]
+    },
+    {
+      "id": "path-pointer-safety",
+      "title": "Path and pointer safety",
+      "category": "generic",
+      "selection": {"baseline": ["path-safety", "auth"], "high-risk": ["auth"]},
+      "checklist": [
+        "Probe path traversal, symlink, pointer-dereference, and authorization-boundary escapes.",
+        "Verify path validation is applied before file or artifact access."
+      ]
+    },
+    {
+      "id": "process-isolation",
+      "title": "Process isolation",
+      "category": "generic",
+      "selection": {"baseline": ["process-isolation", "integration"], "high-risk": ["integration"]},
+      "checklist": [
+        "Check subprocess argument isolation, environment handling, and capability boundaries.",
+        "Probe cross-process authority leaks and unsafe command composition."
+      ]
+    },
+    {
+      "id": "data-integrity-under-concurrent-autopilots",
+      "title": "Data integrity under concurrent autopilots",
+      "category": "generic",
+      "selection": {"baseline": ["data-integrity", "concurrency"], "high-risk": ["data-integrity", "concurrency"]},
+      "checklist": [
+        "Probe concurrent writes, stale reads, compare-and-swap failures, and recovery races.",
+        "Verify immutable evidence and audit state cannot be overwritten or silently lost."
+      ]
+    },
+    {
+      "id": "order-risk-and-idempotency",
+      "title": "Order risk and idempotency",
+      "category": "trading",
+      "selection": {"baseline": [], "high-risk": ["money", "execution"]},
+      "checklist": [
+        "Probe duplicate order submission, stale buying-power checks, and retry side effects.",
+        "Verify risk limits, paper-only guards, and idempotency keys survive failures."
+      ]
+    },
+    {
+      "id": "market-data-causality-and-time",
+      "title": "Market-data causality and time",
+      "category": "trading",
+      "selection": {"baseline": [], "high-risk": ["market-data", "time"]},
+      "checklist": [
+        "Probe lookahead, timestamp ambiguity, stale snapshots, and causal ordering defects.",
+        "Verify decisions use only data that was available at the recorded decision time."
+      ]
+    },
+    {
+      "id": "broker-snapshot-and-reconciliation",
+      "title": "Broker snapshot and reconciliation",
+      "category": "trading",
+      "selection": {"baseline": [], "high-risk": ["broker", "integration"]},
+      "checklist": [
+        "Probe partial broker snapshots, reconnect races, and reconciliation drift.",
+        "Verify account state, fills, and local records converge without inventing certainty."
+      ]
+    },
+    {
+      "id": "state-concurrency-and-retry",
+      "title": "State concurrency and retry",
+      "category": "trading",
+      "selection": {"baseline": [], "high-risk": ["data-integrity", "concurrency"]},
+      "checklist": [
+        "Probe retry races, duplicate work, interrupted writes, and stale ownership.",
+        "Verify recovery retains causality, auditability, and a safe terminal state."
       ]
     }
-  },
-  "guardrail_lanes": {
-    "path-safety": ["path-pointer-safety"],
-    "auth": ["path-pointer-safety"],
-    "data-integrity": ["data-integrity-under-concurrent-autopilots"],
-    "concurrency": ["data-integrity-under-concurrent-autopilots"],
-    "money": ["data-integrity-under-concurrent-autopilots"],
-    "safety": ["bounded-autonomy"]
-  }
+  ]
 }

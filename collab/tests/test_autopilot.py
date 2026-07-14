@@ -400,7 +400,7 @@ def _home_with(home, closeout, seats):
         json.dumps({"version": 1, "closeout": closeout, "seats": seats}), encoding="utf-8")
 
 
-_GEN = ["bounded-autonomy", "untrusted-agent-output"]  # two guardrails -> the 5 adversarial lanes
+_GEN = ["bounded-autonomy", "untrusted-agent-output"]  # baseline + two matching generic contracts
 
 
 class TestCandidateClose:
@@ -425,11 +425,48 @@ class TestCandidateClose:
         ap.run(collab, seats=_closeout_seats(), runner=runner, home=str(home))
         assert hc.state_of(collab, "001") == "done"            # self-closed, contract satisfied
         assert any(e["stage"] == "autopilot.autonomous_done" for e in _events(collab))
-        # the immutable per-candidate ledger records the 5 adversarial lanes that actually ran
+        # the immutable per-candidate ledger records the compatibility baseline contracts that ran
         ledgers = list((Path(collab) / "autopilot" / "verification" / "001").glob("*.ledger.json"))
         assert len(ledgers) == 1
         led = json.loads(ledgers[0].read_text("utf-8"))
-        assert len(led["lanes"]) == 5
+        assert len(led["lanes"]) == 3
+
+    def test_v2_high_risk_plan_runs_two_profiled_pairs_and_closes(self, tmp_path):
+        """The real driver resolves once, binds that plan, and dispatches only two breaker→verifier pairs."""
+        home = tmp_path / "home"
+        home.mkdir()
+        collab = str(tmp_path / "c")
+        _slice(collab, guardrails=["money"])
+        closeout = _closeout(collab, tmp_path, ok=True)
+        example = Path(__file__).resolve().parent.parent / "seats.example.json"
+        cfg = json.loads(example.read_text(encoding="utf-8"))
+        cfg["closeout"] = closeout
+        (home / "seats.json").write_text(json.dumps(cfg), encoding="utf-8")
+        seats = ap.load_seats(home)
+        calls = []
+
+        def runner(cmd, prompt, *, timeout, **kw):
+            argv = " ".join(cmd)
+            calls.append(argv)
+            if "gpt-5.6-terra" in argv:
+                return "builder completed the change"
+            if "REVIEWER" in prompt:
+                return "Reviewed the repository.\n[[SIGNOFF]]"
+            return "NO-FINDING"
+
+        ap.run(collab, seats=seats, runner=runner, home=str(home))
+
+        assert hc.state_of(collab, "001") == "done"
+        ledgers = list((Path(collab) / "autopilot" / "verification" / "001").glob("*.ledger.json"))
+        assert len(ledgers) == 1
+        ledger = json.loads(ledgers[0].read_text(encoding="utf-8"))
+        assert [entry["pass"] for entry in ledger["lanes"]] == ["baseline", "high-risk-diverse"]
+        assert ledger["verification_plan"]["passes"][0]["profile"]["breaker"]["model"] == "opus-4.8"
+        assert ledger["verification_plan"]["passes"][1]["profile"]["breaker"]["model"] == "gpt-5.6-luna"
+        budget = json.loads((Path(collab) / "autopilot" / "budget" / "001.json").read_text(encoding="utf-8"))
+        assert budget["current"]["verification_passes"] == 2
+        assert budget["current"]["verification_calls"] == 2
+        assert len(calls) == 4  # builder + reviewer + one no-finding breaker per resolved pass
 
     def test_red_tests_block_close(self, tmp_path):
         # Clean findings but a FAILING test suite: ca approves (no findings) yet the evidence contract refuses

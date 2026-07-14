@@ -275,6 +275,35 @@ def load_models(home) -> dict:
     return models if isinstance(models, dict) else {}
 
 
+def _resolve_assurance_plan(home, guardrails):
+    """Resolve the v2 assurance policy once, before candidate identity and dispatch.
+
+    Legacy test fixtures and existing local catalogs without ``assessment_profiles`` deliberately
+    retain the old runner until their operator migrates from ``seats.example.json``.  A catalog that
+    opts into profiles, however, is fail-closed: malformed profiles never silently downgrade to the
+    legacy generic fan-out.
+    """
+    try:
+        raw = _seats_file(home).read_text("utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise cc.CollabError(f"cannot read assurance seats configuration: {exc}") from exc
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        raise cc.CollabError(f"cannot parse assurance seats configuration: {exc}") from exc
+    if not isinstance(doc, dict) or "assessment_profiles" not in doc:
+        return None
+    try:
+        import verification_plan as vp
+        lanes_file = Path(cc.resolve_kit_root()) / "telemetry" / "lanes.json"
+        lanes_doc = json.loads(lanes_file.read_text("utf-8"))
+        return vp.resolve_verification_plan(lanes_doc, doc, guardrails=guardrails)
+    except (OSError, ValueError, cc.CollabError) as exc:
+        raise cc.CollabError(f"invalid risk-tiered assurance configuration: {exc}") from exc
+
+
 def _to_from(path: Path) -> tuple:
     """``(to, from)`` from a handoff's frontmatter (via ``contracts``), or ``(None, None)`` if unparseable.
 
@@ -661,7 +690,7 @@ def _assessment_lane_ledger(led: dict | None) -> dict:
 
 
 def _compute_candidate(collab, hid, *, seats, builder_seat, reviewer_seat, source_roots, source_base,
-                       test_path, guardrails, builder_output=None):
+                       test_path, guardrails, builder_output=None, verification_plan=None):
     """Compute the candidate identity for the builder's current output. For CODE work the source manifest
     drives the id (so an unchanged fix mints the SAME id — the no-progress signal); the reviewer rubric +
     builder seat profile are folded in so a changed lens can never reuse evidence under the old one
@@ -673,13 +702,21 @@ def _compute_candidate(collab, hid, *, seats, builder_seat, reviewer_seat, sourc
         manifest = {"__builder_output__": _sha256(builder_output)}
     rcfg = seats.get(reviewer_seat) if isinstance(seats.get(reviewer_seat), dict) else {}
     try:
-        fp = adapter_profiles.seat_profile_fingerprint(seats.get(builder_seat) or {})
+        profile_payload = {
+            "builder": adapter_profiles.seat_profile_fingerprint(seats.get(builder_seat) or {}),
+            "reviewer": adapter_profiles.seat_profile_fingerprint(seats.get(reviewer_seat) or {}),
+            "verification_plan": verification_plan.identity_digest if verification_plan is not None else "",
+        }
+        fp = "assessment:" + _sha256(json.dumps(profile_payload, sort_keys=True))[:16]
     except Exception:
         fp = ""
+    lane_config = (json.loads(verification_plan.identity_payload) if verification_plan is not None
+                   else {"guardrails": list(guardrails or [])})
     return ca.Candidate.compute(
         hid, source_manifest=manifest, source_roots=list(source_roots or []), test_command=test_path,
-        lane_config={"guardrails": list(guardrails or [])}, reviewer_rubric=str(rcfg.get("system") or ""),
-        seat_profile_fingerprint=fp,
+        lane_config=lane_config,
+        assessment_plan_revision=(verification_plan.lane_config_revision if verification_plan is not None else ""),
+        reviewer_rubric=str(rcfg.get("system") or ""), seat_profile_fingerprint=fp,
     )
 
 
@@ -689,8 +726,8 @@ def _sha256(s: str) -> str:
 
 
 def _assess_candidate(collab, hid, candidate, *, seats, closeout, builder_seat, reviewer_seat,
-                      reviewer_transcript, runner, budget, log, rid, source_base, source_roots,
-                      test_path, guardrails):
+                       reviewer_transcript, runner, budget, log, rid, source_base, source_roots,
+                       test_path, guardrails, verification_plan=None):
     """Gather one candidate's evidence: the reviewer DECISION ∥ the adversarial LANES, fanned out under a
     ThreadPoolExecutor and charged atomically through the shared ``RunBudget``. Returns
     ``(reviewer_report, lane_ledger)`` (the raw ``run_lanes`` ledger). A budget denial before fan-out, a
@@ -700,11 +737,12 @@ def _assess_candidate(collab, hid, candidate, *, seats, closeout, builder_seat, 
     import lanes as _lanes     # lazy (lanes imports ap at module top)
     cid = candidate.candidate_id
     manifest_before = gr.source_manifest(source_roots, source_base) if (source_roots and source_base) else {}
-    # ADR-0002 D6: reserve the review decision + the verification pass BEFORE any dispatch. A denial here
-    # is terminal (the per-candidate REVIEW_DECISION invariant, or a global ceiling) -> verification_incomplete.
+    # Reserve the reviewer decision before concurrent dispatch. Resolved v2 lane pairs reserve their own
+    # verification passes at dispatch time, so an unstarted high-risk pair is never pre-charged.
     try:
         budget.charge(rb.REVIEW_DECISION, candidate=cid)
-        budget.charge(rb.VERIFICATION_PASS)
+        if verification_plan is None:
+            budget.charge(rb.VERIFICATION_PASS)
     except rb.BudgetExceeded as e:
         return None, {"blockers": [], "tool_error": None, "overflow": 0, "unverified": [],
                       "incomplete": {"reason": "budget", "which": e.which}}
@@ -720,8 +758,9 @@ def _assess_candidate(collab, hid, candidate, *, seats, closeout, builder_seat, 
         return _lanes.run_lanes(collab, hid, seats=seats, breaker_seat=base.get("breaker"),
                                 verifier_seat=base.get("verifier"), builder_seat=builder_seat,
                                 reviewer_seat=reviewer_seat, guardrails=guardrails, source_roots=source_roots,
-                                source_base=source_base, test_path=test_path, tests=tests, runner=runner,
-                                log=log, budget=budget, candidate_id=cid)
+                                 source_base=source_base, test_path=test_path, tests=tests, runner=runner,
+                                 log=log, budget=budget, candidate_id=cid,
+                                 verification_plan=verification_plan)
 
     _write_status(collab, phase="thinking", active_seat="assess", current_hid=hid,
                   active_since=_now_utc(), timeout=0)
@@ -1016,6 +1055,13 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
     source_base = base.get("source_base")  # None for a text-only handoff -> no manifest, no drift check
     source_roots = base.get("source_roots") or (["**/*.py"] if source_base else None)
     test_path = base.get("test_path")
+    try:
+        verification_plan = _resolve_assurance_plan(home, guardrails)
+    except cc.CollabError as exc:
+        budget = rb.RunBudget(collab, root, _limits_from_control(collab, base_limits))
+        _escalate_pause(collab, root, home, budget, reason="infrastructure_blocked", log=log, rid=rid,
+                        cause=str(exc))
+        return "infrastructure_blocked", calls
 
     budget = rb.RunBudget(collab, root, _limits_from_control(collab, base_limits))
     if reopen:
@@ -1067,9 +1113,9 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
         transcript = f"{transcript}\n\n----- {builder_seat} -----\n{_sanitize(builder_raw)}"
 
         candidate = _compute_candidate(collab, root, seats=seats, builder_seat=builder_seat,
-                                       reviewer_seat=reviewer_seat, source_roots=source_roots,
-                                       source_base=source_base, test_path=test_path, guardrails=guardrails,
-                                       builder_output=builder_raw)
+                                        reviewer_seat=reviewer_seat, source_roots=source_roots,
+                                        source_base=source_base, test_path=test_path, guardrails=guardrails,
+                                        builder_output=builder_raw, verification_plan=verification_plan)
         cid = candidate.candidate_id
         _write_status(collab, stage="assess", candidate=cid[5:17], current_hid=root)
         # No progress: a repair packet that produced a byte-identical candidate — the builder did not change
@@ -1089,7 +1135,7 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
                 collab, root, candidate, seats=seats, closeout=closeout, builder_seat=builder_seat,
                 reviewer_seat=reviewer_seat, reviewer_transcript=reviewer_transcript, runner=runner,
                 budget=budget, log=log, rid=rid, source_base=source_base, source_roots=source_roots,
-                test_path=test_path, guardrails=guardrails)
+                test_path=test_path, guardrails=guardrails, verification_plan=verification_plan)
             calls += 1  # the reviewer dispatch is one seat turn (lane breaker/verifier calls are not "rounds")
             assessment = ca.complete(collab, root, candidate, reviewer_report=report,
                                      lane_ledger=_assessment_lane_ledger(lane_ledger),
