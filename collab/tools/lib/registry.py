@@ -18,8 +18,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import collab_common as cc  # noqa: E402
-import handoff_core as hc  # noqa: E402
+import collab_common as cc
+import handoff_core as hc
 
 REGISTRY_VERSION = 1
 
@@ -56,17 +56,19 @@ def load(home=None) -> dict:
             break
         except FileNotFoundError:
             return {"version": REGISTRY_VERSION, "collabs": {}}
-        except PermissionError:
+        except PermissionError as exc:
             if attempt == 4:
-                raise cc.CollabError(f"could not read {p} after retries (locked by a concurrent writer?)")
-            time.sleep(0.02 * (2 ** attempt))
+                raise cc.CollabError(
+                    f"could not read {p} after retries (locked by a concurrent writer?)"
+                ) from exc
+            time.sleep(0.02 * (2**attempt))
     try:
         data = json.loads(text)
-    except ValueError:
+    except ValueError as exc:
         raise cc.CollabError(
             f"registry {p} is corrupt (invalid JSON) — refusing to proceed and overwrite it; "
             f"inspect/repair or remove it"
-        )
+        ) from exc
     data.setdefault("version", REGISTRY_VERSION)
     data.setdefault("collabs", {})
     return data
@@ -112,12 +114,14 @@ def status(home=None) -> list[dict]:
                 oldest_pending_age = round(time.time() - oldest, 1)
         except cc.CollabError:
             pass  # unreadable/absent collab root — report it with empty counts
-        out.append({
-            "name": name,
-            "root": str(root),
-            "counts": counts,
-            "oldest_pending_age_s": oldest_pending_age,
-            "reviewer": ent.get("reviewer"),
-            "guardrails": ent.get("guardrails"),
-        })
+        out.append(
+            {
+                "name": name,
+                "root": str(root),
+                "counts": counts,
+                "oldest_pending_age_s": oldest_pending_age,
+                "reviewer": ent.get("reviewer"),
+                "guardrails": ent.get("guardrails"),
+            }
+        )
     return out

@@ -96,7 +96,9 @@ class Candidate:
         seat_profile_fingerprint: str = "",
     ) -> Candidate:
         inner = run_budget.candidate_id(
-            source_manifest, source_roots=source_roots, test_command=test_command,
+            source_manifest,
+            source_roots=source_roots,
+            test_command=test_command,
             lane_config=lane_config,
         )
         rubric_hash = _sha(reviewer_rubric or "")
@@ -151,8 +153,12 @@ class Finding:
         remediation = str(d.get("remediation", ""))
         fp = d.get("fingerprint") or _sha(f"{source}|{category}|{d.get('title', '')}|{evidence}")
         return cls(
-            fingerprint=fp, source=source, severity=severity, category=category,
-            evidence=evidence, remediation=remediation,
+            fingerprint=fp,
+            source=source,
+            severity=severity,
+            category=category,
+            evidence=evidence,
+            remediation=remediation,
             status=str(d.get("status", OPEN)),
             first_seen_candidate=str(d.get("first_seen_candidate", "")),
             last_seen_candidate=str(d.get("last_seen_candidate", "")),
@@ -193,9 +199,12 @@ class ReviewerReport:
         if not isinstance(coverage, dict):
             coverage = {}
         return cls(
-            candidate_id=candidate_id, requirement_coverage=coverage,
-            blocking_findings=blocking, advisory_findings=advisory,
-            provisional=True, edited_code=False,
+            candidate_id=candidate_id,
+            requirement_coverage=coverage,
+            blocking_findings=blocking,
+            advisory_findings=advisory,
+            provisional=True,
+            edited_code=False,
         )
 
 
@@ -245,7 +254,7 @@ class FindingLedger:
             data = json.loads(self._path.read_text("utf-8"))
         except FileNotFoundError:
             return
-        except (OSError, ValueError):
+        except OSError, ValueError:
             raise cc.CollabError(
                 f"finding ledger {self._path} is corrupt — refusing to proceed (a lost finding record "
                 f"could launder a prior defect); inspect/repair or remove it"
@@ -263,8 +272,12 @@ class FindingLedger:
             prior = self._by_fp.get(f.fingerprint)
             if prior is not None:
                 self._by_fp[f.fingerprint] = replace(
-                    prior, status=OPEN, severity=f.severity, category=f.category,
-                    evidence=f.evidence or prior.evidence, remediation=f.remediation or prior.remediation,
+                    prior,
+                    status=OPEN,
+                    severity=f.severity,
+                    category=f.category,
+                    evidence=f.evidence or prior.evidence,
+                    remediation=f.remediation or prior.remediation,
                     last_seen_candidate=candidate_id,
                 )
             else:
@@ -334,9 +347,15 @@ def classify(reviewer_report, lane_ledger: dict, unresolved) -> tuple[str, dict 
 
 
 def complete(
-    collab, hid: str, candidate: Candidate, *,
-    reviewer_report, lane_ledger: dict, budget_snapshot: dict | None = None,
-    lane_ledger_ref: str | None = None, now_ts: str | None = None,
+    collab,
+    hid: str,
+    candidate: Candidate,
+    *,
+    reviewer_report,
+    lane_ledger: dict,
+    budget_snapshot: dict | None = None,
+    lane_ledger_ref: str | None = None,
+    now_ts: str | None = None,
 ) -> CandidateAssessment:
     """Merge findings, classify the aggregate outcome, and persist. A clean run (reviewer + lanes ok)
     updates the finding ledger and saves an immutable completed assessment; an infra/incomplete run
@@ -345,22 +364,37 @@ def complete(
     lane_ledger = lane_ledger or {}
 
     # Only trust the finding merge on a run that actually completed review + verification.
-    infra_or_incomplete = bool(lane_ledger.get("tool_error")) or reviewer_report is None or bool(
-        lane_ledger.get("incomplete")
-    ) or int(lane_ledger.get("overflow", 0) or 0) > 0
+    infra_or_incomplete = (
+        bool(lane_ledger.get("tool_error"))
+        or reviewer_report is None
+        or bool(lane_ledger.get("incomplete"))
+        or int(lane_ledger.get("overflow", 0) or 0) > 0
+    )
 
     if infra_or_incomplete:
         outcome, cause = classify(reviewer_report, lane_ledger, ())
         assessment = CandidateAssessment(
-            handoff_id=hid, candidate_id=candidate.candidate_id, outcome=outcome,
-            unresolved_findings=(), advisory_findings=(), lane_ledger_ref=lane_ledger_ref,
-            cause=cause, budget_snapshot=budget_snapshot, completed_ts=ts,
+            handoff_id=hid,
+            candidate_id=candidate.candidate_id,
+            outcome=outcome,
+            unresolved_findings=(),
+            advisory_findings=(),
+            lane_ledger_ref=lane_ledger_ref,
+            cause=cause,
+            budget_snapshot=budget_snapshot,
+            completed_ts=ts,
         )
-        save_partial(collab, hid, candidate.candidate_id, {
-            "reviewer_report": _report_dict(reviewer_report),
-            "lane_ledger": lane_ledger,
-            "outcome": outcome, "cause": cause,
-        })
+        save_partial(
+            collab,
+            hid,
+            candidate.candidate_id,
+            {
+                "reviewer_report": _report_dict(reviewer_report),
+                "lane_ledger": lane_ledger,
+                "outcome": outcome,
+                "cause": cause,
+            },
+        )
         return assessment
 
     ledger = FindingLedger.load(collab, hid)
@@ -375,19 +409,29 @@ def complete(
     outcome, cause = classify(reviewer_report, lane_ledger, unresolved)
     advisories = tuple(f for f in unresolved if not f.blocks())
     assessment = CandidateAssessment(
-        handoff_id=hid, candidate_id=candidate.candidate_id, outcome=outcome,
+        handoff_id=hid,
+        candidate_id=candidate.candidate_id,
+        outcome=outcome,
         unresolved_findings=tuple(f for f in unresolved if f.blocks()),
-        advisory_findings=advisories, lane_ledger_ref=lane_ledger_ref,
-        cause=cause, budget_snapshot=budget_snapshot, completed_ts=ts,
+        advisory_findings=advisories,
+        lane_ledger_ref=lane_ledger_ref,
+        cause=cause,
+        budget_snapshot=budget_snapshot,
+        completed_ts=ts,
     )
     save_assessment(collab, assessment)
     return assessment
 
 
 def retry(
-    collab, hid: str, candidate: Candidate, *,
-    reviewer_report=None, lane_ledger: dict | None = None,
-    budget_snapshot: dict | None = None, now_ts: str | None = None,
+    collab,
+    hid: str,
+    candidate: Candidate,
+    *,
+    reviewer_report=None,
+    lane_ledger: dict | None = None,
+    budget_snapshot: dict | None = None,
+    now_ts: str | None = None,
 ) -> CandidateAssessment:
     """Complete a previously infra/incomplete assessment by reusing stored partial evidence and only
     the newly-supplied missing work. NEVER invokes the builder (the candidate is unchanged)."""
@@ -399,8 +443,13 @@ def retry(
     if report is None and partial.get("reviewer_report") is not None:
         report = ReviewerReport.parse(partial["reviewer_report"], candidate_id=candidate.candidate_id)
     return complete(
-        collab, hid, candidate, reviewer_report=report, lane_ledger=merged_ledger,
-        budget_snapshot=budget_snapshot, now_ts=now_ts,
+        collab,
+        hid,
+        candidate,
+        reviewer_report=report,
+        lane_ledger=merged_ledger,
+        budget_snapshot=budget_snapshot,
+        now_ts=now_ts,
     )
 
 
@@ -432,7 +481,7 @@ def save_assessment(collab, assessment: CandidateAssessment) -> Path:
     if path.exists():
         try:
             prior = json.loads(path.read_text("utf-8"))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             prior = None
         if isinstance(prior, dict) and prior.get("outcome") not in (None, assessment.outcome):
             raise AssessmentImmutableViolation(
@@ -450,7 +499,7 @@ def load_assessment(collab, hid: str, candidate_id: str) -> CandidateAssessment 
         d = json.loads(path.read_text("utf-8"))
     except FileNotFoundError:
         return None
-    except (OSError, ValueError):
+    except OSError, ValueError:
         raise cc.CollabError(f"assessment {path} is corrupt — refusing to reuse it") from None
     return _assessment_from_dict(d)
 
@@ -468,7 +517,7 @@ def load_partial(collab, hid: str, candidate_id: str) -> dict | None:
         return json.loads(path.read_text("utf-8"))
     except FileNotFoundError:
         return None
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
 

@@ -38,7 +38,7 @@ class TestWriteReadConsume:
     def test_latest_supersedes(self, tmp_path):
         collab = str(tmp_path / "c")
         opreq.write(collab, "030", opreq.RETRY)
-        opreq.write(collab, "030", opreq.ADOPT)          # supersedes
+        opreq.write(collab, "030", opreq.ADOPT)  # supersedes
         assert opreq.get(collab, "030")["action"] == "adopt"
         assert len(opreq.pending(collab)) == 1
 
@@ -47,7 +47,7 @@ class TestWriteReadConsume:
         opreq.write(collab, "030", opreq.RETRY)
         assert opreq.consume(collab, "030") is True
         assert opreq.get(collab, "030") is None
-        assert opreq.consume(collab, "030") is False      # idempotent — already gone
+        assert opreq.consume(collab, "030") is False  # idempotent — already gone
 
 
 class TestRobustness:
@@ -65,11 +65,13 @@ class TestRobustness:
         collab = str(tmp_path / "c")
         d = Path(collab) / "autopilot" / "requests"
         d.mkdir(parents=True)
-        (d / "030.json").write_text("{ not json", encoding="utf-8")          # torn
-        (d / "031.json").write_text(json.dumps({"hid": "031", "action": "nope"}), encoding="utf-8")  # bad action
-        (d / "not-an-id.json").write_text(json.dumps({"action": "retry"}), encoding="utf-8")         # bad name
+        (d / "030.json").write_text("{ not json", encoding="utf-8")  # torn
+        (d / "031.json").write_text(
+            json.dumps({"hid": "031", "action": "nope"}), encoding="utf-8"
+        )  # bad action
+        (d / "not-an-id.json").write_text(json.dumps({"action": "retry"}), encoding="utf-8")  # bad name
         assert opreq.get(collab, "030") is None
-        assert opreq.pending(collab) == []                                    # all three skipped, no crash
+        assert opreq.pending(collab) == []  # all three skipped, no crash
 
     def test_missing_dir_is_empty(self, tmp_path):
         assert opreq.pending(str(tmp_path / "nope")) == []

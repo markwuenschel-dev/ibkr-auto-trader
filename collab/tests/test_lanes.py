@@ -36,6 +36,7 @@ def _fake(breaker_out, verifier_out):
         if "breaker" in who or who.endswith("-b"):
             return breaker_out
         return verifier_out
+
     return run
 
 
@@ -43,10 +44,15 @@ class TestRequiredLanes:
     def test_v2_compatibility_selector_returns_matching_baseline_contracts(self):
         cfg = lanes.load_lanes()  # the shipped telemetry/lanes.json
         got = lanes.required_lanes(
-            ["path-safety", "data-integrity", "bounded-autonomy", "untrusted-agent-output"], cfg)
+            ["path-safety", "data-integrity", "bounded-autonomy", "untrusted-agent-output"], cfg
+        )
         assert set(got) == {
-            "untrusted-agent-output", "bounded-autonomy", "path-pointer-safety",
-            "change-regression", "data-integrity-under-concurrent-autopilots"}
+            "untrusted-agent-output",
+            "bounded-autonomy",
+            "path-pointer-safety",
+            "change-regression",
+            "data-integrity-under-concurrent-autopilots",
+        }
 
     def test_no_guardrails_requires_no_lanes(self):
         assert lanes.required_lanes([], lanes.load_lanes()) == []
@@ -56,38 +62,66 @@ class TestRunLane:
     def test_clean_lane_when_breaker_finds_nothing(self, tmp_path):
         collab = str(tmp_path / "c")
         _handoff(collab)
-        r = lanes.run_lane(collab, "001", "untrusted-agent-output",
-                           seats=_seats(["b", "v"]), breaker_seat="b", verifier_seat="v",
-                           builder_seat="builder", runner=_fake("NO-FINDING", "unused"))
+        r = lanes.run_lane(
+            collab,
+            "001",
+            "untrusted-agent-output",
+            seats=_seats(["b", "v"]),
+            breaker_seat="b",
+            verifier_seat="v",
+            builder_seat="builder",
+            runner=_fake("NO-FINDING", "unused"),
+        )
         assert r["ran"] is True and r["confirmed"] == [] and r["refuted"] == []
 
     def test_confirmed_finding_survives(self, tmp_path):
         collab = str(tmp_path / "c")
         _handoff(collab)
-        r = lanes.run_lane(collab, "001", "path-pointer-safety",
-                           seats=_seats(["b", "v"]), breaker_seat="b", verifier_seat="v",
-                           builder_seat="builder",
-                           runner=_fake("FINDING: _substance -> ../ escapes replies dir",
-                                        "VERDICT: CONFIRMED _substance ../ escape reproduces"))
+        r = lanes.run_lane(
+            collab,
+            "001",
+            "path-pointer-safety",
+            seats=_seats(["b", "v"]),
+            breaker_seat="b",
+            verifier_seat="v",
+            builder_seat="builder",
+            runner=_fake(
+                "FINDING: _substance -> ../ escapes replies dir",
+                "VERDICT: CONFIRMED _substance ../ escape reproduces",
+            ),
+        )
         assert r["confirmed"] == ["_substance -> ../ escapes replies dir"] and r["refuted"] == []
 
     def test_verifier_refutes_by_default(self, tmp_path):
         # A finding whose verifier does NOT emit CONFIRMED must be REJECTED, not confirmed.
         collab = str(tmp_path / "c")
         _handoff(collab)
-        r = lanes.run_lane(collab, "001", "bounded-autonomy",
-                           seats=_seats(["b", "v"]), breaker_seat="b", verifier_seat="v",
-                           builder_seat="builder",
-                           runner=_fake("FINDING: maybe unbounded?", "I am not sure; looks fine actually."))
+        r = lanes.run_lane(
+            collab,
+            "001",
+            "bounded-autonomy",
+            seats=_seats(["b", "v"]),
+            breaker_seat="b",
+            verifier_seat="v",
+            builder_seat="builder",
+            runner=_fake("FINDING: maybe unbounded?", "I am not sure; looks fine actually."),
+        )
         assert r["confirmed"] == [] and r["refuted"] == ["maybe unbounded?"]
 
     def test_independence_violation_raises(self, tmp_path):
         collab = str(tmp_path / "c")
         _handoff(collab)
         with pytest.raises(cc.CollabError, match="independence"):
-            lanes.run_lane(collab, "001", "x", seats=_seats(["builder", "v"]),
-                           breaker_seat="builder", verifier_seat="v",  # breaker == builder
-                           builder_seat="builder", runner=_fake("NO-FINDING", "x"))
+            lanes.run_lane(
+                collab,
+                "001",
+                "x",
+                seats=_seats(["builder", "v"]),
+                breaker_seat="builder",
+                verifier_seat="v",  # breaker == builder
+                builder_seat="builder",
+                runner=_fake("NO-FINDING", "x"),
+            )
 
 
 class TestRunLanes:
@@ -95,16 +129,27 @@ class TestRunLanes:
         collab = str(tmp_path / "c")
         _handoff(collab, frm="builder")
         ledger = lanes.run_lanes(
-            collab, "001", seats=_seats(["b", "v"]), breaker_seat="b", verifier_seat="v",
+            collab,
+            "001",
+            seats=_seats(["b", "v"]),
+            breaker_seat="b",
+            verifier_seat="v",
             builder_seat="builder",
-            guardrails=["bounded-autonomy", "untrusted-agent-output"],  # -> baseline + matching generic contracts
-            runner=_fake("FINDING: X -> concrete trigger", "VERDICT: CONFIRMED X trigger"))
+            guardrails=[
+                "bounded-autonomy",
+                "untrusted-agent-output",
+            ],  # -> baseline + matching generic contracts
+            runner=_fake("FINDING: X -> concrete trigger", "VERDICT: CONFIRMED X trigger"),
+        )
         # ledger on disk, one blocker per (lane, confirmed finding)
         on_disk = lanes.read_ledger(collab, "001")
         assert on_disk == ledger
         assert lanes.ledger_path(collab, "001").exists()
         assert {b["lane"] for b in ledger["blockers"]} == {
-            "change-regression", "untrusted-agent-output", "bounded-autonomy"}
+            "change-regression",
+            "untrusted-agent-output",
+            "bounded-autonomy",
+        }
         assert all(b["fixed"] is False and b["regression_test"] is None for b in ledger["blockers"])
         assert ledger["builder_seat"] == "builder" and ledger["reviewer_seat"] == "v"
 
@@ -112,9 +157,17 @@ class TestRunLanes:
         collab = str(tmp_path / "c")
         _handoff(collab)
         ledger = lanes.run_lanes(
-            collab, "001", seats=_seats(["b", "v"]), breaker_seat="b", verifier_seat="v",
-            builder_seat="builder", guardrails=["bounded-autonomy", "untrusted-agent-output"],
-            source_roots=None, source_base=None, runner=_fake("NO-FINDING", "unused"))
+            collab,
+            "001",
+            seats=_seats(["b", "v"]),
+            breaker_seat="b",
+            verifier_seat="v",
+            builder_seat="builder",
+            guardrails=["bounded-autonomy", "untrusted-agent-output"],
+            source_roots=None,
+            source_base=None,
+            runner=_fake("NO-FINDING", "unused"),
+        )
         assert ledger["blockers"] == []
         assert len(ledger["lanes"]) == 3 and all(x["ran"] for x in ledger["lanes"])
 
@@ -124,7 +177,15 @@ class TestRunLanes:
         (collab / "src").mkdir(parents=True, exist_ok=True)
         (collab / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
         ledger = lanes.run_lanes(
-            str(collab), "001", seats=_seats(["b", "v"]), breaker_seat="b", verifier_seat="v",
-            builder_seat="builder", guardrails=["bounded-autonomy", "untrusted-agent-output"],
-            source_roots=["src/*.py"], source_base=str(collab), runner=_fake("NO-FINDING", "u"))
+            str(collab),
+            "001",
+            seats=_seats(["b", "v"]),
+            breaker_seat="b",
+            verifier_seat="v",
+            builder_seat="builder",
+            guardrails=["bounded-autonomy", "untrusted-agent-output"],
+            source_roots=["src/*.py"],
+            source_base=str(collab),
+            runner=_fake("NO-FINDING", "u"),
+        )
         assert "src/m.py" in ledger["source_manifest"]

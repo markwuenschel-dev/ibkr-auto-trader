@@ -264,12 +264,10 @@ def build_account_snapshot(
             # str() is a no-op on the broker's string values; it only guards a stray non-string from
             # taking the float path. The parse itself is string -> Decimal, exact.
             fields[field_name] = Decimal(str(raw))
-        except (InvalidOperation, ValueError):
+        except InvalidOperation, ValueError:
             missing.append(tag)
     if missing:
-        raise SnapshotIncomplete(
-            f"account summary missing/unparseable required tags: {sorted(missing)}"
-        )
+        raise SnapshotIncomplete(f"account summary missing/unparseable required tags: {sorted(missing)}")
     return AccountSnapshot(held=tuple(held), observed_at=observed_at, generation=generation, **fields)
 
 
@@ -298,9 +296,7 @@ def resolve_account(configured: str | None, available: Iterable[str], mode: Mode
             f"account unset and multiple accounts present {accounts}; set IBKR_ACCOUNT to disambiguate"
         )
     if mode is Mode.PAPER and not resolved.startswith("DU"):
-        raise PaperAssertionError(
-            f"account {resolved!r} is not a DU-prefixed paper account under Mode.PAPER"
-        )
+        raise PaperAssertionError(f"account {resolved!r} is not a DU-prefixed paper account under Mode.PAPER")
     return resolved
 
 
@@ -456,9 +452,7 @@ class _BaseAccountGateway:
         reconnect loop against something that will never succeed (decision ④/⑦).
         """
         await self._connect_with_backoff()
-        self._account = resolve_account(
-            self._configured_account(), await self._fetch_accounts(), self._mode
-        )
+        self._account = resolve_account(self._configured_account(), await self._fetch_accounts(), self._mode)
         self._connected = True
         self._emit(STAGE_CONNECT, metrics={"readonly": self._is_readonly(), "reconnect": False})
 
@@ -507,9 +501,7 @@ class _BaseAccountGateway:
         """
         self._connected = False
         await self._connect_with_backoff()
-        self._account = resolve_account(
-            self._configured_account(), await self._fetch_accounts(), self._mode
-        )
+        self._account = resolve_account(self._configured_account(), await self._fetch_accounts(), self._mode)
         session = self._session
         if session is not None:
             session.bump_generation()
@@ -552,9 +544,7 @@ class _BaseAccountGateway:
                 last_exc = exc
                 if i < len(delays) - 1:
                     await self._sleep(delay)
-        raise NotConnected(
-            f"connect failed after {self._reconnect_attempts} attempts"
-        ) from last_exc
+        raise NotConnected(f"connect failed after {self._reconnect_attempts} attempts") from last_exc
 
     # ---- reconciliation + skew (side effects, never gates) --------------- #
     def _reconcile(self, held: Iterable[HeldPosition]) -> PositionReconciliation:
@@ -568,9 +558,7 @@ class _BaseAccountGateway:
         if self._store is not None:
             cache = dict(self._store.all_positions())
             for instrument_id in cache:
-                symbols.setdefault(
-                    instrument_id, self._store.symbol_for_instrument_id(instrument_id) or ""
-                )
+                symbols.setdefault(instrument_id, self._store.symbol_for_instrument_id(instrument_id) or "")
         recon = reconcile_positions(broker, cache)
         self._last_reconciliation = recon
         if recon.diverged:
@@ -579,16 +567,12 @@ class _BaseAccountGateway:
                     self._store.upsert_position(instrument_id, symbols.get(instrument_id, ""), quantity)
                 for instrument_id in recon.cache:
                     if instrument_id not in recon.broker:
-                        self._store.upsert_position(
-                            instrument_id, symbols.get(instrument_id, ""), 0
-                        )
+                        self._store.upsert_position(instrument_id, symbols.get(instrument_id, ""), 0)
             self._emit(
                 STAGE_RECONCILE,
                 metrics={
                     "diverged_instruments": len(recon.diffs),
-                    "diffs": {
-                        str(k): {"cache": c, "broker": b} for k, (c, b) in recon.diffs.items()
-                    },
+                    "diffs": {str(k): {"cache": c, "broker": b} for k, (c, b) in recon.diffs.items()},
                 },
             )
         return recon
@@ -614,6 +598,4 @@ class _BaseAccountGateway:
             return
         # Observability is best-effort: a telemetry failure must never take down the read path.
         with contextlib.suppress(Exception):
-            self._emitter.emit(
-                stage=stage, agent_role="ibkr-gateway", task_id="PT-3", metrics=metrics or {}
-            )
+            self._emitter.emit(stage=stage, agent_role="ibkr-gateway", task_id="PT-3", metrics=metrics or {})

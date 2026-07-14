@@ -26,26 +26,64 @@ _COMPAT_SEAT = "C:\\repo\\collab\\tools\\adapters\\openai-compatible-seat.py"
 
 def _models() -> dict:
     return {
-        "claude-m": {"cmd": ["claude", "-p", "--model", "claude-opus-4-8"],
-                     "unset_env": ["ANTHROPIC_API_KEY"]},
-        "openai-repo-m": {"cmd": ["python", _REPO_SEAT, "--base", "https://api.openai.com/v1",
-                                  "--model", "gpt-5.6", "--key-env", "OPENAI_API_KEY",
-                                  "--repo-root", "C:\\repo"]},
-        "openai-repo-build-m": {"cmd": ["python", _REPO_SEAT, "--base", "https://api.openai.com/v1",
-                                        "--model", "gpt-5.6", "--key-env", "OPENAI_API_KEY",
-                                        "--repo-root", "C:\\repo", "--write"]},
-        "openai-compat-m": {"cmd": ["python", _COMPAT_SEAT, "--base", "https://api.openai.com/v1",
-                                    "--model", "gpt-5.6", "--key-env", "OPENAI_API_KEY",
-                                    "--api", "auto"]},
+        "claude-m": {
+            "cmd": ["claude", "-p", "--model", "claude-opus-4-8"],
+            "unset_env": ["ANTHROPIC_API_KEY"],
+        },
+        "openai-repo-m": {
+            "cmd": [
+                "python",
+                _REPO_SEAT,
+                "--base",
+                "https://api.openai.com/v1",
+                "--model",
+                "gpt-5.6",
+                "--key-env",
+                "OPENAI_API_KEY",
+                "--repo-root",
+                "C:\\repo",
+            ]
+        },
+        "openai-repo-build-m": {
+            "cmd": [
+                "python",
+                _REPO_SEAT,
+                "--base",
+                "https://api.openai.com/v1",
+                "--model",
+                "gpt-5.6",
+                "--key-env",
+                "OPENAI_API_KEY",
+                "--repo-root",
+                "C:\\repo",
+                "--write",
+            ]
+        },
+        "openai-compat-m": {
+            "cmd": [
+                "python",
+                _COMPAT_SEAT,
+                "--base",
+                "https://api.openai.com/v1",
+                "--model",
+                "gpt-5.6",
+                "--key-env",
+                "OPENAI_API_KEY",
+                "--api",
+                "auto",
+            ]
+        },
     }
 
 
 class TestThe030Bug:
     def test_openai_rejects_claude_permission_model_args(self):
         # The exact live failure: Claude-only flags in model_args on an OpenAI-adapter model.
-        cfg = {"backend": "cli", "model": "openai-repo-m",
-               "model_args": ["--permission-mode", "acceptEdits",
-                              "--allowedTools", "Bash(uv run pytest:*)"]}
+        cfg = {
+            "backend": "cli",
+            "model": "openai-repo-m",
+            "model_args": ["--permission-mode", "acceptEdits", "--allowedTools", "Bash(uv run pytest:*)"],
+        }
         with pytest.raises(cc.CollabError, match="Claude-only"):
             ap.compile_seat("breaker", cfg, _models())
 
@@ -143,8 +181,7 @@ class TestCompatibilityGateIsSingle:
 
     def test_bad_seat_always_raises_good_seat_always_compiles(self):
         models = _models()
-        bad = {"backend": "cli", "model": "openai-repo-m",
-               "model_args": ["--permission-mode", "acceptEdits"]}
+        bad = {"backend": "cli", "model": "openai-repo-m", "model_args": ["--permission-mode", "acceptEdits"]}
         good = {"backend": "cli", "model": "openai-repo-m", "role": "builder", "access": "write"}
         for _ in range(2):  # both call sites exercise the identical function
             with pytest.raises(cc.CollabError):
@@ -165,9 +202,12 @@ class TestFingerprint:
 class TestAudit:
     def test_seat_change_recorded(self, tmp_path):
         p = ap.audit_seat_change(
-            str(tmp_path), "reviewer",
-            {"model": "grok-4.5"}, {"model": "gpt-5.6"},
-            by="dashboard-web", ts="2026-07-13T00:00:00Z",
+            str(tmp_path),
+            "reviewer",
+            {"model": "grok-4.5"},
+            {"model": "gpt-5.6"},
+            by="dashboard-web",
+            ts="2026-07-13T00:00:00Z",
         )
         lines = [json.loads(x) for x in p.read_text("utf-8").splitlines() if x.strip()]
         assert len(lines) == 1
@@ -177,7 +217,8 @@ class TestAudit:
 
     def test_appends(self, tmp_path):
         for i in range(3):
-            ap.audit_seat_change(str(tmp_path), "breaker", None, {"model": f"m{i}"},
-                                 by="test", ts=f"2026-07-13T00:00:0{i}Z")
+            ap.audit_seat_change(
+                str(tmp_path), "breaker", None, {"model": f"m{i}"}, by="test", ts=f"2026-07-13T00:00:0{i}Z"
+            )
         p = tmp_path / "autopilot" / "seats" / "audit.jsonl"
         assert len([x for x in p.read_text("utf-8").splitlines() if x.strip()]) == 3

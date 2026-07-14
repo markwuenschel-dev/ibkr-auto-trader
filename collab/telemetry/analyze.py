@@ -23,7 +23,9 @@ def main(path):
 
     print(f"trace: {path}")
     print(f"events={len(ev)}  lanes-run={len(lanes)}  findings={len(findings)}  test-runs={len(tests)}")
-    print("test trajectory: " + " -> ".join(f"{t['metrics']['passed']}/{t['metrics']['total']}" for t in tests))
+    print(
+        "test trajectory: " + " -> ".join(f"{t['metrics']['passed']}/{t['metrics']['total']}" for t in tests)
+    )
 
     fs = [e["finding"] for e in findings]
     print("severity:      ", dict(Counter(f["severity"] for f in fs)))
@@ -51,10 +53,16 @@ def main(path):
     print(f"findings that became an executable oracle (regression test): {len(became)}/{len(fs)}")
 
     conv = [f for f in fs if len(f.get("converged_lanes") or []) > 1]
-    print(f"multi-lane converged findings (higher-confidence, §6.3): {len(conv)} -> {[f['finding_id'] for f in conv]}")
+    print(
+        f"multi-lane converged findings (higher-confidence, §6.3): {len(conv)} -> "
+        f"{[f['finding_id'] for f in conv]}"
+    )
 
     waived = sum(1 for e in ev if (e.get("risk") or {}).get("waived"))
-    print(f"events with a waiver: {waived}  <- B6 verify-everything ceiling; the savings engine (§6) must beat this")
+    print(
+        f"events with a waiver: {waived}  <- B6 verify-everything ceiling; "
+        "the savings engine (§6) must beat this"
+    )
 
 
 if __name__ == "__main__":

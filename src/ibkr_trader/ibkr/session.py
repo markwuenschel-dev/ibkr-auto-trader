@@ -117,9 +117,7 @@ def reconcile_inventory(
     subscription is not trustworthy for valuation yet → the caller fails the snapshot closed rather than
     valuing a book it cannot verify.
     """
-    keys = {k for k, q in portfolio_qty.items() if q != 0} | {
-        k for k, q in position_qty.items() if q != 0
-    }
+    keys = {k for k, q in portfolio_qty.items() if q != 0} | {k for k, q in position_qty.items() if q != 0}
     mismatched = sorted(k for k in keys if portfolio_qty.get(k, 0) != position_qty.get(k, 0))
     return (not mismatched, mismatched)
 

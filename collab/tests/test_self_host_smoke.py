@@ -31,7 +31,9 @@ def clean(tmp_path_factory):
 class TestCleanRun:
     def test_creates_disposable_collab(self, clean):
         assert Path(clean["collab"]).exists()
-        assert clean["collab"].startswith(clean["workspace"])  # under the disposable workspace, not real state
+        assert clean["collab"].startswith(
+            clean["workspace"]
+        )  # under the disposable workspace, not real state
 
     def test_captures_repo_preflight(self, clean):
         pre = lanes.read_ledger(clean["collab"], clean["handoff_id"])["reviewer_preflight"]

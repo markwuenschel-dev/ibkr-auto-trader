@@ -16,7 +16,6 @@ sys.path.insert(0, str(_LIB))
 
 import contracts  # noqa: E402
 
-
 # --------------------------------------------------------------------------- #
 # Fixtures / helpers
 # --------------------------------------------------------------------------- #
@@ -61,12 +60,9 @@ No summary section here on purpose.
 
 
 def _write_tmp(text: str) -> str:
-    fd = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".md", delete=False, encoding="utf-8"
-    )
-    fd.write(text)
-    fd.close()
-    return fd.name
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8") as fd:
+        fd.write(text)
+        return fd.name
 
 
 # --------------------------------------------------------------------------- #
@@ -125,8 +121,7 @@ def test_handoff_loss_drops_one_of_three():
         "frontmatter": {},
         "sections": {},
         "raw": (
-            "## Summary\nWe honored concurrency guarantees and kept path-safety "
-            "checks in place throughout.\n"
+            "## Summary\nWe honored concurrency guarantees and kept path-safety checks in place throughout.\n"
         ),
     }
 
@@ -151,10 +146,7 @@ def test_handoff_loss_lossless_pair():
     downstream = {
         "frontmatter": {},
         "sections": {},
-        "raw": (
-            "We preserved concurrency, maintained path-safety, and guaranteed "
-            "atomicity end to end."
-        ),
+        "raw": ("We preserved concurrency, maintained path-safety, and guaranteed atomicity end to end."),
     }
 
     result = contracts.handoff_loss(upstream, downstream)

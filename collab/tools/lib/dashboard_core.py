@@ -32,15 +32,16 @@ from pathlib import Path
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
+# Reuse autopilot's path/telemetry helpers (the single source of truth for the layout).
+import adapter_profiles as adapter_profiles  # noqa: E402
+import autopilot as ap  # noqa: E402
 import collab_common as cc  # noqa: E402
 import contracts  # noqa: E402
-import adapter_profiles as adapter_profiles  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
 import operator_requests as opreq  # noqa: E402
 import registry  # noqa: E402
 import verification_plan as verification_plan  # noqa: E402
-import autopilot as ap  # reuse ap's path/telemetry helpers (single source of truth for the layout)  # noqa: E402
 
 _trace = ap._trace  # the by-path-loaded local trace module (stdlib-shadowing safe)
 
@@ -55,14 +56,19 @@ def read_status(collab) -> dict | None:
     try:
         doc = json.loads(ap._status_path(collab).read_text("utf-8"))
         return doc if isinstance(doc, dict) else None
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
 
 def read_control(collab) -> dict:
     """Full control file (paused/stop + who/when). Missing/corrupt -> the safe running default."""
-    default = {"schema_version": "0.1", "paused": False, "stop": False,
-               "requested_ts": None, "requested_by": None}
+    default = {
+        "schema_version": "0.1",
+        "paused": False,
+        "stop": False,
+        "requested_ts": None,
+        "requested_by": None,
+    }
     try:
         doc = json.loads(ap._control_path(collab).read_text("utf-8"))
         if not isinstance(doc, dict):
@@ -71,7 +77,7 @@ def read_control(collab) -> dict:
         default["paused"] = bool(doc.get("paused", False))
         default["stop"] = bool(doc.get("stop", False))
         return default
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return default
 
 
@@ -114,7 +120,7 @@ def set_max_rounds(collab, n, *, by: str = "dashboard") -> dict:
 # --------------------------------------------------------------------------- #
 
 
-_events_cache: dict[str, tuple] = {}   # resolved_path -> (mtime_ns, size, events)
+_events_cache: dict[str, tuple] = {}  # resolved_path -> (mtime_ns, size, events)
 _events_lock = threading.Lock()
 
 
@@ -164,7 +170,7 @@ def read_events(collab) -> list[dict]:
 
 def tail_events(collab, limit: int = 200) -> list[dict]:
     """The last ``limit`` VALID events, oldest-first (a torn line never shrinks the window)."""
-    return read_events(collab)[-max(0, limit):]
+    return read_events(collab)[-max(0, limit) :]
 
 
 def _num(v):
@@ -185,8 +191,9 @@ def run_stats(events: list[dict], *, series_n: int = 40) -> dict:
     series: list[dict] = []
 
     def seat(name):
-        return seats.setdefault(name, {"rounds": 0, "fails": 0, "_sum": 0.0, "_n": 0,
-                                       "last_ms": None, "total_resp_bytes": 0})
+        return seats.setdefault(
+            name, {"rounds": 0, "fails": 0, "_sum": 0.0, "_n": 0, "last_ms": None, "total_resp_bytes": 0}
+        )
 
     for ev in events:
         if not isinstance(ev, dict) or ev.get("stage") != "autopilot.round":
@@ -224,7 +231,7 @@ def run_stats(events: list[dict], *, series_n: int = 40) -> dict:
     return {
         "seats": {n: finish(d) for n, d in seats.items()},
         "overall": finish(overall),
-        "latency_series": series[-max(0, series_n):],
+        "latency_series": series[-max(0, series_n) :],
     }
 
 
@@ -235,8 +242,14 @@ def _row(collab, h: dict) -> dict:
         age = round(time.time() - os.path.getmtime(h["path"]), 1)
     except OSError:
         age = None
-    return {"id": h["id"], "slug": h["slug"], "state": h["state"],
-            "to": to or None, "from": frm or None, "age_s": age}
+    return {
+        "id": h["id"],
+        "slug": h["slug"],
+        "state": h["state"],
+        "to": to or None,
+        "from": frm or None,
+        "age_s": age,
+    }
 
 
 def board(collab) -> dict:
@@ -294,7 +307,8 @@ def set_seat_model(home, seat, model, *, by: str = "dashboard") -> dict:
     Rewrites the seat's ``"model"`` id in ``seats.json`` (which :func:`autopilot.load_seats` composes into a
     runnable ``cmd`` from the top-level ``"models"`` catalog). Validated hard: the seat must exist AND be a
     ``backend == "cli"`` seat (human/web seats have no model), and ``model`` must be a known catalog id — a
-    bad seat/model raises :class:`collab_common.CollabError` rather than writing a config the driver can't run.
+    A bad seat/model raises :class:`collab_common.CollabError` rather than writing a
+    configuration the driver cannot run.
     An existing explicit ``"cmd"`` on the seat is deleted so composition takes over; everything else
     (``model_args``, ``system``, ``can_sign_off``, ``timeout``, the catalog, closeout, notes) is preserved.
     The WHOLE doc is atomically re-published ([data-integrity]). Takes effect on the NEXT driver start (the
@@ -347,29 +361,39 @@ def _latest_lanes(collab) -> dict | None:
         return None
     try:
         data = json.loads(ledgers[-1].read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
     lanes = []
-    for ln in (data.get("lanes") or []):
+    for ln in data.get("lanes") or []:
         if not isinstance(ln, dict):
             continue
         profile = ln.get("profile") if isinstance(ln.get("profile"), dict) else {}
         breaker = ln.get("breaker_seat") or ((profile.get("breaker") or {}).get("seat"))
         verifier = ln.get("verifier_seat") or ((profile.get("verifier") or {}).get("seat"))
-        lanes.append({
-            "lane": ln.get("pass") or ln.get("lane"), "pass": ln.get("pass") or ln.get("lane"),
-            "profile": profile.get("id"), "contracts": ln.get("contracts") or [],
-            "composite": bool(ln.get("composite")), "ran": bool(ln.get("ran")),
-            "incomplete": bool(ln.get("incomplete")),
-            "confirmed": len(ln.get("confirmed") or []), "refuted": len(ln.get("refuted") or []),
-            "breaker": breaker, "verifier": verifier,
-        })
-    return {"hid": data.get("hid"), "lanes": lanes,
-            "tests_passed": bool((data.get("tests") or {}).get("passed")),
-            "blockers": len(data.get("blockers") or []),
-            "incomplete": bool(data.get("incomplete")),
-            "plan_digest": data.get("verification_plan_digest"),
-            "generated_ts": data.get("generated_ts")}
+        lanes.append(
+            {
+                "lane": ln.get("pass") or ln.get("lane"),
+                "pass": ln.get("pass") or ln.get("lane"),
+                "profile": profile.get("id"),
+                "contracts": ln.get("contracts") or [],
+                "composite": bool(ln.get("composite")),
+                "ran": bool(ln.get("ran")),
+                "incomplete": bool(ln.get("incomplete")),
+                "confirmed": len(ln.get("confirmed") or []),
+                "refuted": len(ln.get("refuted") or []),
+                "breaker": breaker,
+                "verifier": verifier,
+            }
+        )
+    return {
+        "hid": data.get("hid"),
+        "lanes": lanes,
+        "tests_passed": bool((data.get("tests") or {}).get("passed")),
+        "blockers": len(data.get("blockers") or []),
+        "incomplete": bool(data.get("incomplete")),
+        "plan_digest": data.get("verification_plan_digest"),
+        "generated_ts": data.get("generated_ts"),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -413,8 +437,21 @@ def _run_dir(collab, run_uid) -> Path:
 
 # The list-UI summary fields carried out of a run.json (contract B). Missing keys default to None so a
 # partially-written archive never crashes the list.
-_SUMMARY_KEYS = ("run_uid", "started_ts", "ended_ts", "phase_final", "max_rounds", "rounds_total",
-                 "calls", "duration_ms", "lanes", "signoff", "seats", "terminal_reason", "escalations")
+_SUMMARY_KEYS = (
+    "run_uid",
+    "started_ts",
+    "ended_ts",
+    "phase_final",
+    "max_rounds",
+    "rounds_total",
+    "calls",
+    "duration_ms",
+    "lanes",
+    "signoff",
+    "seats",
+    "terminal_reason",
+    "escalations",
+)
 
 
 def _run_summary(doc: dict) -> dict:
@@ -445,17 +482,21 @@ def _current_summary(collab) -> dict | None:
         return None  # a terminal run is history, not "current"
     ctrl = read_control(collab)
     summary: dict = {k: None for k in _SUMMARY_KEYS}
-    summary.update({
-        "run_uid": st.get("run_uid") or "(current)",
-        "started_ts": st.get("started_ts"),
-        "ended_ts": None,
-        "phase_final": phase,
-        "max_rounds": ctrl.get("max_rounds") if isinstance(ctrl.get("max_rounds"), int) else st.get("max_rounds"),
-        "rounds_total": st.get("round"),
-        "lanes": _latest_lanes(collab),
-        "terminal_reason": st.get("pause_reason"),  # the live pause cause (candidate lifecycle), if any
-        "current": True,
-    })
+    summary.update(
+        {
+            "run_uid": st.get("run_uid") or "(current)",
+            "started_ts": st.get("started_ts"),
+            "ended_ts": None,
+            "phase_final": phase,
+            "max_rounds": ctrl.get("max_rounds")
+            if isinstance(ctrl.get("max_rounds"), int)
+            else st.get("max_rounds"),
+            "rounds_total": st.get("round"),
+            "lanes": _latest_lanes(collab),
+            "terminal_reason": st.get("pause_reason"),  # the live pause cause (candidate lifecycle), if any
+            "current": True,
+        }
+    )
     return summary
 
 
@@ -475,7 +516,7 @@ def list_runs(collab) -> list[dict]:
     for p in paths:
         try:
             doc = json.loads(p.read_text("utf-8"))
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue  # missing/torn/unreadable archive — skip, never crash
         if not isinstance(doc, dict):
             continue
@@ -557,8 +598,10 @@ def compare_runs(collab, a, b) -> dict:
         "max_rounds": _delta_num(da.get("max_rounds"), db.get("max_rounds")),
         "seat_calls": _delta_seat_map(da.get("seat_calls"), db.get("seat_calls")),
         "seat_latency_ms": _delta_seat_map(da.get("seat_latency_ms"), db.get("seat_latency_ms")),
-        "lanes": {"confirmed": _delta_num(la.get("confirmed"), lb.get("confirmed")),
-                  "refuted": _delta_num(la.get("refuted"), lb.get("refuted"))},
+        "lanes": {
+            "confirmed": _delta_num(la.get("confirmed"), lb.get("confirmed")),
+            "refuted": _delta_num(la.get("refuted"), lb.get("refuted")),
+        },
         "phase_final": _delta_cat(da.get("phase_final"), db.get("phase_final")),
         "signoff_result": _delta_cat(sa.get("result"), sb.get("result")),
         "git_sha": _delta_cat(da.get("git_sha"), db.get("git_sha")),
@@ -651,6 +694,7 @@ def narrative_view(collab, hid: str) -> dict:
     Read-only: :func:`narrative.build` transitions nothing and runs no agents. Raises
     :class:`handoff_core.HandoffNotFound` for an unknown id."""
     import narrative
+
     md = narrative.build(collab, hid)
     return {"id": hid, "state": hc.state_of(collab, hid), "markdown": md}
 
@@ -675,11 +719,18 @@ def advance_handoff(collab, hid: str) -> dict:
     hc.done(collab, hid)
     log, rid = ap._log_default(collab), ap._run_id(collab)
     ap._emit_safe(he.on_done, log, rid, hid, span_id=f"{hid}:done", parent_span_id=None)
-    ap._emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.control", role="human",
-                  artifact=f"handoff:{hid}",
-                  decision={"action": "approve", "reason_codes": ["dashboard:advance"], "confidence": None})
+    ap._emit_safe(
+        _trace.emit,
+        log,
+        run_id=rid,
+        stage="autopilot.control",
+        role="human",
+        artifact=f"handoff:{hid}",
+        decision={"action": "approve", "reason_codes": ["dashboard:advance"], "confidence": None},
+    )
     try:  # attach the human-readable narrative to the handoff too (a human approval is still a closeout)
         import narrative
+
         narrative.write(collab, hid)
     except Exception:  # the summary is best-effort; the approval already stands regardless
         pass
@@ -700,8 +751,7 @@ def nudge(collab, hid: str) -> dict:
     if not to:
         raise cc.CollabError(f"handoff {hid} has no 'to' seat — cannot re-queue")
     body = f"Re-queued from {hid} by the dashboard; the original is stuck in claimed/."
-    return hc.create(collab, to=to, from_=frm or "dashboard",
-                     title=f"re-queue of {hid}", body=body)
+    return hc.create(collab, to=to, from_=frm or "dashboard", title=f"re-queue of {hid}", body=body)
 
 
 def reopen_handoff(collab, hid: str, *, action: str = "retry", by: str = "dashboard") -> dict:
@@ -722,13 +772,19 @@ def reopen_handoff(collab, hid: str, *, action: str = "retry", by: str = "dashbo
         raise hc.HandoffNotFound(f"handoff {hid} not found")
     if state not in ("pending", "claimed"):
         raise hc.HandoffConflict(
-            f"handoff {hid} is {state}; only a paused (pending/claimed) handoff can be retried")
+            f"handoff {hid} is {state}; only a paused (pending/claimed) handoff can be retried"
+        )
     rec = opreq.write(collab, hid, act, by=by)
     log, rid = ap._log_default(collab), ap._run_id(collab)
-    ap._emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.control", role="human",
-                  artifact=f"handoff:{hid}",
-                  decision={"action": "reopen", "reason_codes": [f"request:{act}", f"by:{by}"],
-                            "confidence": None})
+    ap._emit_safe(
+        _trace.emit,
+        log,
+        run_id=rid,
+        stage="autopilot.control",
+        role="human",
+        artifact=f"handoff:{hid}",
+        decision={"action": "reopen", "reason_codes": [f"request:{act}", f"by:{by}"], "confidence": None},
+    )
     return {"id": hid, "state": state, "action": rec["action"], "queued": True}
 
 
@@ -752,18 +808,21 @@ def _spawn_detached(cmd: list) -> int:
     """Launch the driver as a detached background process and return its pid. Best-effort cross-platform
     detach so the dashboard request returns immediately and the driver outlives it."""
     import subprocess
+
     kwargs: dict = {}
     if os.name == "nt":
-        kwargs["creationflags"] = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                                   | getattr(subprocess, "DETACHED_PROCESS", 0))
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+            subprocess, "DETACHED_PROCESS", 0
+        )
     else:
         kwargs["start_new_session"] = True
     proc = subprocess.Popen(cmd, **kwargs)
     return proc.pid
 
 
-def start_driver(collab, home=None, *, max_rounds=None, by: str = "dashboard", watch: bool = True,
-                 spawn=None) -> dict:
+def start_driver(
+    collab, home=None, *, max_rounds=None, by: str = "dashboard", watch: bool = True, spawn=None
+) -> dict:
     """Launch the autopilot driver against ``collab`` as a detached background process — the dashboard's
     "start" affordance. Refuses (``CollabError``) if a driver is already running (a live board lease), so a
     second concurrent driver can never be spawned (ADR-0003 D2). ``spawn`` is injectable for tests; it
@@ -772,7 +831,8 @@ def start_driver(collab, home=None, *, max_rounds=None, by: str = "dashboard", w
     if holder is not None:
         raise cc.CollabError(
             f"a driver is already running for this collab (run {holder.get('run_uid')!r}, "
-            f"pid {holder.get('pid')}) — stop it before starting another")
+            f"pid {holder.get('pid')}) — stop it before starting another"
+        )
     cmd = [sys.executable, str(Path(ap.__file__).resolve()), "--collab", str(collab)]
     if home:
         cmd += ["--home", str(home)]
@@ -782,6 +842,12 @@ def start_driver(collab, home=None, *, max_rounds=None, by: str = "dashboard", w
         cmd += ["--max-rounds", str(int(max_rounds))]
     pid = (spawn or _spawn_detached)(cmd)
     log, rid = ap._log_default(collab), ap._run_id(collab)
-    ap._emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.control", role="human",
-                  decision={"action": "start", "reason_codes": [f"by:{by}", f"pid:{pid}"], "confidence": None})
+    ap._emit_safe(
+        _trace.emit,
+        log,
+        run_id=rid,
+        stage="autopilot.control",
+        role="human",
+        decision={"action": "start", "reason_codes": [f"by:{by}", f"pid:{pid}"], "confidence": None},
+    )
     return {"collab": str(collab), "pid": pid, "started": True, "by": by}

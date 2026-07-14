@@ -36,6 +36,7 @@ import os
 import stat
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 
 #: A handoff is prose — never megabytes. Files above this are skipped (huge-file DoS guard).
@@ -73,7 +74,7 @@ def _state_path(collab, seat: str) -> Path:
 def _load_seen(state: Path) -> set:
     try:
         return set(state.read_text("utf-8").split())
-    except (FileNotFoundError, OSError, ValueError):
+    except FileNotFoundError, OSError, ValueError:
         return set()
 
 
@@ -87,16 +88,14 @@ def _read_state(state: Path) -> tuple:
         return set(state.read_text("utf-8").split()), False
     except FileNotFoundError:
         return set(), False
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return set(), True
 
 
 def _quarantine(state: Path) -> None:
     """Move a corrupt state file aside (kept for inspection) so the watcher can start fresh."""
-    try:
+    with suppress(OSError):
         state.replace(state.with_name(f"{state.name}.corrupt.{time.time_ns()}"))
-    except OSError:
-        pass
 
 
 def _save_seen(state: Path, seen: set) -> None:
@@ -146,7 +145,10 @@ def _tick(collab, seat: str, seen: set, warned: set, *, state: Path, log: str | 
             continue
         if st.st_size > _MAX_HANDOFF_BYTES:  # huge-file DoS guard (B4)
             if hid not in warned:
-                print(f"[watch:{seat}] warning: skipping oversized pending file ({st.st_size} bytes): {p}", file=sys.stderr)
+                print(
+                    f"[watch:{seat}] warning: skipping oversized pending file ({st.st_size} bytes): {p}",
+                    file=sys.stderr,
+                )
                 warned.add(hid)
             continue
         try:
@@ -163,11 +165,21 @@ def _tick(collab, seat: str, seen: set, warned: set, *, state: Path, log: str | 
             grew = True
             continue
         title = (fm.get("title") or "").strip().strip('"')
-        print(f"[watch:{seat}] NEW handoff {hid} for you: {title!r} (from {fm.get('from')!r}, priority {fm.get('priority')})")
+        print(
+            f"[watch:{seat}] NEW handoff {hid} for you: {title!r} "
+            f"(from {fm.get('from')!r}, priority {fm.get('priority')})"
+        )
         if log:
-            _emit_safe(_trace.emit, log, run_id=f"watch-{seat}", stage="review", role=seat,
-                       artifact=f"handoff:{hid}", span_id=f"{hid}:watch",
-                       decision={"action": "route", "reason_codes": ["watch:new-handoff"]})
+            _emit_safe(
+                _trace.emit,
+                log,
+                run_id=f"watch-{seat}",
+                stage="review",
+                role=seat,
+                artifact=f"handoff:{hid}",
+                span_id=f"{hid}:watch",
+                decision={"action": "route", "reason_codes": ["watch:new-handoff"]},
+            )
         seen.add(hid)
         announced.append(hid)
         grew = True
@@ -219,30 +231,51 @@ def drain_inbox(home, project: str, *, seat: str, log: str | None = None) -> lis
                     if not stat.S_ISREG(st.st_mode):  # only regular queue files (no symlink/FIFO/dir)
                         continue
                     if st.st_size > _MAX_INBOX_BYTES:  # huge-file guard (a local process could drop MBs)
-                        print(f"[watch:{seat}] warning: skipping oversized inbox file ({st.st_size} bytes): {p}", file=sys.stderr)
+                        print(
+                            f"[watch:{seat}] warning: skipping oversized inbox file "
+                            f"({st.st_size} bytes): {p}",
+                            file=sys.stderr,
+                        )
                         continue
                     body = p.read_text("utf-8").strip()
-                except (OSError, ValueError):
+                except OSError, ValueError:
                     continue
                 print(f"[watch:{seat}] MESSAGE from you ({cc.slugify(project)}): {body}")
                 if log:
-                    _emit_safe(_trace.emit, log, run_id=f"watch-{seat}", stage="review", role="human",
-                               artifact=f"inbox:{p.name}", span_id=p.name,
-                               decision={"action": "route", "reason_codes": ["inbox:user-message"]})
+                    _emit_safe(
+                        _trace.emit,
+                        log,
+                        run_id=f"watch-{seat}",
+                        stage="review",
+                        role="human",
+                        artifact=f"inbox:{p.name}",
+                        span_id=p.name,
+                        decision={"action": "route", "reason_codes": ["inbox:user-message"]},
+                    )
                 try:
                     archive.mkdir(parents=True, exist_ok=True)
                     h.assert_current()  # fence before the consume (approval-bar invariant): still the owner
                     os.replace(p, archive / p.name)  # consume under the lock -> single-consumer
-                except (OSError, cc.LockBroken):
-                    pass  # lost the lock or move failed: leave the file -> re-surfaced next drain (at-least-once)
+                except OSError, cc.LockBroken:
+                    # Leave failed moves for at-least-once delivery on the next drain.
+                    pass
                 drained.append(str(p))
-    except (cc.LockTimeout, cc.LockBroken):
+    except cc.LockTimeout, cc.LockBroken:
         return drained  # a peer watcher holds/broke the drain lock and will consume — skip this tick
     return drained
 
 
-def watch(collab, *, seat: str, interval: float = 2.0, once: bool = False, catch_up: bool = False,
-          log: str | None = None, project: str | None = None, home=None) -> list:
+def watch(
+    collab,
+    *,
+    seat: str,
+    interval: float = 2.0,
+    once: bool = False,
+    catch_up: bool = False,
+    log: str | None = None,
+    project: str | None = None,
+    home=None,
+) -> list:
     """Watch ``collab``'s pending/ for handoffs addressed to ``seat``.
 
     Cold start (no prior state): unless ``catch_up``, seed the seen-set with the existing pending
@@ -251,7 +284,10 @@ def watch(collab, *, seat: str, interval: float = 2.0, once: bool = False, catch
     state = _state_path(collab, seat)
     seen, corrupt = _read_state(state)
     if corrupt:
-        print(f"[watch:{seat}] warning: seen-state unreadable/corrupt; quarantining and re-seeding: {state}", file=sys.stderr)
+        print(
+            f"[watch:{seat}] warning: seen-state unreadable/corrupt; quarantining and re-seeding: {state}",
+            file=sys.stderr,
+        )
         _quarantine(state)
     warned: set = set()
     # Cold start OR corrupt-recovery: seed the backlog into seen (don't announce it), so a corrupt
@@ -275,8 +311,9 @@ def watch(collab, *, seat: str, interval: float = 2.0, once: bool = False, catch
     return all_new
 
 
-def watch_all(*, seat: str, interval: float = 2.0, once: bool = False, home=None,
-              catch_up: bool = False) -> dict:
+def watch_all(
+    *, seat: str, interval: float = 2.0, once: bool = False, home=None, catch_up: bool = False
+) -> dict:
     """Cross-collab watch: one tick per registered collab — announce new handoffs AND drain each
     collab's Telegram inbox (``inbox/live/<name>/``, §A6). Returns ``{name: [new handoff ids]}``.
     """
@@ -286,7 +323,10 @@ def watch_all(*, seat: str, interval: float = 2.0, once: bool = False, home=None
         for name, ent in sorted(registry.load(h)["collabs"].items()):
             root = ent["root"]
             if not Path(root).is_dir():  # skip a missing/non-dir root cleanly — don't materialize it
-                print(f"[watch-all:{seat}] skip {name}: root not found or not a directory: {root}", file=sys.stderr)
+                print(
+                    f"[watch-all:{seat}] skip {name}: root not found or not a directory: {root}",
+                    file=sys.stderr,
+                )
                 continue
             state = _state_path(root, seat)
             try:
@@ -317,7 +357,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--all", action="store_true", help="watch every registered collab")
     p.add_argument("--interval", type=float, default=2.0)
     p.add_argument("--once", action="store_true", help="single tick then exit (for scripts/tests)")
-    p.add_argument("--catch-up", action="store_true", dest="catch_up", help="also announce the existing backlog")
+    p.add_argument(
+        "--catch-up", action="store_true", dest="catch_up", help="also announce the existing backlog"
+    )
     p.add_argument("--log", help="optional JSONL trace path")
     return p
 
@@ -328,8 +370,14 @@ def main(argv=None) -> int:
         if args.all:
             watch_all(seat=args.seat, interval=args.interval, once=args.once, catch_up=args.catch_up)
         elif args.collab:
-            watch(args.collab, seat=args.seat, interval=args.interval, once=args.once,
-                  catch_up=args.catch_up, log=args.log)
+            watch(
+                args.collab,
+                seat=args.seat,
+                interval=args.interval,
+                once=args.once,
+                catch_up=args.catch_up,
+                log=args.log,
+            )
         else:
             print("watch: pass --collab <path> or --all", file=sys.stderr)
             return 1

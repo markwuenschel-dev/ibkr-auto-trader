@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 _LIB = str(Path(__file__).resolve().parent)
@@ -54,10 +55,8 @@ def _events(collab) -> list[dict]:
         line = line.strip()
         if not line:
             continue
-        try:
+        with suppress(ValueError):
             out.append(json.loads(line))
-        except ValueError:
-            pass  # a torn append is observability noise, never fatal to a read-only report
     return out
 
 
@@ -89,8 +88,9 @@ def collect(collab, hid: str) -> dict:
 
     lane_list = led.get("lanes") or []
     breaker = next((ln.get("breaker_seat") for ln in lane_list if ln.get("breaker_seat")), None)
-    verifier = next((ln.get("verifier_seat") for ln in lane_list if ln.get("verifier_seat")), None) \
-        or led.get("reviewer_seat")
+    verifier = next(
+        (ln.get("verifier_seat") for ln in lane_list if ln.get("verifier_seat")), None
+    ) or led.get("reviewer_seat")
     required = lanes.ledger_required_passes(led, lanes.load_lanes())
     ran = sorted(lanes.ledger_ran_passes(led))
     manifest = led.get("source_manifest") or {}
@@ -99,7 +99,8 @@ def collect(collab, hid: str) -> dict:
     autonomous_done = any(
         e.get("stage") in ("handoff.autonomous_done", "autopilot.autonomous_done")
         and e.get("artifact") == f"handoff:{hid}"
-        for e in _events(collab))
+        for e in _events(collab)
+    )
 
     return {
         "handoff_id": hid,
@@ -107,23 +108,35 @@ def collect(collab, hid: str) -> dict:
         "status": state,
         "final_state": state,
         "ledger_present": ledger is not None,
-        "seats": {"builder": builder_seat, "reviewer": reviewer_seat,
-                  "breaker": breaker, "verifier": verifier},
+        "seats": {
+            "builder": builder_seat,
+            "reviewer": reviewer_seat,
+            "breaker": breaker,
+            "verifier": verifier,
+        },
         "source_base": led.get("source_base"),
         "source_manifest": {"file_count": len(manifest), "digest12": _manifest_digest(manifest)[:12]},
         "tests": {"passed": tests.get("passed"), "run_id": tests.get("run_id")},
-        "lanes": {"required": required, "ran": ran, "missing": sorted(set(required) - set(ran)),
-                  "incomplete": bool(led.get("incomplete")),
-                  "plan_digest": led.get("verification_plan_digest")},
+        "lanes": {
+            "required": required,
+            "ran": ran,
+            "missing": sorted(set(required) - set(ran)),
+            "incomplete": bool(led.get("incomplete")),
+            "plan_digest": led.get("verification_plan_digest"),
+        },
         "reviewer_preflight": {
             "present": bool(led.get("reviewer_preflight")),
-            "seat": pre.get("seat"), "repo_access": pre.get("repo_access"),
+            "seat": pre.get("seat"),
+            "repo_access": pre.get("repo_access"),
             "inspected_files": pre.get("inspected_files") or [],
         },
         "blockers": blockers,
         "accepted_residuals": led.get("accepted_residuals") or [],
-        "done_contract": {"satisfied": verdict["satisfied"], "hash": verdict["hash"],
-                          "conditions": verdict["conditions"]},
+        "done_contract": {
+            "satisfied": verdict["satisfied"],
+            "hash": verdict["hash"],
+            "conditions": verdict["conditions"],
+        },
         "autonomous_done_event": autonomous_done,
         # Authoritative "was this a valid autonomous closeout": the audit event + terminal state. (A
         # re-evaluated contract on an already-``done`` handoff fails condition 10 by design — the driver
@@ -156,13 +169,17 @@ def render_markdown(summary: dict) -> str:
     L.append(f"- **Ledger present:** {_yn(s['ledger_present'])}")
     L.append("")
     L.append("## Seats")
-    L.append(f"- builder: `{seats['builder'] or '—'}` · reviewer: `{seats['reviewer'] or '—'}` · "
-             f"breaker: `{seats['breaker'] or '—'}` · verifier: `{seats['verifier'] or '—'}`")
+    L.append(
+        f"- builder: `{seats['builder'] or '—'}` · reviewer: `{seats['reviewer'] or '—'}` · "
+        f"breaker: `{seats['breaker'] or '—'}` · verifier: `{seats['verifier'] or '—'}`"
+    )
     L.append("")
     L.append("## Source (source==tested)")
     L.append(f"- base: `{s['source_base'] or '—'}`")
-    L.append(f"- manifest: {s['source_manifest']['file_count']} files "
-             f"(digest `{s['source_manifest']['digest12']}`)")
+    L.append(
+        f"- manifest: {s['source_manifest']['file_count']} files "
+        f"(digest `{s['source_manifest']['digest12']}`)"
+    )
     L.append("")
     L.append("## Tests & lanes")
     L.append(f"- tests passed: {_yn(s['tests']['passed'])}  (run `{s['tests']['run_id'] or '—'}`)")
@@ -172,15 +189,19 @@ def render_markdown(summary: dict) -> str:
         L.append(f"- lanes MISSING: {s['lanes']['missing']}")
     L.append("")
     L.append("## Reviewer repo-preflight (condition 11)")
-    L.append(f"- present: {_yn(pre['present'])} · seat: `{pre['seat'] or '—'}` · "
-             f"repo_access: {_yn(pre['repo_access'])}")
+    L.append(
+        f"- present: {_yn(pre['present'])} · seat: `{pre['seat'] or '—'}` · "
+        f"repo_access: {_yn(pre['repo_access'])}"
+    )
     L.append(f"- inspected files: {pre['inspected_files'] or '—'}")
     L.append("")
     L.append("## Confirmed blockers")
     if s["blockers"]:
         for b in s["blockers"]:
-            L.append(f"- `{b.get('id')}` [{b.get('lane')}] fixed={_yn(b.get('fixed'))} "
-                     f"regression={b.get('regression_test') or '—'}: {b.get('description')}")
+            L.append(
+                f"- `{b.get('id')}` [{b.get('lane')}] fixed={_yn(b.get('fixed'))} "
+                f"regression={b.get('regression_test') or '—'}: {b.get('description')}"
+            )
     else:
         L.append("- none")
     L.append("")
@@ -204,8 +225,9 @@ def render(collab, hid: str, fmt: str = "markdown") -> str:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    p = argparse.ArgumentParser(prog="closeout-report",
-                                description="read-only autonomous-closeout evidence summary")
+    p = argparse.ArgumentParser(
+        prog="closeout-report", description="read-only autonomous-closeout evidence summary"
+    )
     p.add_argument("collab", help="collab name (registry) or path")
     p.add_argument("hid", help="handoff id")
     p.add_argument("--format", choices=("markdown", "json"), default="markdown")

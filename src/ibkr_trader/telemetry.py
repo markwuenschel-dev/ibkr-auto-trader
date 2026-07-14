@@ -40,6 +40,7 @@ class TelemetrySink(Protocol):
         metrics: dict | None = ...,
     ) -> None: ...
 
+
 # The decision actions the control plane may record (Reusable Core §8 envelope).
 ACTIONS = ("accept", "revise", "reject", "escalate", "skip", "waive")
 

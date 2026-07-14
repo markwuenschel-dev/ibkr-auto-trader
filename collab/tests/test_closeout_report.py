@@ -23,29 +23,45 @@ import lanes  # noqa: E402
 
 
 def _preflight(base, seat="reviewer"):
-    return {"seat": seat, "repo_access": True, "repo_root": str(base),
-            "commands": {"pwd": {"exit_code": 0, "stdout_tail": str(base)},
-                         "git_rev_parse": {"exit_code": 0, "stdout_tail": str(base)},
-                         "git_status_short": {"exit_code": 0, "stdout_tail": ""},
-                         "pytest_collect_only": {"exit_code": 0, "stdout_tail": "1 test collected"}},
-            "inspected_files": ["src/m.py"]}
+    return {
+        "seat": seat,
+        "repo_access": True,
+        "repo_root": str(base),
+        "commands": {
+            "pwd": {"exit_code": 0, "stdout_tail": str(base)},
+            "git_rev_parse": {"exit_code": 0, "stdout_tail": str(base)},
+            "git_status_short": {"exit_code": 0, "stdout_tail": ""},
+            "pytest_collect_only": {"exit_code": 0, "stdout_tail": "1 test collected"},
+        },
+        "inspected_files": ["src/m.py"],
+    }
 
 
 def _setup(tmp_path, *, drift=False, tests_passed=True):
     """A CLAIMED handoff + a satisfied verification ledger (unless drifted). Left claimed so the recomputed
     verdict is meaningful (condition 10 wants pending|claimed)."""
     collab = str(tmp_path / "c")
-    hc.create(collab, to="reviewer", from_="builder",
-              title="Add closeout-report command", body="please review")
+    hc.create(
+        collab, to="reviewer", from_="builder", title="Add closeout-report command", body="please review"
+    )
     hc.claim(collab, "001")
     base = Path(collab)
     (base / "src").mkdir(parents=True, exist_ok=True)
     (base / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
-    ledger = {"hid": "001", "generated_ts": ap._now_utc(), "guardrails": [],
-              "builder_seat": "builder", "reviewer_seat": "reviewer",
-              "source_base": str(base), "source_manifest": gr.source_manifest(["src/*.py"], base),
-              "tests": {"passed": tests_passed, "run_id": "t"}, "reviewer_preflight": _preflight(base),
-              "lanes": [], "blockers": [], "accepted_residuals": []}
+    ledger = {
+        "hid": "001",
+        "generated_ts": ap._now_utc(),
+        "guardrails": [],
+        "builder_seat": "builder",
+        "reviewer_seat": "reviewer",
+        "source_base": str(base),
+        "source_manifest": gr.source_manifest(["src/*.py"], base),
+        "tests": {"passed": tests_passed, "run_id": "t"},
+        "reviewer_preflight": _preflight(base),
+        "lanes": [],
+        "blockers": [],
+        "accepted_residuals": [],
+    }
     lanes.write_ledger(collab, "001", ledger)
     if drift:
         (base / "src" / "m.py").write_text("x = 2\n", encoding="utf-8")  # drift after manifest
@@ -77,9 +93,15 @@ class TestCollect:
     def test_detects_autonomous_done_event(self, tmp_path):
         collab = _setup(tmp_path)
         hc.done(collab, "001")  # advance to done (as the driver would)
-        he.on_autonomous_done(str(Path(collab) / "logs" / "events.jsonl"), "rid", "001",
-                              span_id="001:signoff", parent_span_id=None,
-                              reviewer="reviewer", contract_hash="deadbeef")
+        he.on_autonomous_done(
+            str(Path(collab) / "logs" / "events.jsonl"),
+            "rid",
+            "001",
+            span_id="001:signoff",
+            parent_span_id=None,
+            reviewer="reviewer",
+            contract_hash="deadbeef",
+        )
         s = cr.collect(collab, "001")
         assert s["autonomous_done_event"] is True
         assert s["final_state"] == "done"

@@ -8,11 +8,8 @@ from __future__ import annotations
 
 import importlib.util
 import io
-import sys
 import urllib.error
 from pathlib import Path
-
-import pytest
 
 _ADAPTER = Path(__file__).resolve().parent.parent / "tools" / "adapters" / "openai-compatible-seat.py"
 
@@ -29,10 +26,16 @@ seat = _load()
 
 class TestResponsesParsing:
     def test_extract_from_output_array_skips_reasoning(self):
-        data = {"output": [
-            {"type": "reasoning", "content": []},
-            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello world"}]},
-        ]}
+        data = {
+            "output": [
+                {"type": "reasoning", "content": []},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hello world"}],
+                },
+            ]
+        }
         assert seat._extract_responses_text(data) == "hello world"
 
     def test_extract_prefers_output_text_field(self):
@@ -55,12 +58,17 @@ class TestApiSelection:
         def post(url, key, payload, timeout):
             if url.endswith("/chat/completions"):
                 raise urllib.error.HTTPError(
-                    url, 404, "Not Found", {}, io.BytesIO(b"Use the v1/responses endpoint instead"))
+                    url, 404, "Not Found", {}, io.BytesIO(b"Use the v1/responses endpoint instead")
+                )
             assert url.endswith("/responses") and payload["input"] == "PROMPT"
             return {"output_text": "from responses"}
 
-        rc, cap = self._run(monkeypatch, capsys, [
-            "--base", "https://api.openai.com/v1", "--model", "gpt-5-codex", "--key-env", "OPENAI_API_KEY"], post)
+        rc, cap = self._run(
+            monkeypatch,
+            capsys,
+            ["--base", "https://api.openai.com/v1", "--model", "gpt-5-codex", "--key-env", "OPENAI_API_KEY"],
+            post,
+        )
         assert rc == 0 and cap.out == "from responses"
 
     def test_chat_mode_success(self, monkeypatch, capsys):
@@ -74,7 +82,9 @@ class TestApiSelection:
     def test_responses_mode_explicit(self, monkeypatch, capsys):
         def post(url, key, payload, timeout):
             assert url.endswith("/responses")
-            return {"output": [{"type": "message", "content": [{"type": "output_text", "text": "resp reply"}]}]}
+            return {
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "resp reply"}]}]
+            }
 
         rc, cap = self._run(monkeypatch, capsys, ["--api", "responses", "--key-env", "OPENAI_API_KEY"], post)
         assert rc == 0 and cap.out == "resp reply"

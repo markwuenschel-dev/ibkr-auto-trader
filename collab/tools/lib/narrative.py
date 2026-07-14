@@ -51,8 +51,17 @@ _BLOCK_RE = re.compile(
 # Phrases that mark a reply as a *blocker* (the agent stopped rather than doing the work) — surfaced so a
 # capped/stalled run reads as "it hit a wall", not "it quietly did nothing".
 _BLOCKER_HINTS = (
-    "flag a blocker", "i can't do this", "i cannot do this", "out of scope", "i have to stop",
-    "cannot proceed", "can't proceed", "## the problem", "i won't", "blocked —", "blocked -",
+    "flag a blocker",
+    "i can't do this",
+    "i cannot do this",
+    "out of scope",
+    "i have to stop",
+    "cannot proceed",
+    "can't proceed",
+    "## the problem",
+    "i won't",
+    "blocked —",
+    "blocked -",
 )
 
 
@@ -144,10 +153,10 @@ def _is_turn(ev: dict, hid: str) -> bool:
 
 
 def _reply_relpath(ev: dict) -> str | None:
-    for rc in ((ev.get("decision") or {}).get("reason_codes") or []):
+    for rc in (ev.get("decision") or {}).get("reason_codes") or []:
         rc = str(rc)
         if rc.startswith("reply:"):
-            return rc[len("reply:"):]
+            return rc[len("reply:") :]
     return None
 
 
@@ -248,7 +257,7 @@ def _deliverable_lines(text: str, cap: int = 8) -> list[str]:
 
 
 def _clock(started: str | None) -> str:
-    """A plain ``HH:MM`` clock from an ISO-ish timestamp (best-effort; the raw string if it can't be parsed)."""
+    """Return ``HH:MM`` from an ISO-ish timestamp, or the raw string when it cannot be parsed."""
     s = str(started or "")
     return s[11:16] if ("T" in s and len(s) >= 16) else s
 
@@ -269,8 +278,9 @@ _CONF_RE = re.compile(r"^\s*[-*]\s*\[\s*(met|partial|missing)\s*\]\s*(.+?)\s*$",
 
 def _conformance(text: str | None) -> list[dict]:
     """Parse a reviewer's spec-conformance itemization from a reply — lines of the form
-    ``- [met|partial|missing] <item>`` (the reviewer checks each ADR-contract / Definition-of-done item against
-    the diff). Returns ``[{status, item}, …]``; ``[]`` if none. Advisory evidence: surfaced in the summary,
+    ``- [met|partial|missing] <item>`` (the reviewer checks each ADR-contract /
+    Definition-of-done item against the diff). Returns ``[{status, item}, …]``; ``[]`` if none.
+    Advisory evidence is surfaced in the summary,
     NOT gated on by the done-contract (a reviewer that ignores its own itemization can still sign off)."""
     out: list[dict] = []
     for line in str(text or "").splitlines():
@@ -285,7 +295,7 @@ def _read_status(collab) -> dict:
     try:
         st = json.loads(ap._status_path(collab).read_text("utf-8"))
         return st if isinstance(st, dict) else {}
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return {}
 
 
@@ -338,6 +348,7 @@ def collect(collab, hid: str) -> dict:
     esc = None
     try:
         import escalation as _esc
+
         esc = _esc.read(collab, hid)  # an open terminal-fix escalation for this handoff, if any
     except Exception:
         esc = None
@@ -345,7 +356,9 @@ def collect(collab, hid: str) -> dict:
     run_label, events = _choose_events(collab, hid)
     models = _model_map(collab)
     turns = []
-    conformance: list[dict] = []  # the reviewer's spec-conformance itemization (last review that emits one wins)
+    conformance: list[
+        dict
+    ] = []  # the reviewer's spec-conformance itemization (last review that emits one wins)
     for ev in events:
         if not _is_turn(ev, hid):
             continue
@@ -356,15 +369,17 @@ def collect(collab, hid: str) -> dict:
         conf = _conformance(reply_text)
         if conf:
             conformance = conf  # events are oldest-first -> the final reviewer sign-off's itemization stands
-        turns.append({
-            "round": _round_of(ev),
-            "role": role,
-            "model": models.get(role),
-            "ts": ev.get("ts"),
-            "latency_ms": metrics.get("latency_ms"),
-            "gist": gist,
-            "blocker": blocker,
-        })
+        turns.append(
+            {
+                "round": _round_of(ev),
+                "role": role,
+                "model": models.get(role),
+                "ts": ev.get("ts"),
+                "latency_ms": metrics.get("latency_ms"),
+                "gist": gist,
+                "blocker": blocker,
+            }
+        )
     turns.sort(key=lambda t: (t["round"] if isinstance(t["round"], int) else 1_000, t["ts"] or ""))
 
     last_reply = _read_reply(collab, _reply_relpath(_last_turn_event(events, hid))) if turns else ""
@@ -424,22 +439,27 @@ def _bottom_line(d: dict) -> str:
     n = len([t for t in d["turns"] if t.get("round") is not None]) or len(d["turns"])
     rounds = f"{n} round{'s' if n != 1 else ''}"
     if d.get("escalated"):
-        return ("**⚠ Escalated to you** — the auto-fix loop could not clear a lane-confirmed defect after "
-                "one attempt and handed it to the terminal for a human fix.")
+        return (
+            "**⚠ Escalated to you** — the auto-fix loop could not clear a lane-confirmed defect after "
+            "one attempt and handed it to the terminal for a human fix."
+        )
     if d["state"] == "done" and d["closed_autonomously"]:
-        return (f"**Signed off and shipped autonomously** after {rounds} — "
-                f"the evidence contract was satisfied.")
+        return (
+            f"**Signed off and shipped autonomously** after {rounds} — the evidence contract was satisfied."
+        )
     if d["state"] == "done":
         return f"**Marked done** after {rounds} (approved by a human, or finished out of band)."
     if d["capped"]:
-        return (f"**Ran the full round budget ({rounds}) without an autonomous sign-off** — "
-                f"the gate held. Nothing shipped on its own; your call.")
+        return (
+            f"**Ran the full round budget ({rounds}) without an autonomous sign-off** — "
+            f"the gate held. Nothing shipped on its own; your call."
+        )
     if d["last_turn"] and d["last_turn"]["blocker"]:
-        return (f"**Stalled on a blocker** after {rounds} — "
-                f"an agent stopped rather than guess. Needs a human.")
+        return f"**Stalled on a blocker** after {rounds} — an agent stopped rather than guess. Needs a human."
     if d["signoff_blocked"]:
-        return (f"**A sign-off was blocked** by the evidence contract after {rounds} — "
-                f"see the conditions below.")
+        return (
+            f"**A sign-off was blocked** by the evidence contract after {rounds} — see the conditions below."
+        )
     if d["state"] in ("claimed",):
         return f"**In progress** — {rounds} exchanged so far, not yet signed off."
     return f"**Queued** — addressed and waiting; {rounds} so far."
@@ -458,9 +478,11 @@ def render_markdown(d: dict) -> str:
 
     if d.get("escalated"):
         L.append("## ⚠ Needs your fix")
-        L.append("A lane-confirmed defect survived one autonomous fix attempt, so the driver stopped and "
-                 f"escalated it to you. The verified defect + reproduction are in `autopilot/escalations/"
-                 f"{hid}.md`.")
+        L.append(
+            "A lane-confirmed defect survived one autonomous fix attempt, so the driver stopped and "
+            f"escalated it to you. The verified defect + reproduction are in `autopilot/escalations/"
+            f"{hid}.md`."
+        )
         L.append("")
 
     if d.get("why"):
@@ -520,8 +542,9 @@ def render_markdown(d: dict) -> str:
     if d.get("conformance"):
         marks = {"met": "✓", "partial": "~", "missing": "✗"}
         missing = sum(1 for c in d["conformance"] if c["status"] in ("partial", "missing"))
-        L.append(f"- Spec conformance (reviewer itemization) — {len(d['conformance'])} items, "
-                 f"{missing} unmet:")
+        L.append(
+            f"- Spec conformance (reviewer itemization) — {len(d['conformance'])} items, {missing} unmet:"
+        )
         for c in d["conformance"]:
             L.append(f"    - {marks.get(c['status'], '•')} **{c['status']}** — {c['item']}")
     L.append("")
@@ -574,12 +597,16 @@ def main(argv=None) -> int:
     # the narrative is prose with unicode (arrows, ⚠); never let a cp1252 console truncate it
     with contextlib.suppress(AttributeError, ValueError):
         sys.stdout.reconfigure(encoding="utf-8")
-    p = argparse.ArgumentParser(prog="narrative",
-                                description="human-readable narrative of a handoff (what happened, and why)")
+    p = argparse.ArgumentParser(
+        prog="narrative", description="human-readable narrative of a handoff (what happened, and why)"
+    )
     p.add_argument("collab", help="collab name (registry) or path")
     p.add_argument("hid", help="handoff id")
-    p.add_argument("--write", action="store_true",
-                   help="persist onto the handoff + autopilot/summaries/ instead of printing")
+    p.add_argument(
+        "--write",
+        action="store_true",
+        help="persist onto the handoff + autopilot/summaries/ instead of printing",
+    )
     try:
         args = p.parse_args(argv)
     except SystemExit as e:

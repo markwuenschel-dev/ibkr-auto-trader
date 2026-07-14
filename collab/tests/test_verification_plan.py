@@ -184,8 +184,11 @@ class TestSelection:
             ("execution", {"order-risk-and-idempotency"}, {"change-regression"}),
             ("auth", {"path-pointer-safety"}, {"change-regression", "path-pointer-safety"}),
             ("broker", {"broker-snapshot-and-reconciliation"}, {"change-regression"}),
-            ("integration", {"broker-snapshot-and-reconciliation", "process-isolation"},
-             {"change-regression", "process-isolation"}),
+            (
+                "integration",
+                {"broker-snapshot-and-reconciliation", "process-isolation"},
+                {"change-regression", "process-isolation"},
+            ),
             ("market-data", {"market-data-causality-and-time"}, {"change-regression"}),
             ("time", {"market-data-causality-and-time"}, {"change-regression"}),
             (

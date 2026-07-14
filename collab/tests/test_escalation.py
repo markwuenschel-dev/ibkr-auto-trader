@@ -23,8 +23,13 @@ import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
 import run_budget as rb  # noqa: E402
 
-_BLOCKER = {"id": "b1", "lane": "clock", "fixed": False, "regression_test": "test_skew_naive",
-            "description": "tz-aware/naive TypeError at gateway.py:233 gates the snapshot read"}
+_BLOCKER = {
+    "id": "b1",
+    "lane": "clock",
+    "fixed": False,
+    "regression_test": "test_skew_naive",
+    "description": "tz-aware/naive TypeError at gateway.py:233 gates the snapshot read",
+}
 
 
 def _events(collab):
@@ -33,9 +38,19 @@ def _events(collab):
 
 
 def _ledger_with_blocker(collab, hid, blockers):
-    lanes.write_ledger(collab, hid, {
-        "hid": hid, "generated_ts": ap._now_utc(), "guardrails": [],
-        "builder_seat": "builder", "reviewer_seat": "reviewer", "lanes": [], "blockers": blockers})
+    lanes.write_ledger(
+        collab,
+        hid,
+        {
+            "hid": hid,
+            "generated_ts": ap._now_utc(),
+            "guardrails": [],
+            "builder_seat": "builder",
+            "reviewer_seat": "reviewer",
+            "lanes": [],
+            "blockers": blockers,
+        },
+    )
 
 
 class TestEscalationModule:
@@ -78,22 +93,30 @@ class TestDriverHelpers:
 
 def _seats():
     # builder acts first (handoff to:builder); reviewer is the sign-off authority.
-    return {"builder": {"backend": "cli", "cmd": ["fake-builder"], "system": "build"},
-            "reviewer": {"backend": "cli", "cmd": ["fake-reviewer"], "system": "review",
-                         "can_sign_off": True}}
+    return {
+        "builder": {"backend": "cli", "cmd": ["fake-builder"], "system": "build"},
+        "reviewer": {"backend": "cli", "cmd": ["fake-reviewer"], "system": "review", "can_sign_off": True},
+    }
 
 
 def _closeout_seats():
-    return {"builder": {"backend": "cli", "cmd": ["fake-builder"], "system": "b"},
-            "grok": {"backend": "cli", "cmd": ["fake-grok"], "system": "breaker"},
-            "gemini": {"backend": "cli", "cmd": ["fake-gemini"], "system": "verifier"},
-            "reviewer": {"backend": "cli", "cmd": ["fake-reviewer"], "system": "r", "can_sign_off": True}}
+    return {
+        "builder": {"backend": "cli", "cmd": ["fake-builder"], "system": "b"},
+        "grok": {"backend": "cli", "cmd": ["fake-grok"], "system": "breaker"},
+        "gemini": {"backend": "cli", "cmd": ["fake-gemini"], "system": "verifier"},
+        "reviewer": {"backend": "cli", "cmd": ["fake-reviewer"], "system": "r", "can_sign_off": True},
+    }
 
 
 def _bounded_limits(work_attempts=2):
     # A generous model-call ceiling so a multi-attempt lane run is bounded by the work-attempt budget only.
-    return rb.Limits(max_work_attempts=work_attempts, max_verification_passes=8,
-                     max_total_model_calls=500, max_wall_clock_seconds=1800.0, max_findings_per_lane=4)
+    return rb.Limits(
+        max_work_attempts=work_attempts,
+        max_verification_passes=8,
+        max_total_model_calls=500,
+        max_wall_clock_seconds=1800.0,
+        max_findings_per_lane=4,
+    )
 
 
 class TestLoopPolicy:
@@ -107,16 +130,27 @@ class TestLoopPolicy:
         subprocess.run(["git", "init"], cwd=collab, capture_output=True)  # cond-11 preflight needs a repo
         hc.create(collab, to="builder", from_="reviewer", title="PT-3 gateway", body="build it")
         import re as _re
+
         _, p = hc._reconcile(collab, "001")
-        txt = _re.sub(r"(?m)^(status:.*\n)", r"\1guardrails: [bounded-autonomy, untrusted-agent-output]\n",
-                      Path(p).read_text("utf-8"), count=1)
+        txt = _re.sub(
+            r"(?m)^(status:.*\n)",
+            r"\1guardrails: [bounded-autonomy, untrusted-agent-output]\n",
+            Path(p).read_text("utf-8"),
+            count=1,
+        )
         Path(p).write_text(txt, "utf-8")
         tiny = tmp_path / "test_tiny.py"
         tiny.write_text("def test_x():\n    assert True\n", encoding="utf-8")
-        closeout = {"breaker": "grok", "verifier": "gemini", "source_base": collab,
-                    "source_roots": ["src/*.py"], "test_path": str(tiny)}
+        closeout = {
+            "breaker": "grok",
+            "verifier": "gemini",
+            "source_base": collab,
+            "source_roots": ["src/*.py"],
+            "test_path": str(tiny),
+        }
         (Path(home) / "seats.json").write_text(
-            json.dumps({"version": 1, "closeout": closeout, "seats": _closeout_seats()}), encoding="utf-8")
+            json.dumps({"version": 1, "closeout": closeout, "seats": _closeout_seats()}), encoding="utf-8"
+        )
 
     def test_persistent_lane_defect_escalates_with_repro(self, tmp_path):
         # A defect the lanes CONFIRM on every candidate: each attempt is repair_required, the driver retries
@@ -144,13 +178,13 @@ class TestLoopPolicy:
         self._lane_slice(collab, home, tmp_path, runner)
         ap.run(collab, seats=_closeout_seats(), limits=_bounded_limits(2), runner=runner, home=str(home))
 
-        assert escalation.pending(collab) == ["001"]                      # escalated
+        assert escalation.pending(collab) == ["001"]  # escalated
         md = escalation.read(collab, "001")["markdown"]
-        assert "gateway.py:233" in md and "PT-3 gateway" in md            # the reproduced defect is embedded
+        assert "gateway.py:233" in md and "PT-3 gateway" in md  # the reproduced defect is embedded
         evs = _events(collab)
         esc = next(e for e in evs if e["stage"] == "autopilot.escalation")
         assert "reason:budget_exhausted" in esc["decision"]["reason_codes"]
-        assert hc.state_of(collab, "001") == "claimed"                    # not shipped
+        assert hc.state_of(collab, "001") == "claimed"  # not shipped
 
     def test_reviewer_withhold_escalates_at_budget(self, tmp_path):
         # No lanes, no confirmed defect — just a reviewer that keeps withholding sign-off. The candidate is
@@ -163,8 +197,8 @@ class TestLoopPolicy:
         def fake(cmd, prompt, **k):
             if "builder" in cmd[0]:
                 n["b"] += 1
-                return f"rev {n['b']}"       # genuine progress each attempt
-            return "not yet — keep going"    # reviewer withholds
+                return f"rev {n['b']}"  # genuine progress each attempt
+            return "not yet — keep going"  # reviewer withholds
 
         ap.run(collab, seats=_seats(), max_rounds=2, runner=fake, home=home)
         assert escalation.pending(collab) == ["001"]
@@ -179,6 +213,7 @@ class TestOperatorRetry:
 
     def test_retry_request_reopens_and_closes(self, tmp_path):
         import operator_requests as opreq
+
         home = tmp_path / "home"
         home.mkdir()
         collab = str(tmp_path / "c")
@@ -195,7 +230,7 @@ class TestOperatorRetry:
             if "reviewer" in who:
                 return "verified\n[[SIGNOFF]]" if phase["sign"] else "not yet — keep going"
             if "grok" in who:
-                return "NO-FINDING"                            # breaker finds nothing -> clean lanes
+                return "NO-FINDING"  # breaker finds nothing -> clean lanes
             return "ok"
 
         TestLoopPolicy()._lane_slice(collab, home, tmp_path, runner)
@@ -210,13 +245,14 @@ class TestOperatorRetry:
         phase["sign"] = True
         ap.run(collab, seats=_closeout_seats(), limits=_bounded_limits(2), runner=runner, home=str(home))
 
-        assert hc.state_of(collab, "001") == "done"            # retried, re-driven, and closed
-        assert opreq.get(collab, "001") is None                # the request was consumed
-        assert escalation.pending(collab) == []                # the stale escalation was cleared on reopen
+        assert hc.state_of(collab, "001") == "done"  # retried, re-driven, and closed
+        assert opreq.get(collab, "001") is None  # the request was consumed
+        assert escalation.pending(collab) == []  # the stale escalation was cleared on reopen
         assert any(e.get("stage") == "autopilot.reopen" for e in _events(collab))
 
     def test_adopt_request_assesses_current_source_without_a_builder_turn(self, tmp_path):
         import operator_requests as opreq
+
         home = tmp_path / "home"
         home.mkdir()
         collab = str(tmp_path / "c")
@@ -234,10 +270,12 @@ class TestOperatorRetry:
             return "ok"
 
         TestLoopPolicy()._lane_slice(collab, home, tmp_path, runner)
-        hc.claim(collab, "001")                                 # a paused, claimed handoff
-        (Path(collab) / "src" / "gateway.py").write_text("x = 1\n", encoding="utf-8")  # operator's known-good source
+        hc.claim(collab, "001")  # a paused, claimed handoff
+        (Path(collab) / "src" / "gateway.py").write_text(
+            "x = 1\n", encoding="utf-8"
+        )  # operator's known-good source
         opreq.write(collab, "001", opreq.ADOPT, by="operator")
 
         ap.run(collab, seats=_closeout_seats(), limits=_bounded_limits(2), runner=runner, home=str(home))
-        assert hc.state_of(collab, "001") == "done"            # adopted current source, contract satisfied -> done
-        assert calls["builder"] == 0                            # adopt skipped the builder turn entirely
+        assert hc.state_of(collab, "001") == "done"  # adopted current source, contract satisfied -> done
+        assert calls["builder"] == 0  # adopt skipped the builder turn entirely

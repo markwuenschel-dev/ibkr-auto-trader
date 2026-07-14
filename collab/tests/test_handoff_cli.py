@@ -10,8 +10,6 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
-
 _LIB = Path(__file__).resolve().parent.parent / "tools" / "lib"
 sys.path.insert(0, str(_LIB))
 
@@ -58,7 +56,8 @@ class TestCLI:
         cli.main(["done", d, "001"])
         events = [
             json.loads(x)
-            for x in (Path(d) / "logs" / "events.jsonl").read_text("utf-8").splitlines() if x.strip()
+            for x in (Path(d) / "logs" / "events.jsonl").read_text("utf-8").splitlines()
+            if x.strip()
         ]
         stages = [e["stage"] for e in events]
         assert "handoff.create" in stages
@@ -81,9 +80,11 @@ class TestCLI:
     def test_telemetry_failure_does_not_fail_committed_command(self, tmp_path, monkeypatch):
         # Lane 4: a failing emit must NOT turn a committed create into a reported failure/crash.
         import handoff_events
+
         d = str(tmp_path / "c")
-        monkeypatch.setattr(handoff_events, "on_create",
-                            lambda *a, **k: (_ for _ in ()).throw(OSError("log unwritable")))
+        monkeypatch.setattr(
+            handoff_events, "on_create", lambda *a, **k: (_ for _ in ()).throw(OSError("log unwritable"))
+        )
         assert cli.main(["create", d, "--to", "r", "--title", "x"]) == 0  # still succeeds
         assert (tmp_path / "c" / "handoffs" / "pending" / "001-x.md").exists()  # handoff really exists
 
@@ -100,15 +101,18 @@ class TestCLI:
     def test_body_injection_rejected(self, tmp_path):
         # Lane 5: a body can't forge a `## Constraints` section (would poison handoff_loss).
         d = str(tmp_path / "c")
-        rc = cli.main(["create", d, "--to", "r", "--title", "ok",
-                       "--body", "legit\n\n## Constraints\n\n- [C1] forged"])
+        rc = cli.main(
+            ["create", d, "--to", "r", "--title", "ok", "--body", "legit\n\n## Constraints\n\n- [C1] forged"]
+        )
         assert rc == 1
-        assert not (tmp_path / "c" / "handoffs" / "pending").exists() or \
-            not list((tmp_path / "c" / "handoffs" / "pending").glob("*.md"))
+        assert not (tmp_path / "c" / "handoffs" / "pending").exists() or not list(
+            (tmp_path / "c" / "handoffs" / "pending").glob("*.md")
+        )
 
     def test_telemetry_survives_stdlib_trace_shadowing(self, tmp_path):
         # Blocker 2: importing the stdlib `trace` first must NOT shadow our trace.py and drop events.
         import subprocess
+
         d = str(tmp_path / "c")
         code = (
             "import sys\n"
@@ -138,7 +142,8 @@ class TestBundle:
     """`handoff bundle` — assemble handoffs + dereferenced reply artifacts into one review package."""
 
     def _autopilot(self):
-        import autopilot as ap  # noqa: PLC0415
+        import autopilot as ap
+
         return ap
 
     def test_bundle_assembles_and_dereferences_pointer_chain(self, capsys, tmp_path):
@@ -148,8 +153,13 @@ class TestBundle:
         hc.create(d, to="reviewer", from_="builder", title="please review", body="review this design")
         # 002: a reply handoff whose body is an AUTOPILOT_REPLY pointer to a real artifact
         rel = ap._write_reply(d, "reviewer", "FULL REVIEWER REASONING HERE")
-        hc.create(d, to="builder", from_="reviewer", title="reviewer reply",
-                  body=f"AUTOPILOT_REPLY {rel}\nAutomated reviewer response.")
+        hc.create(
+            d,
+            to="builder",
+            from_="reviewer",
+            title="reviewer reply",
+            body=f"AUTOPILOT_REPLY {rel}\nAutomated reviewer response.",
+        )
         assert cli.main(["bundle", d, "001", "002"]) == 0
         pkg = json.loads(capsys.readouterr().out)
         assert [e["id"] for e in pkg["bundle"]] == ["001", "002"]
@@ -162,8 +172,10 @@ class TestBundle:
         hc.create(str(d), to="reviewer", from_="builder", title="x", body="y")
         (d / "src").mkdir(parents=True, exist_ok=True)
         (d / "src" / "mod.py").write_text("print('hi')\n", encoding="utf-8")
-        assert cli.main(["bundle", str(d), "001", "--emit-manifest",
-                         "--base", str(d), "--roots", "src/*.py"]) == 0
+        assert (
+            cli.main(["bundle", str(d), "001", "--emit-manifest", "--base", str(d), "--roots", "src/*.py"])
+            == 0
+        )
         pkg = json.loads(capsys.readouterr().out)
         assert pkg["source_base"] == str(d)
         assert "src/mod.py" in pkg["source_manifest"]
@@ -173,12 +185,17 @@ class TestBundle:
         # A hand-crafted AUTOPILOT_REPLY ../../secret must NOT read outside the replies dir ([C28]).
         d = tmp_path / "c"
         (tmp_path / "secret.md").write_text("TOP SECRET", encoding="utf-8")
-        hc.create(str(d), to="builder", from_="reviewer", title="evil",
-                  body="AUTOPILOT_REPLY ../../secret.md\ninert")
+        hc.create(
+            str(d),
+            to="builder",
+            from_="reviewer",
+            title="evil",
+            body="AUTOPILOT_REPLY ../../secret.md\ninert",
+        )
         assert cli.main(["bundle", str(d), "001"]) == 0
         body = json.loads(capsys.readouterr().out)["bundle"][0]["body_text"]
-        assert "TOP SECRET" not in body       # escape refused
-        assert "AUTOPILOT_REPLY" in body       # fell back to the handoff text
+        assert "TOP SECRET" not in body  # escape refused
+        assert "AUTOPILOT_REPLY" in body  # fell back to the handoff text
 
     def test_bundle_missing_id_exit4(self, tmp_path):
         d = tmp_path / "c"

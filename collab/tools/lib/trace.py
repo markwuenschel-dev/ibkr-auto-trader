@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import collab_common as cc  # noqa: E402
+import collab_common as cc
 
 SCHEMA_VERSION = "0.1"
 

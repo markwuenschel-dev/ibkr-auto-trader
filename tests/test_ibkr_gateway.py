@@ -218,9 +218,7 @@ class TestPureReconcile:
 # --------------------------------------------------------------------------- #
 class TestSnapshotMapping:
     def test_snapshot_returns_account_snapshot(self):
-        gw = _make_gateway(
-            summary=_paper_summary(), held=[_held(AAPL, "AAPL", 10), _held(MSFT, "MSFT", -4)]
-        )
+        gw = _make_gateway(summary=_paper_summary(), held=[_held(AAPL, "AAPL", 10), _held(MSFT, "MSFT", -4)])
         _run(gw.connect())
         account = _run(gw.snapshot())
         assert isinstance(account, AccountSnapshot)

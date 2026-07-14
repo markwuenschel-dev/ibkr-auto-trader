@@ -62,14 +62,10 @@ def _qf(value, *, at, basis):
 
 def _assembler(*, held, quotes, seal=_SEAL, session=None):
     session = session or FakeSession(generation=0)
-    gateway = FakeAccountGateway(
-        clock=FixedClock(seal), summary=_summary(), held=held, session=session
-    )
+    gateway = FakeAccountGateway(clock=FixedClock(seal), summary=_summary(), held=held, session=session)
     feed = FakeMarketDataFeed(quotes=quotes, session=session)
     asyncio.run(gateway.connect())
-    assembler = DecisionContextAssembler(
-        gateway, feed, decision_time_source=FixedDecisionClock(seal)
-    )
+    assembler = DecisionContextAssembler(gateway, feed, decision_time_source=FixedDecisionClock(seal))
     return assembler, session
 
 
@@ -132,11 +128,7 @@ class TestValuationFailClosed:
     def test_available_holding_with_mark_after_seal_is_rejected(self):
         # The domain RiskContext validator rejects an AVAILABLE holding whose mark is after the seal.
         assembler, _ = _assembler(
-            held=[
-                _held(
-                    AAPL, "AAPL", 10, mv="1500", mark="150", mark_at=_SEAL + timedelta(seconds=1)
-                )
-            ],
+            held=[_held(AAPL, "AAPL", 10, mv="1500", mark="150", mark_at=_SEAL + timedelta(seconds=1))],
             quotes={},
         )
         with pytest.raises(ValueError):
@@ -157,9 +149,7 @@ class TestGenerationFence:
         )
         feed = _ReconnectingFeed(quotes={}, session=session)
         asyncio.run(gateway.connect())
-        assembler = DecisionContextAssembler(
-            gateway, feed, decision_time_source=FixedDecisionClock(_SEAL)
-        )
+        assembler = DecisionContextAssembler(gateway, feed, decision_time_source=FixedDecisionClock(_SEAL))
         with pytest.raises(GenerationFenceError):
             asyncio.run(assembler.capture([MSFT]))
 
@@ -168,9 +158,7 @@ class TestDigestDeterminism:
     def test_same_inputs_same_digest_change_on_drift(self):
         def digest_for(qty):
             assembler, _ = _assembler(
-                held=[
-                    _held(AAPL, "AAPL", qty, mv="1500", mark="150", mark_at=_SEAL - timedelta(seconds=1))
-                ],
+                held=[_held(AAPL, "AAPL", qty, mv="1500", mark="150", mark_at=_SEAL - timedelta(seconds=1))],
                 quotes={},
             )
             return asyncio.run(assembler.capture([])).context_digest

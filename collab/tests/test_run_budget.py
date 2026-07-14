@@ -127,8 +127,14 @@ class TestExhaustionReporting:
         b.charge(rb.WORK_ATTEMPT)
         rep = b.report()
         assert rep["epoch"] == 0
-        for key in ("work_attempts", "verification_passes", "verification_calls",
-                    "total_model_calls", "actor_turns", "wall_clock_seconds"):
+        for key in (
+            "work_attempts",
+            "verification_passes",
+            "verification_calls",
+            "total_model_calls",
+            "actor_turns",
+            "wall_clock_seconds",
+        ):
             assert key in rep["budgets"]
         assert rep["budgets"]["work_attempts"]["consumed"] == 1
 
@@ -189,8 +195,9 @@ class TestCandidateId:
         # Same source, tightened plan (extra lane) -> a new candidate; old evidence can't be reused.
         src = {"a.py": "h1"}
         a = rb.candidate_id(src, source_roots=["src"], test_command="pytest", lane_config={"lanes": ["x"]})
-        b = rb.candidate_id(src, source_roots=["src"], test_command="pytest",
-                            lane_config={"lanes": ["x", "y"]})
+        b = rb.candidate_id(
+            src, source_roots=["src"], test_command="pytest", lane_config={"lanes": ["x", "y"]}
+        )
         assert a != b
 
     def test_identical_inputs_are_stable(self):

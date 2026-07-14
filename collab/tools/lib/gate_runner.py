@@ -232,8 +232,10 @@ def verify_manifest(claimed: dict, base) -> tuple[bool, str]:
         if _sha256_file(fp) != want:
             changed.append(rel)
     if missing or changed:
-        return False, (f"source drift vs manifest ({len(claimed)} attested): "
-                       f"missing/invalid={missing[:5]} changed={changed[:5]}")
+        return False, (
+            f"source drift vs manifest ({len(claimed)} attested): "
+            f"missing/invalid={missing[:5]} changed={changed[:5]}"
+        )
     return True, f"source==tested: all {len(claimed)} attested files match under {base_p}"
 
 
@@ -348,9 +350,11 @@ def run_gates(
                 artifact=artifact,
                 span_id=_span_id(),
                 parent_span_id=run_span,
-                decision={"action": "accept" if status == "pass" else "reject",
-                          "reason_codes": [] if status == "pass" else [gate["name"]],
-                          "confidence": None},
+                decision={
+                    "action": "accept" if status == "pass" else "reject",
+                    "reason_codes": [] if status == "pass" else [gate["name"]],
+                    "confidence": None,
+                },
                 gates=[gate],
                 ruleset_hash=rhash,
                 detail=detail,
@@ -369,14 +373,22 @@ def run_gates(
         role=ROLE,
         artifact=artifact,
         span_id=run_span,
-        decision={"action": "accept" if passed else "reject",
-                  "reason_codes": [] if passed else [f"tier-{first_failing_tier}-failed"],
-                  "confidence": None},
-        gates=[{"name": r["name"], "status": r["status"],
-                "severity": r["severity"], "tier": r["tier"]} for r in results],
-        metrics={"passed": sum(1 for r in results if r["status"] == "pass"),
-                 "total": len(results), "files": 0,
-                 "latency_ms": None, "cost_usd": None},
+        decision={
+            "action": "accept" if passed else "reject",
+            "reason_codes": [] if passed else [f"tier-{first_failing_tier}-failed"],
+            "confidence": None,
+        },
+        gates=[
+            {"name": r["name"], "status": r["status"], "severity": r["severity"], "tier": r["tier"]}
+            for r in results
+        ],
+        metrics={
+            "passed": sum(1 for r in results if r["status"] == "pass"),
+            "total": len(results),
+            "files": 0,
+            "latency_ms": None,
+            "cost_usd": None,
+        },
         ruleset_hash=rhash,
         first_failing_tier=first_failing_tier,
         overall="pass" if passed else "fail",

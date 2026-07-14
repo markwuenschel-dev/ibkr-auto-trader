@@ -22,6 +22,7 @@ import watcher  # noqa: E402
 
 def _watch_worker(collab, seat):
     import watcher as w
+
     w.watch(collab, seat=seat, once=True, catch_up=True)
 
 
@@ -65,7 +66,9 @@ class TestWatch:
     def test_malformed_file_does_not_crash_loop(self, capsys):
         with tempfile.TemporaryDirectory() as d:
             hc.ensure_layout(d)
-            (Path(d) / "handoffs" / "pending" / "007-garbage.md").write_text("not a handoff\n", encoding="utf-8")
+            (Path(d) / "handoffs" / "pending" / "007-garbage.md").write_text(
+                "not a handoff\n", encoding="utf-8"
+            )
             r = hc.create(d, to="reviewer", from_="builder", title="real one")  # id bumped past 007
             # the garbage file has empty frontmatter (to=None) -> skipped without crashing;
             # the real handoff is still announced.
@@ -100,11 +103,13 @@ class TestWatch:
         d = tmp_path / "c"
         hc.ensure_layout(str(d))
         outside = tmp_path / "secret.md"
-        outside.write_text("---\nto: reviewer\nfrom: attacker\ntitle: LEAKED\n---\n## Summary\nx\n", encoding="utf-8")
+        outside.write_text(
+            "---\nto: reviewer\nfrom: attacker\ntitle: LEAKED\n---\n## Summary\nx\n", encoding="utf-8"
+        )
         link = d / "handoffs" / "pending" / "001-link.md"
         try:
             link.symlink_to(outside)
-        except (OSError, NotImplementedError):
+        except OSError, NotImplementedError:
             pytest.skip("symlinks not creatable on this platform/privilege")
         new = watcher.watch(str(d), seat="reviewer", once=True, catch_up=True)
         cap = capsys.readouterr()
@@ -117,8 +122,7 @@ class TestWatch:
 
         calls = []
         orig = cc.LockHandle.assert_current
-        monkeypatch.setattr(cc.LockHandle, "assert_current",
-                            lambda self: (calls.append(1), orig(self))[1])
+        monkeypatch.setattr(cc.LockHandle, "assert_current", lambda self: (calls.append(1), orig(self))[1])
         state = tmp_path / "logs" / "watch-reviewer.state"
         watcher._persist_merge(state, {"001"})
         assert calls, "must assert_current() before the seen-set commit"
@@ -242,7 +246,9 @@ class TestInboxDrain:
         assert "MESSAGE from you (proj): please review 003" in capsys.readouterr().out
         assert not (d / "from-user-1.md").exists()  # consumed (moved to archive)
         assert (d / "archive" / "from-user-1.md").exists()
-        assert watcher.drain_inbox(home, "proj", seat="reviewer") == []  # consumed once (no re-surface absent a crash)
+        assert (
+            watcher.drain_inbox(home, "proj", seat="reviewer") == []
+        )  # consumed once (no re-surface absent a crash)
 
     def test_watch_drains_inbox_for_its_collab(self, capsys, tmp_path):
         home = str(tmp_path)
@@ -299,7 +305,7 @@ class TestInboxDrain:
         secret.write_text("TOP SECRET\n", encoding="utf-8")
         try:
             (d / "from-user-1.md").symlink_to(secret)
-        except (OSError, NotImplementedError):
+        except OSError, NotImplementedError:
             pytest.skip("symlink creation not permitted on this platform")
         assert watcher.drain_inbox(home, "proj", seat="reviewer") == []  # non-regular -> skipped
         assert secret.exists()  # target untouched, never consumed

@@ -107,9 +107,12 @@ def _emit_safe(fn, *args, **kwargs) -> None:
 
 def cmd_create(args) -> int:
     collab = _collab_from(args)
-    r = hc.create(collab, to=args.to, from_=args.from_, title=args.title,
-                  priority=args.priority, body=args.body or "")  # [C19] guard lives in render_handoff
-    _emit_safe(he.on_create, _log(collab), _run_id(collab), r["id"], span_id=r["id"], title=args.title)  # [C15]
+    r = hc.create(
+        collab, to=args.to, from_=args.from_, title=args.title, priority=args.priority, body=args.body or ""
+    )  # [C19] guard lives in render_handoff
+    _emit_safe(
+        he.on_create, _log(collab), _run_id(collab), r["id"], span_id=r["id"], title=args.title
+    )  # [C15]
     print(r["id"])
     return EXIT_OK
 
@@ -124,8 +127,15 @@ def cmd_list(args) -> int:
 def cmd_claim(args) -> int:
     collab = _collab_from(args)
     hc.claim(collab, args.id)  # raises HandoffNotFound/HandoffConflict -> mapped in main ([C16])
-    _emit_safe(he.on_claim, _log(collab), _run_id(collab), args.id, span_id=f"{args.id}:claim",
-               parent_span_id=None, by=os.environ.get("USER") or "cli")  # [C15]
+    _emit_safe(
+        he.on_claim,
+        _log(collab),
+        _run_id(collab),
+        args.id,
+        span_id=f"{args.id}:claim",
+        parent_span_id=None,
+        by=os.environ.get("USER") or "cli",
+    )  # [C15]
     print(f"{args.id} -> claimed")
     return EXIT_OK
 
@@ -133,7 +143,9 @@ def cmd_claim(args) -> int:
 def cmd_done(args) -> int:
     collab = _collab_from(args)
     hc.done(collab, args.id)
-    _emit_safe(he.on_done, _log(collab), _run_id(collab), args.id, span_id=f"{args.id}:done", parent_span_id=None)  # [C15]
+    _emit_safe(
+        he.on_done, _log(collab), _run_id(collab), args.id, span_id=f"{args.id}:done", parent_span_id=None
+    )  # [C15]
     print(f"{args.id} -> done")
     return EXIT_OK
 
@@ -141,9 +153,16 @@ def cmd_done(args) -> int:
 def cmd_archive(args) -> int:
     collab = _collab_from(args)
     hc.archive(collab, args.id)
-    _emit_safe(_trace.emit, _log(collab), run_id=_run_id(collab), stage="handoff.archive", role="builder",
-               artifact=f"handoff:{args.id}", span_id=f"{args.id}:archive",
-               decision={"action": "accept", "reason_codes": ["cli:archive"]})  # [C15]; distinct archive stage
+    _emit_safe(
+        _trace.emit,
+        _log(collab),
+        run_id=_run_id(collab),
+        stage="handoff.archive",
+        role="builder",
+        artifact=f"handoff:{args.id}",
+        span_id=f"{args.id}:archive",
+        decision={"action": "accept", "reason_codes": ["cli:archive"]},
+    )  # [C15]; distinct archive stage
     print(f"{args.id} -> archived")
     return EXIT_OK
 
@@ -179,6 +198,7 @@ def cmd_bundle(args) -> int:
     """
     collab = _collab_from(args)
     import dashboard_core as dc  # local: keeps the deref primitive's imports off the hot CLI path
+
     pkg = {
         "generated_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "collab": str(collab),
@@ -186,6 +206,7 @@ def cmd_bundle(args) -> int:
     }
     if args.emit_manifest:
         import gate_runner as gr
+
         base = Path(args.base).expanduser() if args.base else collab
         pkg["source_base"] = str(base)
         pkg["source_manifest"] = gr.source_manifest(args.roots or ["**/*.py"], base)
@@ -240,8 +261,13 @@ def _build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--state", choices=hc.STATES)
     ls.set_defaults(func=cmd_list)
 
-    for name, fn in (("claim", cmd_claim), ("show", cmd_show), ("done", cmd_done),
-                     ("archive", cmd_archive), ("state", cmd_state)):
+    for name, fn in (
+        ("claim", cmd_claim),
+        ("show", cmd_show),
+        ("done", cmd_done),
+        ("archive", cmd_archive),
+        ("state", cmd_state),
+    ):
         sp = sub.add_parser(name, help=f"{name} a handoff")
         with_collab(sp)
         sp.add_argument("id")
@@ -267,10 +293,15 @@ def _build_parser() -> argparse.ArgumentParser:
     nw.set_defaults(func=cmd_new)
 
     bd = sub.add_parser("bundle", help="assemble handoffs + reply artifacts into one JSON review package")
-    bd.add_argument("collab", help="collab name (registry) or path (required — bundle has no $HANDOFF_ROOT fallback)")
+    bd.add_argument(
+        "collab", help="collab name (registry) or path (required — bundle has no $HANDOFF_ROOT fallback)"
+    )
     bd.add_argument("ids", nargs="+", help="one or more handoff ids to bundle")
-    bd.add_argument("--emit-manifest", action="store_true",
-                    help="attach a {path: sha256} source manifest (source==tested attestation)")
+    bd.add_argument(
+        "--emit-manifest",
+        action="store_true",
+        help="attach a {path: sha256} source manifest (source==tested attestation)",
+    )
     bd.add_argument("--base", help="root the manifest paths are relative to (default: the collab path)")
     bd.add_argument("--roots", nargs="+", help="glob(s) for the manifest (default: **/*.py)")
     bd.set_defaults(func=cmd_bundle)

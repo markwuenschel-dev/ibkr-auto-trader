@@ -23,20 +23,21 @@ import re
 import secrets
 import sys
 import urllib.parse
+from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 _HID_RE = re.compile(r"\d{1,9}")  # a handoff id is a short zero-padded integer — never a path fragment
-_SEAT_RE = re.compile(r"[A-Za-z0-9_-]{1,40}")   # a seat name — never a path fragment / key-lookup only
+_SEAT_RE = re.compile(r"[A-Za-z0-9_-]{1,40}")  # a seat name — never a path fragment / key-lookup only
 _MODEL_RE = re.compile(r"[A-Za-z0-9._-]{1,60}")  # a catalog model id (e.g. gpt-5.5, grok-4.5-textonly)
-_RUN_RE = re.compile(r"[0-9A-Za-z._-]{1,64}")   # a run_uid — never joined into a path (key-lookup only)
+_RUN_RE = re.compile(r"[0-9A-Za-z._-]{1,64}")  # a run_uid — never joined into a path (key-lookup only)
 
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
+import collab_common as cc  # noqa: E402
 import dashboard_core as dc  # noqa: E402
 import handoff_core as hc  # noqa: E402
-import collab_common as cc  # noqa: E402
 
 _DEFAULT_PORT = 8787
 
@@ -58,10 +59,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        try:
+        with suppress(BrokenPipeError, ConnectionError):
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionError):
-            pass
 
     def _json(self, code: int, obj) -> None:
         self._send(code, json.dumps(obj).encode("utf-8"), "application/json")
@@ -137,7 +136,7 @@ class _Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length") or 0)
             if n:
                 body = json.loads(self.rfile.read(n).decode("utf-8"))
-        except (ValueError, OSError):
+        except ValueError, OSError:
             body = {}
         collab = self.server.collab  # type: ignore[attr-defined]
         try:
@@ -169,8 +168,12 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(200, dc.reopen_handoff(collab, hid, action=action, by="dashboard-web"))
             if self.path == "/api/seat-model":
                 seat, model = body.get("seat"), body.get("model")
-                if not (isinstance(seat, str) and isinstance(model, str)
-                        and _SEAT_RE.fullmatch(seat) and _MODEL_RE.fullmatch(model)):
+                if not (
+                    isinstance(seat, str)
+                    and isinstance(model, str)
+                    and _SEAT_RE.fullmatch(seat)
+                    and _MODEL_RE.fullmatch(model)
+                ):
                     return self._json(400, {"error": "bad seat/model"})
                 try:  # validation failures (unknown seat/model) are BAD INPUT -> 400, not a 500
                     result = dc.set_seat_model(self.server.home, seat, model, by="dashboard-web")  # type: ignore[attr-defined]
@@ -188,10 +191,14 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json(400, {"error": str(e)})
             if self.path == "/api/start":
                 mr = body.get("max_rounds")
-                if mr is not None and (not isinstance(mr, int) or isinstance(mr, bool) or not (1 <= mr <= 50)):
+                if mr is not None and (
+                    not isinstance(mr, int) or isinstance(mr, bool) or not (1 <= mr <= 50)
+                ):
                     return self._json(400, {"error": "bad max_rounds"})
                 try:  # "already running" / "not found" are CONFLICTs, not server faults -> 409.
-                    return self._json(200, dc.start_driver(collab, self.server.home, max_rounds=mr, by="dashboard-web"))  # type: ignore[attr-defined]
+                    return self._json(
+                        200, dc.start_driver(collab, self.server.home, max_rounds=mr, by="dashboard-web")
+                    )  # type: ignore[attr-defined]
                 except cc.CollabError as e:
                     return self._json(409, {"error": str(e)})
         except hc.HandoffNotFound as e:
@@ -206,8 +213,8 @@ class _Handler(BaseHTTPRequestHandler):
 def serve(collab, home=None, port: int = _DEFAULT_PORT) -> int:
     """Start the local dashboard server (blocking). Ctrl-C to stop."""
     httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-    httpd.collab = str(collab)      # type: ignore[attr-defined]
-    httpd.home = home               # type: ignore[attr-defined]
+    httpd.collab = str(collab)  # type: ignore[attr-defined]
+    httpd.home = home  # type: ignore[attr-defined]
     httpd.token = secrets.token_urlsafe(16)  # type: ignore[attr-defined]
     url = f"http://127.0.0.1:{port}/"
     print(f"[dashboard] serving {Path(str(collab)).name} at {url}", flush=True)
@@ -1121,7 +1128,7 @@ function syncTurns(s){
   $("btnTurns").disabled=!s.status;
 }
 function setTurns(){ const v=Number($("maxturns").value);
-  if(!Number.isInteger(v)||v<1||v>50){ toast("cap must be an integer 1–50","err"); return; }
+  if(!Number.isInteger(v)||v<1||v>50){ toast("cap must be an integer 1-50","err"); return; }
   ctl("max-turns",{n:v});   // ctl handles token/JSON/toast/refresh
 }
 

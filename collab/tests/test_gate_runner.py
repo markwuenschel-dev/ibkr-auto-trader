@@ -20,7 +20,6 @@ if str(_LIB) not in sys.path:
 
 import gate_runner as gr  # noqa: E402
 
-
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -61,19 +60,41 @@ def _tiny_passing_test(tmp_path: Path) -> Path:
 
 
 def test_all_pass_returns_passed_and_exit_zero(tmp_path):
-    artifact = _write_json(tmp_path / "artifact.json",
-                           {"id": "A1", "kind": "widget", "payload": {"x": 1}})
+    artifact = _write_json(tmp_path / "artifact.json", {"id": "A1", "kind": "widget", "payload": {"x": 1}})
     tiny = _tiny_passing_test(tmp_path)
-    ruleset = _write_json(tmp_path / "rs.json", {
-        "name": "t", "version": "1",
-        "tiers": [
-            {"tier": 1, "name": "contract", "checks": [
-                {"name": "fields", "kind": "required_fields", "severity": "blocking",
-                 "params": {"path": "{artifact}", "fields": ["id", "kind"]}}]},
-            {"tier": 3, "name": "oracle", "checks": [
-                {"name": "tests", "kind": "pytest", "severity": "blocking",
-                 "params": {"path": str(tiny)}}]},
-        ]})
+    ruleset = _write_json(
+        tmp_path / "rs.json",
+        {
+            "name": "t",
+            "version": "1",
+            "tiers": [
+                {
+                    "tier": 1,
+                    "name": "contract",
+                    "checks": [
+                        {
+                            "name": "fields",
+                            "kind": "required_fields",
+                            "severity": "blocking",
+                            "params": {"path": "{artifact}", "fields": ["id", "kind"]},
+                        }
+                    ],
+                },
+                {
+                    "tier": 3,
+                    "name": "oracle",
+                    "checks": [
+                        {
+                            "name": "tests",
+                            "kind": "pytest",
+                            "severity": "blocking",
+                            "params": {"path": str(tiny)},
+                        }
+                    ],
+                },
+            ],
+        },
+    )
     log = tmp_path / "trace.jsonl"
 
     out = gr.run_gates(str(artifact), str(ruleset), log_path=str(log))
@@ -95,15 +116,37 @@ def test_l1_failure_early_exits_before_l3(tmp_path):
     # artifact is missing "payload" -> the L1 required_fields check fails (blocking).
     artifact = _write_json(tmp_path / "artifact.json", {"id": "A1", "kind": "widget"})
     tiny = _tiny_passing_test(tmp_path)
-    ruleset = _write_json(tmp_path / "rs.json", {
-        "tiers": [
-            {"tier": 1, "name": "contract", "checks": [
-                {"name": "L1-fields", "kind": "required_fields", "severity": "blocking",
-                 "params": {"path": "{artifact}", "fields": ["id", "kind", "payload"]}}]},
-            {"tier": 3, "name": "oracle", "checks": [
-                {"name": "L3-tests", "kind": "pytest", "severity": "blocking",
-                 "params": {"path": str(tiny)}}]},
-        ]})
+    ruleset = _write_json(
+        tmp_path / "rs.json",
+        {
+            "tiers": [
+                {
+                    "tier": 1,
+                    "name": "contract",
+                    "checks": [
+                        {
+                            "name": "L1-fields",
+                            "kind": "required_fields",
+                            "severity": "blocking",
+                            "params": {"path": "{artifact}", "fields": ["id", "kind", "payload"]},
+                        }
+                    ],
+                },
+                {
+                    "tier": 3,
+                    "name": "oracle",
+                    "checks": [
+                        {
+                            "name": "L3-tests",
+                            "kind": "pytest",
+                            "severity": "blocking",
+                            "params": {"path": str(tiny)},
+                        }
+                    ],
+                },
+            ]
+        },
+    )
     log = tmp_path / "trace.jsonl"
 
     out = gr.run_gates(str(artifact), str(ruleset), log_path=str(log))
@@ -132,18 +175,49 @@ def test_early_exit_respects_ascending_tier_order(tmp_path):
     missing = tmp_path / "nope.json"  # deliberately absent
     # Tiers are listed OUT of order (3, 1, 2). The runner must sort ascending, so tier 1 runs
     # first, fails (file_exists on a missing file), and tiers 2 and 3 never run.
-    ruleset = _write_json(tmp_path / "rs.json", {
-        "tiers": [
-            {"tier": 3, "name": "third", "checks": [
-                {"name": "T3", "kind": "file_exists", "severity": "blocking",
-                 "params": {"path": str(artifact)}}]},
-            {"tier": 1, "name": "first", "checks": [
-                {"name": "T1", "kind": "file_exists", "severity": "blocking",
-                 "params": {"path": str(missing)}}]},
-            {"tier": 2, "name": "second", "checks": [
-                {"name": "T2", "kind": "file_exists", "severity": "blocking",
-                 "params": {"path": str(artifact)}}]},
-        ]})
+    ruleset = _write_json(
+        tmp_path / "rs.json",
+        {
+            "tiers": [
+                {
+                    "tier": 3,
+                    "name": "third",
+                    "checks": [
+                        {
+                            "name": "T3",
+                            "kind": "file_exists",
+                            "severity": "blocking",
+                            "params": {"path": str(artifact)},
+                        }
+                    ],
+                },
+                {
+                    "tier": 1,
+                    "name": "first",
+                    "checks": [
+                        {
+                            "name": "T1",
+                            "kind": "file_exists",
+                            "severity": "blocking",
+                            "params": {"path": str(missing)},
+                        }
+                    ],
+                },
+                {
+                    "tier": 2,
+                    "name": "second",
+                    "checks": [
+                        {
+                            "name": "T2",
+                            "kind": "file_exists",
+                            "severity": "blocking",
+                            "params": {"path": str(artifact)},
+                        }
+                    ],
+                },
+            ]
+        },
+    )
     log = tmp_path / "trace.jsonl"
 
     out = gr.run_gates(str(artifact), str(ruleset), log_path=str(log))
@@ -159,10 +233,24 @@ def test_early_exit_respects_ascending_tier_order(tmp_path):
 
 
 def test_ruleset_hash_is_stable_and_content_addressed(tmp_path):
-    body = {"name": "rs", "version": "1", "tiers": [
-        {"tier": 1, "name": "c", "checks": [
-            {"name": "f", "kind": "file_exists", "severity": "advisory",
-             "params": {"path": "{artifact}"}}]}]}
+    body = {
+        "name": "rs",
+        "version": "1",
+        "tiers": [
+            {
+                "tier": 1,
+                "name": "c",
+                "checks": [
+                    {
+                        "name": "f",
+                        "kind": "file_exists",
+                        "severity": "advisory",
+                        "params": {"path": "{artifact}"},
+                    }
+                ],
+            }
+        ],
+    }
     r1 = _write_json(tmp_path / "a.json", body)
     r2 = _write_json(tmp_path / "b.json", body)  # identical content, different filename
     artifact = _write_json(tmp_path / "artifact.json", {"id": "A1"})
@@ -183,15 +271,31 @@ def test_ruleset_hash_is_stable_and_content_addressed(tmp_path):
 
 def test_per_check_jsonl_events_are_emitted_and_parseable(tmp_path):
     artifact = _write_json(tmp_path / "artifact.json", {"id": "A1", "kind": "w"})
-    ruleset = _write_json(tmp_path / "rs.json", {
-        "tiers": [
-            {"tier": 1, "name": "c", "checks": [
-                {"name": "chk-valid", "kind": "json_valid", "severity": "blocking",
-                 "params": {"path": "{artifact}"}},
-                {"name": "chk-fields", "kind": "required_fields", "severity": "advisory",
-                 "params": {"path": "{artifact}", "fields": ["id"]}},
-            ]},
-        ]})
+    ruleset = _write_json(
+        tmp_path / "rs.json",
+        {
+            "tiers": [
+                {
+                    "tier": 1,
+                    "name": "c",
+                    "checks": [
+                        {
+                            "name": "chk-valid",
+                            "kind": "json_valid",
+                            "severity": "blocking",
+                            "params": {"path": "{artifact}"},
+                        },
+                        {
+                            "name": "chk-fields",
+                            "kind": "required_fields",
+                            "severity": "advisory",
+                            "params": {"path": "{artifact}", "fields": ["id"]},
+                        },
+                    ],
+                },
+            ]
+        },
+    )
     log = tmp_path / "trace.jsonl"
 
     out = gr.run_gates(str(artifact), str(ruleset), log_path=str(log))
@@ -236,13 +340,34 @@ def _src_tree(tmp_path: Path) -> Path:
 
 def _src_ruleset(tmp_path: Path, base: Path, *, extra_tier=False) -> Path:
     tiers = [
-        {"tier": 1, "name": "src", "checks": [
-            {"name": "src==tested", "kind": "source_consistency", "severity": "blocking",
-             "params": {"manifest": "{artifact}", "base": str(base)}}]}]
+        {
+            "tier": 1,
+            "name": "src",
+            "checks": [
+                {
+                    "name": "src==tested",
+                    "kind": "source_consistency",
+                    "severity": "blocking",
+                    "params": {"manifest": "{artifact}", "base": str(base)},
+                }
+            ],
+        }
+    ]
     if extra_tier:
-        tiers.append({"tier": 3, "name": "later", "checks": [
-            {"name": "never-runs", "kind": "file_exists", "severity": "blocking",
-             "params": {"path": str(base)}}]})
+        tiers.append(
+            {
+                "tier": 3,
+                "name": "later",
+                "checks": [
+                    {
+                        "name": "never-runs",
+                        "kind": "file_exists",
+                        "severity": "blocking",
+                        "params": {"path": str(base)},
+                    }
+                ],
+            }
+        )
     return _write_json(tmp_path / "rs.json", {"tiers": tiers})
 
 
@@ -258,8 +383,7 @@ def test_source_manifest_is_deterministic_and_relative(tmp_path):
 def test_source_consistency_passes_when_identical(tmp_path):
     base = _src_tree(tmp_path)
     manifest = _write_json(tmp_path / "m.json", gr.source_manifest(["pkg/*.py"], base))
-    out = gr.run_gates(str(manifest), str(_src_ruleset(tmp_path, base)),
-                       log_path=str(tmp_path / "t.jsonl"))
+    out = gr.run_gates(str(manifest), str(_src_ruleset(tmp_path, base)), log_path=str(tmp_path / "t.jsonl"))
     assert out["passed"] is True
 
 
@@ -268,8 +392,7 @@ def test_source_consistency_blocks_on_one_byte_drift(tmp_path):
     manifest = _write_json(tmp_path / "m.json", gr.source_manifest(["pkg/*.py"], base))
     (base / "pkg" / "a.py").write_text("print('a')  # changed\n", encoding="utf-8")  # drift AFTER capture
     log = tmp_path / "t.jsonl"
-    out = gr.run_gates(str(manifest), str(_src_ruleset(tmp_path, base, extra_tier=True)),
-                       log_path=str(log))
+    out = gr.run_gates(str(manifest), str(_src_ruleset(tmp_path, base, extra_tier=True)), log_path=str(log))
     assert out["passed"] is False
     assert out["first_failing_tier"] == 1
     assert "never-runs" not in _emitted_check_names(log)  # fail-closed: later tier skipped
@@ -279,16 +402,16 @@ def test_source_consistency_fails_on_missing_file(tmp_path):
     base = _src_tree(tmp_path)
     manifest = _write_json(tmp_path / "m.json", gr.source_manifest(["pkg/*.py"], base))
     (base / "pkg" / "b.py").unlink()  # attested file deleted
-    out = gr.run_gates(str(manifest), str(_src_ruleset(tmp_path, base)),
-                       log_path=str(tmp_path / "t.jsonl"))
+    out = gr.run_gates(str(manifest), str(_src_ruleset(tmp_path, base)), log_path=str(tmp_path / "t.jsonl"))
     assert out["passed"] is False
 
 
 def test_source_consistency_fails_on_empty_manifest(tmp_path):
     # An empty manifest attests nothing -> must fail closed, never silently pass.
     manifest = _write_json(tmp_path / "m.json", {})
-    out = gr.run_gates(str(manifest), str(_src_ruleset(tmp_path, tmp_path)),
-                       log_path=str(tmp_path / "t.jsonl"))
+    out = gr.run_gates(
+        str(manifest), str(_src_ruleset(tmp_path, tmp_path)), log_path=str(tmp_path / "t.jsonl")
+    )
     assert out["passed"] is False
 
 
@@ -296,15 +419,12 @@ def test_source_consistency_refuses_escaping_path(tmp_path):
     # A manifest whose key escapes base must not hash outside base -> treated as missing (fail).
     base = _src_tree(tmp_path)
     (tmp_path / "secret.py").write_text("SECRET\n", encoding="utf-8")
-    manifest = _write_json(tmp_path / "m.json",
-                           {"../secret.py": gr._sha256_file(tmp_path / "secret.py")})
-    out = gr.run_gates(str(manifest), str(_src_ruleset(tmp_path, base)),
-                       log_path=str(tmp_path / "t.jsonl"))
+    manifest = _write_json(tmp_path / "m.json", {"../secret.py": gr._sha256_file(tmp_path / "secret.py")})
+    out = gr.run_gates(str(manifest), str(_src_ruleset(tmp_path, base)), log_path=str(tmp_path / "t.jsonl"))
     assert out["passed"] is False
 
 
 def test_shipped_autonomous_done_ruleset_loads(tmp_path):
     rs = Path(__file__).resolve().parent.parent / "telemetry" / "rulesets" / "autonomous-done.json"
     loaded = gr._load_ruleset(rs)
-    assert any(c.get("kind") == "source_consistency"
-               for t in loaded["tiers"] for c in t.get("checks", []))
+    assert any(c.get("kind") == "source_consistency" for t in loaded["tiers"] for c in t.get("checks", []))

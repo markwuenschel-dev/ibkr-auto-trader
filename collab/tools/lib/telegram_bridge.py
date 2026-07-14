@@ -51,8 +51,8 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import collab_common as cc  # noqa: E402
-import registry  # noqa: E402
+import collab_common as cc
+import registry
 
 _API = "https://api.telegram.org/bot{token}/{method}"
 _MAX_MSG = 4000  # Telegram hard-limits a message to 4096 chars
@@ -107,7 +107,7 @@ def resolve_chat_id(home):
         return env
     try:
         return _chatlock(home).read_text("utf-8").strip() or None
-    except (FileNotFoundError, OSError):
+    except FileNotFoundError, OSError:
         return None
 
 
@@ -124,8 +124,11 @@ def _learn_chat_id(home, chat_id) -> None:
         return  # a concurrent first-inbound already locked the chat
     # Make trust-on-first-use visible: whoever messages first is locked in. For a public bot
     # (where an attacker could message before you), pin the chat with TELEGRAM_CHAT_ID instead.
-    print(f"telegram-bridge: locked to chat {chat_id} on first inbound (trust-on-first-use); "
-          f"set TELEGRAM_CHAT_ID to pin a specific chat for a public bot.", file=sys.stderr)
+    print(
+        f"telegram-bridge: locked to chat {chat_id} on first inbound (trust-on-first-use); "
+        f"set TELEGRAM_CHAT_ID to pin a specific chat for a public bot.",
+        file=sys.stderr,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -156,7 +159,9 @@ def send_outbox(home, token, chat_id, *, tg=_tg, warned=None) -> list:
             continue
         if not stat.S_ISREG(st.st_mode):  # symlink / FIFO / device / dir — skip, don't read/send
             if p.name not in warned:
-                print(f"telegram-bridge: skipping non-regular outbox file (not sent): {p.name}", file=sys.stderr)
+                print(
+                    f"telegram-bridge: skipping non-regular outbox file (not sent): {p.name}", file=sys.stderr
+                )
                 warned.add(p.name)
             continue
         try:
@@ -183,7 +188,7 @@ def send_outbox(home, token, chat_id, *, tg=_tg, warned=None) -> list:
 def _load_offset(home) -> int:
     try:
         return int(_offsetfile(home).read_text("utf-8").strip())
-    except (FileNotFoundError, OSError, ValueError):
+    except FileNotFoundError, OSError, ValueError:
         return 0
 
 
@@ -205,7 +210,7 @@ def poll_updates(home, token, *, tg=_tg) -> list:
             continue
         try:
             offset = max(offset, int(u.get("update_id")))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue  # malformed update_id (never from the real API) — skip, don't crash the daemon
         msg = u.get("message")
         if not isinstance(msg, dict):
@@ -260,21 +265,24 @@ def _acquire_singleton(home):
     """
     p = Path(home) / "logs" / "telegram-bridge.lock"
     p.parent.mkdir(parents=True, exist_ok=True)
-    f = open(p, "a+")  # append-mode: never truncates a peer's live lock file
+    # The caller must retain this handle for the process lifetime: closing it releases the OS lock.
+    f = open(p, "a+")  # noqa: SIM115
     try:
         if os.name == "nt":
             import msvcrt
+
             f.seek(0)
             msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)  # non-blocking exclusive lock on byte 0
         else:
             import fcntl
+
             fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    except OSError as exc:
         f.close()
         raise cc.CollabError(
             "another telegram-bridge is already running for this $COLLAB_HOME — run ONE bridge per home "
             "(two bridges double-send outbound and race the getUpdates offset)"
-        )
+        ) from exc
     return f
 
 
@@ -290,11 +298,16 @@ def run(home=None, *, once=False, interval=2.0, tg=_tg) -> int:
     except cc.CollabError as e:
         print(f"telegram-bridge: {e}", file=sys.stderr)
         return 1
-    warned_outbox: set = set()  # persist across cycles so a skipped non-regular file warns once, not every tick
+    warned_outbox: set = (
+        set()
+    )  # persist across cycles so a skipped non-regular file warns once, not every tick
     try:
         if not os.environ.get("TELEGRAM_CHAT_ID") and not _chatlock(home).exists():
-            print("telegram-bridge: no chat pinned — trust-on-first-use is active; the FIRST inbound chat "
-                  "will be locked in. Set TELEGRAM_CHAT_ID for a public bot.", file=sys.stderr)
+            print(
+                "telegram-bridge: no chat pinned — trust-on-first-use is active; the FIRST inbound chat "
+                "will be locked in. Set TELEGRAM_CHAT_ID for a public bot.",
+                file=sys.stderr,
+            )
         while True:
             try:
                 send_outbox(home, token, resolve_chat_id(home), tg=tg, warned=warned_outbox)

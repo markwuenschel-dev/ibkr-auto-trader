@@ -20,6 +20,7 @@ import registry  # noqa: E402
 
 def _register_worker(home, name, root):
     import registry as r
+
     r.register(name, root, home=home)
 
 
@@ -72,8 +73,13 @@ class TestRegistry:
         # Lane 1: a Windows os.replace-transient PermissionError is retried, not fatal.
         with tempfile.TemporaryDirectory() as home:
             good = '{"version": 1, "collabs": {}}'
-            with mock.patch("registry.time.sleep"), mock.patch.object(
-                Path, "read_text", side_effect=[PermissionError("locked"), PermissionError("locked"), good]
+            with (
+                mock.patch("registry.time.sleep"),
+                mock.patch.object(
+                    Path,
+                    "read_text",
+                    side_effect=[PermissionError("locked"), PermissionError("locked"), good],
+                ),
             ):
                 data = registry.load(home)
             assert data["collabs"] == {}
@@ -85,8 +91,7 @@ class TestRegistry:
             croots = [tempfile.mkdtemp() for _ in range(n)]
             ctx = mp.get_context("spawn")
             procs = [
-                ctx.Process(target=_register_worker, args=(home, f"proj-{i}", croots[i]))
-                for i in range(n)
+                ctx.Process(target=_register_worker, args=(home, f"proj-{i}", croots[i])) for i in range(n)
             ]
             for p in procs:
                 p.start()

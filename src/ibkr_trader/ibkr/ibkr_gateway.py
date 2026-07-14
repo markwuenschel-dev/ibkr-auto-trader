@@ -45,7 +45,7 @@ def _to_decimal(raw: object) -> Decimal | None:
         return None
     try:
         return Decimal(str(raw))
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
 
 
@@ -197,9 +197,7 @@ class IbkrAccountGateway(_BaseAccountGateway):
         """
         await self._warm_account_updates()
         account = self._account or ""
-        portfolio_items = [
-            item for item in self._ib.portfolio(account) if int(item.position) != 0
-        ]
+        portfolio_items = [item for item in self._ib.portfolio(account) if int(item.position) != 0]
         portfolio_qty = aggregate_signed(
             (item.contract.conId, int(item.position)) for item in portfolio_items
         )

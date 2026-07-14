@@ -31,8 +31,11 @@ _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
 def _verdict(conditions: list[dict]) -> dict:
     satisfied = all(c["status"] == "pass" for c in conditions)
     pre = json.dumps(conditions, sort_keys=True, separators=(",", ":"))
-    return {"satisfied": satisfied, "conditions": conditions,
-            "hash": hashlib.sha256(pre.encode("utf-8")).hexdigest()}
+    return {
+        "satisfied": satisfied,
+        "conditions": conditions,
+        "hash": hashlib.sha256(pre.encode("utf-8")).hexdigest(),
+    }
 
 
 def _fresh_and_not_scratchpad(ledger: dict) -> tuple[bool, str]:
@@ -47,7 +50,7 @@ def _fresh_and_not_scratchpad(ledger: dict) -> tuple[bool, str]:
         return False, f"source_base under a scratchpad dir (throwaway evidence): {base_raw}"
     try:
         ledger_epoch = calendar.timegm(time.strptime(ledger.get("generated_ts", ""), _TS_FMT))
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return False, "unparseable ledger timestamp"
     newest = 0.0
     for rel in manifest:
@@ -85,7 +88,7 @@ def _reviewer_preflight_ok(ledger: dict, reviewer_seat: str) -> tuple[bool, str]
     root = pre.get("repo_root")
     try:
         root_res = Path(root).resolve() if root else None
-    except (OSError, ValueError):
+    except OSError, ValueError:
         root_res = None
     if root_res is None:
         return False, "no repo_root to bound inspected files"
@@ -94,15 +97,23 @@ def _reviewer_preflight_ok(ledger: dict, reviewer_seat: str) -> tuple[bool, str]
             return False, f"inspected path not relative: {f!r}"
         try:
             res = (root_res / f).resolve()
-        except (OSError, ValueError):
+        except OSError, ValueError:
             return False, f"inspected path unresolvable: {f!r}"
         if root_res != res and root_res not in res.parents:  # escapes repo root — refuse
             return False, f"inspected path escapes repo root: {f!r}"
     return True, f"reviewer {reviewer_seat!r} proved repo awareness ({len(files)} inspected files)"
 
 
-def evaluate(collab, hid: str, *, seats: dict, reviewer_seat: str, builder_seat: str,
-             lanes_cfg: dict | None = None, candidate_id: str | None = None) -> dict:
+def evaluate(
+    collab,
+    hid: str,
+    *,
+    seats: dict,
+    reviewer_seat: str,
+    builder_seat: str,
+    lanes_cfg: dict | None = None,
+    candidate_id: str | None = None,
+) -> dict:
     """Return ``{"satisfied": bool, "conditions": [{id,name,status,detail}...], "hash": sha256}``.
 
     Pure — never mutates handoff state. ``reviewer_seat`` is the seat proposing the sign-off; ``builder_seat``
@@ -123,13 +134,23 @@ def evaluate(collab, hid: str, *, seats: dict, reviewer_seat: str, builder_seat:
     state = hc.state_of(collab, hid)
 
     # 1 — builder implementation evidence
-    _c(1, "builder-evidence", ledger is not None and bool((ledger or {}).get("source_manifest")),
-       "ledger + non-empty source manifest present" if ledger else "no verification ledger")
+    _c(
+        1,
+        "builder-evidence",
+        ledger is not None and bool((ledger or {}).get("source_manifest")),
+        "ledger + non-empty source manifest present" if ledger else "no verification ledger",
+    )
 
     if ledger is None:  # nothing to attest against — conditions 2..8 cannot hold
-        for cid, name in [(2, "independent-approver"), (3, "lanes-ran"), (4, "blockers-fixed"),
-                          (5, "blocker-regressions"), (6, "residuals-explicit"),
-                          (7, "source==tested"), (8, "no-stale-evidence")]:
+        for cid, name in [
+            (2, "independent-approver"),
+            (3, "lanes-ran"),
+            (4, "blockers-fixed"),
+            (5, "blocker-regressions"),
+            (6, "residuals-explicit"),
+            (7, "source==tested"),
+            (8, "no-stale-evidence"),
+        ]:
             _c(cid, name, False, "no verification ledger")
         _c(9, "approval-recorded", bool(rseat), "reviewer seat present" if rseat else "no reviewer seat")
         _c(10, "state-machine-safety", state in ("pending", "claimed"), f"state={state}")
@@ -141,9 +162,18 @@ def evaluate(collab, hid: str, *, seats: dict, reviewer_seat: str, builder_seat:
     l_builder = (ledger.get("builder_seat") or "").strip().casefold()
 
     # 2 — independent approver (no self-approval)
-    _c(2, "independent-approver",
-       bool(rseat) and bool(bseat) and rseat != bseat and l_reviewer and l_builder and l_reviewer != l_builder,
-       f"reviewer={reviewer_seat!r} builder={builder_seat!r} ledger(reviewer={l_reviewer!r},builder={l_builder!r})")
+    _c(
+        2,
+        "independent-approver",
+        bool(rseat)
+        and bool(bseat)
+        and rseat != bseat
+        and l_reviewer
+        and l_builder
+        and l_reviewer != l_builder,
+        f"reviewer={reviewer_seat!r} builder={builder_seat!r} "
+        f"ledger(reviewer={l_reviewer!r},builder={l_builder!r})",
+    )
 
     # 3 — every pass in the immutable resolved plan ran.  A v2 ledger owns
     # its plan, so a later config edit cannot change what this candidate had to
@@ -151,8 +181,12 @@ def evaluate(collab, hid: str, *, seats: dict, reviewer_seat: str, builder_seat:
     required = set(lanes.ledger_required_passes(ledger, cfg))
     ran = lanes.ledger_ran_passes(ledger)
     complete = not bool(ledger.get("incomplete")) and not bool(ledger.get("tool_error"))
-    _c(3, "lanes-ran", required <= ran and complete,
-       f"required={sorted(required)} ran={sorted(ran)} complete={complete}")
+    _c(
+        3,
+        "lanes-ran",
+        required <= ran and complete,
+        f"required={sorted(required)} ran={sorted(ran)} complete={complete}",
+    )
 
     # 4 — every confirmed blocker fixed
     unfixed = [b.get("id") for b in blockers if not b.get("fixed")]
@@ -161,12 +195,20 @@ def evaluate(collab, hid: str, *, seats: dict, reviewer_seat: str, builder_seat:
     # 5 — every blocker has a regression AND the recorded test run passed
     tests_passed = (ledger.get("tests") or {}).get("passed") is True
     missing_reg = [b.get("id") for b in blockers if not b.get("regression_test")]
-    _c(5, "blocker-regressions", not missing_reg and tests_passed,
-       f"tests_passed={tests_passed} missing_regressions={missing_reg}")
+    _c(
+        5,
+        "blocker-regressions",
+        not missing_reg and tests_passed,
+        f"tests_passed={tests_passed} missing_regressions={missing_reg}",
+    )
 
     # 6 — accepted residuals explicit
-    _c(6, "residuals-explicit", isinstance(ledger.get("accepted_residuals"), list),
-       "accepted_residuals list present")
+    _c(
+        6,
+        "residuals-explicit",
+        isinstance(ledger.get("accepted_residuals"), list),
+        "accepted_residuals list present",
+    )
 
     # 7 — source == tested
     ok7, detail7 = gr.verify_manifest(ledger.get("source_manifest") or {}, ledger.get("source_base"))

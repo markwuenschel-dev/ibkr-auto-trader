@@ -23,6 +23,7 @@ BUILDER seat on ANY model (not just Claude) can implement a handoff and run the 
   --max-steps <n>     max tool round-trips before we force a final answer (default 50)
   --max-bytes <n>     per read_file / per search-hit byte cap (default 100000)
 """
+
 import argparse
 import json
 import os
@@ -34,8 +35,20 @@ import urllib.request
 from pathlib import Path
 
 # Directories that are never worth serving to a code reviewer — noise, vendored, or VCS internals.
-_SKIP_DIRS = {".git", "__pycache__", ".venv", "venv", "node_modules", ".mypy_cache", ".pytest_cache",
-             ".ruff_cache", "dist", "build", ".idea", ".vscode"}
+_SKIP_DIRS = {
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "dist",
+    "build",
+    ".idea",
+    ".vscode",
+}
 _TEXT_SNIFF_BYTES = 2048  # read this many bytes to decide if a file is text (NUL byte => binary)
 
 
@@ -54,13 +67,14 @@ def _load_dotenv() -> None:
         key, _, val = line.partition("=")
         key = key.strip()
         if key.startswith("export "):
-            key = key[len("export "):].strip()
+            key = key[len("export ") :].strip()
         os.environ.setdefault(key, val.strip().strip('"').strip("'"))
 
 
 # --------------------------------------------------------------------------- #
 # filesystem tools — every path is resolved and CONTAINED within repo_root
 # --------------------------------------------------------------------------- #
+
 
 def _safe_path(root: Path, rel: str) -> Path:
     """Resolve ``rel`` under ``root`` and refuse to leave it. Guards against ``..``, absolute paths, and
@@ -96,8 +110,9 @@ def _tool_list_dir(root: Path, path: str = ".") -> str:
     return header + "\n" + "\n".join(entries) if entries else header + "\n(empty)"
 
 
-def _tool_read_file(root: Path, path: str, start_line: int = 1, max_lines: int = 600,
-                    max_bytes: int = 100_000) -> str:
+def _tool_read_file(
+    root: Path, path: str, start_line: int = 1, max_lines: int = 600, max_bytes: int = 100_000
+) -> str:
     p = _safe_path(root, path)
     if not p.is_file():
         return f"error: {path!r} is not a file"
@@ -112,18 +127,19 @@ def _tool_read_file(root: Path, path: str, start_line: int = 1, max_lines: int =
     end = start + max(1, int(max_lines or 600)) - 1
     out, size = [], 0
     for i in range(start, min(end, len(lines)) + 1):
-        row = f"{i:>6}\t{lines[i-1]}"
+        row = f"{i:>6}\t{lines[i - 1]}"
         size += len(row) + 1
         if size > max_bytes:
             out.append(f"… [truncated at {max_bytes} bytes; call read_file with start_line={i} for more]")
             break
         out.append(row)
-    tail = "" if end >= len(lines) else f"\n… [{len(lines)-end} more lines below]"
+    tail = "" if end >= len(lines) else f"\n… [{len(lines) - end} more lines below]"
     return f"{path} (lines {start}-{min(end, len(lines))} of {len(lines)}):\n" + "\n".join(out) + tail
 
 
-def _tool_search(root: Path, query: str, glob: str = "**/*.py", max_results: int = 60,
-                 max_bytes: int = 100_000) -> str:
+def _tool_search(
+    root: Path, query: str, glob: str = "**/*.py", max_results: int = 60, max_bytes: int = 100_000
+) -> str:
     if not query:
         return "error: empty query"
     root_real = root.resolve()
@@ -180,8 +196,9 @@ def _tool_run_command(root: Path, command: str, max_bytes: int, timeout: float) 
     if argv[0] not in _RUN_ALLOW:
         return f"error: command {argv[0]!r} not allowed (allowed: {sorted(_RUN_ALLOW)})"
     try:
-        proc = subprocess.run(argv, cwd=str(root), capture_output=True, text=True,
-                              timeout=timeout, shell=False)
+        proc = subprocess.run(
+            argv, cwd=str(root), capture_output=True, text=True, timeout=timeout, shell=False
+        )
     except subprocess.TimeoutExpired:
         return f"error: {command!r} timed out after {timeout:.0f}s"
     except (OSError, subprocess.SubprocessError) as e:
@@ -191,47 +208,108 @@ def _tool_run_command(root: Path, command: str, max_bytes: int, timeout: float) 
 
 
 _TOOLS_SPEC = [
-    {"type": "function", "function": {
-        "name": "list_dir",
-        "description": "List files and subdirectories in the repository, relative to the repo root.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string", "description": "Directory relative to repo root; '.' for root."}}}}},
-    {"type": "function", "function": {
-        "name": "read_file",
-        "description": "Read a UTF-8 text file from the repository, returned with 1-based line numbers so you can cite file:line.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string", "description": "File path relative to repo root."},
-            "start_line": {"type": "integer", "description": "First line to read (default 1)."},
-            "max_lines": {"type": "integer", "description": "How many lines (default 600)."}},
-            "required": ["path"]}}},
-    {"type": "function", "function": {
-        "name": "search",
-        "description": "Search the repository for a literal substring (e.g. a function or symbol name); returns file:line matches.",
-        "parameters": {"type": "object", "properties": {
-            "query": {"type": "string", "description": "Literal substring to find."},
-            "glob": {"type": "string", "description": "Path glob to scope the search (default '**/*.py')."},
-            "max_results": {"type": "integer"}},
-            "required": ["query"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dir",
+            "description": "List files and subdirectories in the repository, relative to the repo root.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory relative to repo root; '.' for root.",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": (
+                "Read a UTF-8 text file from the repository, returned with 1-based line "
+                "numbers so you can cite file:line."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path relative to repo root."},
+                    "start_line": {"type": "integer", "description": "First line to read (default 1)."},
+                    "max_lines": {"type": "integer", "description": "How many lines (default 600)."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search",
+            "description": (
+                "Search the repository for a literal substring (e.g. a function or symbol "
+                "name); returns file:line matches."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Literal substring to find."},
+                    "glob": {
+                        "type": "string",
+                        "description": "Path glob to scope the search (default '**/*.py').",
+                    },
+                    "max_results": {"type": "integer"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 
 _RUN_COMMAND_SPEC = [
-    {"type": "function", "function": {
-        "name": "run_command",
-        "description": "Run an allow-listed check command (pytest, ruff, python, uv) in the repo root; returns exit code + output. Use it to run the tests/linters.",
-        "parameters": {"type": "object", "properties": {
-            "command": {"type": "string", "description": "e.g. 'python -m pytest -q' or 'ruff check'."}},
-            "required": ["command"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": (
+                "Run an allow-listed check command (pytest, ruff, python, uv) in the repo "
+                "root; returns exit code + output. Use it to run the tests/linters."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "e.g. 'python -m pytest -q' or 'ruff check'.",
+                    }
+                },
+                "required": ["command"],
+            },
+        },
+    },
 ]
 
 _WRITE_FILE_SPEC = [
-    {"type": "function", "function": {
-        "name": "write_file",
-        "description": "Create or overwrite a UTF-8 text file in the repository (parent dirs auto-created). Provide the FULL new file contents.",
-        "parameters": {"type": "object", "properties": {
-            "path": {"type": "string", "description": "File path relative to repo root."},
-            "content": {"type": "string", "description": "The full file contents to write."}},
-            "required": ["path", "content"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": (
+                "Create or overwrite a UTF-8 text file in the repository (parent dirs "
+                "auto-created). Provide the FULL new file contents."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path relative to repo root."},
+                    "content": {"type": "string", "description": "The full file contents to write."},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
 ]
 
 # A builder (--write) gets both write_file + run_command; a read_test lane (--run-checks) gets
@@ -257,11 +335,13 @@ def _dispatch_tool(root: Path, name: str, args: dict, max_bytes: int, run_timeou
         if name == "list_dir":
             return _tool_list_dir(root, args.get("path", "."))
         if name == "read_file":
-            return _tool_read_file(root, args["path"], args.get("start_line", 1),
-                                   args.get("max_lines", 600), max_bytes)
+            return _tool_read_file(
+                root, args["path"], args.get("start_line", 1), args.get("max_lines", 600), max_bytes
+            )
         if name == "search":
-            return _tool_search(root, args["query"], args.get("glob", "**/*.py"),
-                                args.get("max_results", 60), max_bytes)
+            return _tool_search(
+                root, args["query"], args.get("glob", "**/*.py"), args.get("max_results", 60), max_bytes
+            )
         if name == "write_file":
             return _tool_write_file(root, args["path"], args.get("content", ""))
         if name == "run_command":
@@ -275,10 +355,13 @@ def _dispatch_tool(root: Path, name: str, args: dict, max_bytes: int, run_timeou
 # HTTP + agentic loop
 # --------------------------------------------------------------------------- #
 
+
 def _post_json(url: str, key: str, payload: dict, timeout: float) -> dict:
     req = urllib.request.Request(
-        url, data=json.dumps(payload).encode(),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        url,
+        data=json.dumps(payload).encode(),
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
 
@@ -301,9 +384,20 @@ _SYSTEM_READTEST_NOTE = (
 )
 
 
-def _run_agentic(base: str, model: str, key: str, prompt: str, root: Path, *,
-                 timeout: float, max_steps: int, max_bytes: int,
-                 tools_spec=None, system_note: str = _SYSTEM_TOOL_NOTE, run_timeout: float = 600.0) -> str:
+def _run_agentic(
+    base: str,
+    model: str,
+    key: str,
+    prompt: str,
+    root: Path,
+    *,
+    timeout: float,
+    max_steps: int,
+    max_bytes: int,
+    tools_spec=None,
+    system_note: str = _SYSTEM_TOOL_NOTE,
+    run_timeout: float = 600.0,
+) -> str:
     """Drive a chat/completions tool-calling loop until the model returns a tool-free message."""
     tools_spec = tools_spec if tools_spec is not None else _TOOLS_SPEC
     messages = [
@@ -312,8 +406,12 @@ def _run_agentic(base: str, model: str, key: str, prompt: str, root: Path, *,
     ]
     url = f"{base}/chat/completions"
     for _ in range(max_steps):
-        data = _post_json(url, key, {"model": model, "messages": messages,
-                                     "tools": tools_spec, "tool_choice": "auto"}, timeout)
+        data = _post_json(
+            url,
+            key,
+            {"model": model, "messages": messages, "tools": tools_spec, "tool_choice": "auto"},
+            timeout,
+        )
         msg = data["choices"][0]["message"]
         calls = msg.get("tool_calls") or []
         if not calls:
@@ -327,11 +425,15 @@ def _run_agentic(base: str, model: str, key: str, prompt: str, root: Path, *,
             except json.JSONDecodeError:
                 cargs = {}
             result = _dispatch_tool(root, fn.get("name", ""), cargs, max_bytes, run_timeout)
-            messages.append({"role": "tool", "tool_call_id": call.get("id"),
-                             "content": result[:max_bytes]})
+            messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": result[:max_bytes]})
     # Ran out of steps: ask once more, tools OFF, forcing a final written review from what it has seen.
-    messages.append({"role": "user", "content":
-                     "You have reached the tool-call budget. Stop inspecting and write your final review now."})
+    messages.append(
+        {
+            "role": "user",
+            "content": "You have reached the tool-call budget. Stop inspecting and write "
+            "your final review now.",
+        }
+    )
     data = _post_json(url, key, {"model": model, "messages": messages}, timeout)
     return data["choices"][0]["message"].get("content") or ""
 
@@ -345,7 +447,11 @@ def _extract_responses_text(data: dict) -> str:
         if not isinstance(item, dict):
             continue
         for c in item.get("content") or []:
-            if isinstance(c, dict) and c.get("type") in ("output_text", "text") and isinstance(c.get("text"), str):
+            if (
+                isinstance(c, dict)
+                and c.get("type") in ("output_text", "text")
+                and isinstance(c.get("text"), str)
+            ):
                 chunks.append(c["text"])
     return "".join(chunks)
 
@@ -355,15 +461,31 @@ def _to_responses_tools(chat_tools: list) -> list:
     out = []
     for t in chat_tools:
         f = t.get("function", {})
-        out.append({"type": "function", "name": f.get("name"),
-                    "description": f.get("description", ""), "parameters": f.get("parameters", {})})
+        out.append(
+            {
+                "type": "function",
+                "name": f.get("name"),
+                "description": f.get("description", ""),
+                "parameters": f.get("parameters", {}),
+            }
+        )
     return out
 
 
-def _run_agentic_responses(base: str, model: str, key: str, prompt: str, root: Path, *,
-                           timeout: float, max_steps: int, max_bytes: int,
-                           tools_spec=None, system_note: str = _SYSTEM_TOOL_NOTE,
-                           run_timeout: float = 600.0) -> str:
+def _run_agentic_responses(
+    base: str,
+    model: str,
+    key: str,
+    prompt: str,
+    root: Path,
+    *,
+    timeout: float,
+    max_steps: int,
+    max_bytes: int,
+    tools_spec=None,
+    system_note: str = _SYSTEM_TOOL_NOTE,
+    run_timeout: float = 600.0,
+) -> str:
     """The same agentic tool loop, but over the OpenAI **/responses** API (models that reject
     /chat/completions, e.g. gpt-5.6-terra). Tool calls come back as ``function_call`` output items and are
     answered with ``function_call_output`` input items keyed by ``call_id``; we pass the full growing input
@@ -372,8 +494,18 @@ def _run_agentic_responses(base: str, model: str, key: str, prompt: str, root: P
     url = f"{base}/responses"
     input_items = [{"role": "user", "content": prompt}]
     for _ in range(max_steps):
-        data = _post_json(url, key, {"model": model, "instructions": system_note,
-                                     "input": input_items, "tools": tools, "tool_choice": "auto"}, timeout)
+        data = _post_json(
+            url,
+            key,
+            {
+                "model": model,
+                "instructions": system_note,
+                "input": input_items,
+                "tools": tools,
+                "tool_choice": "auto",
+            },
+            timeout,
+        )
         output = data.get("output") or []
         calls = [it for it in output if isinstance(it, dict) and it.get("type") == "function_call"]
         if not calls:
@@ -383,8 +515,9 @@ def _run_agentic_responses(base: str, model: str, key: str, prompt: str, root: P
         # arrives without its paired reasoning item ("function_call ... was provided without its required
         # 'reasoning' item"). We keep only reasoning + function_call (dropping any assistant message text,
         # which must not sit between the calls and their outputs) so each call's reasoning travels with it.
-        input_items.extend(it for it in output
-                           if isinstance(it, dict) and it.get("type") in ("reasoning", "function_call"))
+        input_items.extend(
+            it for it in output if isinstance(it, dict) and it.get("type") in ("reasoning", "function_call")
+        )
         for call in calls:
             cid = call.get("call_id") or call.get("id")
             try:
@@ -393,8 +526,12 @@ def _run_agentic_responses(base: str, model: str, key: str, prompt: str, root: P
                 cargs = {}
             result = _dispatch_tool(root, call.get("name", ""), cargs, max_bytes, run_timeout)
             input_items.append({"type": "function_call_output", "call_id": cid, "output": result[:max_bytes]})
-    input_items.append({"role": "user", "content":
-                        "You have reached the tool-call budget. Stop and write your final answer now."})
+    input_items.append(
+        {
+            "role": "user",
+            "content": "You have reached the tool-call budget. Stop and write your final answer now.",
+        }
+    )
     data = _post_json(url, key, {"model": model, "instructions": system_note, "input": input_items}, timeout)
     return _extract_responses_text(data)
 
@@ -409,19 +546,38 @@ def main(argv=None) -> int:
     p.add_argument("--base", default=os.environ.get("SEAT_API_BASE", "https://api.openai.com/v1"))
     p.add_argument("--model", default=os.environ.get("SEAT_API_MODEL", "gpt-5.5"))
     p.add_argument("--key-env", default="OPENAI_API_KEY")
-    p.add_argument("--repo-root", required=True, help="repository the model may read (and write with --write)")
+    p.add_argument(
+        "--repo-root", required=True, help="repository the model may read (and write with --write)"
+    )
     p.add_argument("--timeout", type=float, default=float(os.environ.get("SEAT_API_TIMEOUT", "180")))
     p.add_argument("--max-steps", type=int, default=50)
     p.add_argument("--max-bytes", type=int, default=100_000)
-    p.add_argument("--write", action="store_true",
-                   help="enable write_file + run_command (a BUILDER seat); default is read-only")
-    p.add_argument("--run-checks", action="store_true",
-                   help="enable run_command ONLY — allow-listed checks, NO write_file (a read_test "
-                        "breaker/verifier seat). Ignored if --write is also given.")
-    p.add_argument("--run-timeout", type=float, default=600.0,
-                   help="per run_command timeout in seconds (only with --write / --run-checks)")
-    p.add_argument("--api", choices=("auto", "chat", "responses"), default="auto",
-                   help="which OpenAI-shaped API to drive the tool loop over; 'auto' tries chat, falls back to responses on 404")
+    p.add_argument(
+        "--write",
+        action="store_true",
+        help="enable write_file + run_command (a BUILDER seat); default is read-only",
+    )
+    p.add_argument(
+        "--run-checks",
+        action="store_true",
+        help="enable run_command ONLY — allow-listed checks, NO write_file (a read_test "
+        "breaker/verifier seat). Ignored if --write is also given.",
+    )
+    p.add_argument(
+        "--run-timeout",
+        type=float,
+        default=600.0,
+        help="per run_command timeout in seconds (only with --write / --run-checks)",
+    )
+    p.add_argument(
+        "--api",
+        choices=("auto", "chat", "responses"),
+        default="auto",
+        help=(
+            "which OpenAI-shaped API to drive the tool loop over; 'auto' tries chat, "
+            "falls back to responses on 404"
+        ),
+    )
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
 
     key = os.environ.get(args.key_env)
@@ -445,8 +601,14 @@ def main(argv=None) -> int:
         else:
             tools_spec = _TOOLS_SPEC
             system_note = _SYSTEM_TOOL_NOTE
-        kw = dict(timeout=args.timeout, max_steps=args.max_steps, max_bytes=args.max_bytes,
-                  tools_spec=tools_spec, system_note=system_note, run_timeout=args.run_timeout)
+        kw = dict(
+            timeout=args.timeout,
+            max_steps=args.max_steps,
+            max_bytes=args.max_bytes,
+            tools_spec=tools_spec,
+            system_note=system_note,
+            run_timeout=args.run_timeout,
+        )
         if args.api == "responses":
             out = _run_agentic_responses(base, args.model, key, prompt, root, **kw)
         elif args.api == "chat":
@@ -457,7 +619,9 @@ def main(argv=None) -> int:
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", "replace")
                 if e.code == 404:
-                    sys.stderr.write("openai-repo-seat: model rejects /chat/completions; retrying /responses\n")
+                    sys.stderr.write(
+                        "openai-repo-seat: model rejects /chat/completions; retrying /responses\n"
+                    )
                     out = _run_agentic_responses(base, args.model, key, prompt, root, **kw)
                 else:
                     sys.stderr.write(f"api error {e.code}: {body[:500]}\n")

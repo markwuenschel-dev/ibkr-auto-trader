@@ -36,10 +36,11 @@ import os
 import re
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import collab_common as cc  # noqa: E402
+import collab_common as cc
 
 STATES = ("pending", "claimed", "done", "archive")
 _STATE_ORDER = {s: i for i, s in enumerate(STATES)}  # higher = more advanced
@@ -139,10 +140,14 @@ def _reject_unsafe_body(body: str) -> None:
     if _BODY_HEADING_RE.search(body):
         raise cc.CollabError("handoff body may not open a Markdown heading ('#'…); use typed fields")
     if _BODY_DECLARED_RE.search(body):
-        raise cc.CollabError("handoff body may not contain declared-constraint bullets '- [ID]'; use constraints=")
+        raise cc.CollabError(
+            "handoff body may not contain declared-constraint bullets '- [ID]'; use constraints="
+        )
 
 
-def render_handoff(*, to, from_, hid, title, priority, date, status="pending", body="", constraints=None) -> str:
+def render_handoff(
+    *, to, from_, hid, title, priority, date, status="pending", body="", constraints=None
+) -> str:
     """Render a typed handoff artifact (frontmatter + Summary [+ Constraints]). See contracts.py.
 
     Interpolated frontmatter scalars are validated (``_reject_unsafe_scalar``) and the body is
@@ -150,22 +155,29 @@ def render_handoff(*, to, from_, hid, title, priority, date, status="pending", b
     or ``body`` cannot forge frontmatter keys, truncate the block, or fake a Constraints section.
     """
     for _n, _v in (
-        ("to", to), ("from", from_), ("id", hid), ("title", title),
-        ("priority", priority), ("date", date), ("status", status),
+        ("to", to),
+        ("from", from_),
+        ("id", hid),
+        ("title", title),
+        ("priority", priority),
+        ("date", date),
+        ("status", status),
     ):
         _reject_unsafe_scalar(_n, _v)
     _reject_unsafe_body(body)
-    fm = "\n".join([
-        "---",
-        f"to: {to}",
-        f"from: {from_}",
-        f"id: {hid}",
-        f"title: {title}",
-        f"priority: {priority}",
-        f"date: {date}",
-        f"status: {status}",
-        "---",
-    ])
+    fm = "\n".join(
+        [
+            "---",
+            f"to: {to}",
+            f"from: {from_}",
+            f"id: {hid}",
+            f"title: {title}",
+            f"priority: {priority}",
+            f"date: {date}",
+            f"status: {status}",
+            "---",
+        ]
+    )
     parts = [fm, "", f"## Summary\n\n{(body.strip() or title)}\n"]
     if constraints:
         lines = "\n".join(f"- [{cid}] {txt}" for cid, txt in constraints)
@@ -226,8 +238,14 @@ def create(
                 # id is ours. Write the slugged content file (also atomic, unique id => no clash).
                 final = _state_dir(collab, "pending") / f"{hid}-{slug}.md"
                 content = render_handoff(
-                    to=to, from_=from_, hid=f"{hid}-{slug}", title=title,
-                    priority=priority, date=date, body=body, constraints=constraints,
+                    to=to,
+                    from_=from_,
+                    hid=f"{hid}-{slug}",
+                    title=title,
+                    priority=priority,
+                    date=date,
+                    body=body,
+                    constraints=constraints,
                 )
                 cc.exclusive_create(final, content)
                 committed = {"id": hid, "slug": slug, "path": str(final), "state": "pending"}
@@ -286,10 +304,8 @@ def _reconcile(collab, hid):
     best_state, best_path = matches[-1]
     for s, p in matches[:-1]:
         if _same_file(p, best_path):
-            try:
+            with suppress(FileNotFoundError):
                 os.unlink(p)  # heal: drop the stale, less-advanced link
-            except FileNotFoundError:
-                pass
         else:
             raise cc.CollabError(
                 f"handoff {hid} present in {s!r} and {best_state!r} as DIFFERENT files (corruption)"
@@ -312,21 +328,17 @@ def _transition(collab, hid, action) -> dict:
     try:
         os.link(src, dst)
     except FileNotFoundError:
-        raise HandoffConflict(f"handoff {hid} already moved (lost the {action} race)")
+        raise HandoffConflict(f"handoff {hid} already moved (lost the {action} race)") from None
     except FileExistsError:
         # dst already exists. If it's the SAME file as src (a crashed-winner residual, or a
         # concurrent loser whose winner linked the same inode), complete the move by cleaning up
         # src — but do NOT become a winner. This preserves single-winner AND heals the residual.
         if _same_file(src, dst):
-            try:
+            with suppress(FileNotFoundError):
                 os.unlink(src)
-            except FileNotFoundError:
-                pass
-        raise HandoffConflict(f"handoff {hid} already moved (lost the {action} race)")
-    try:
+        raise HandoffConflict(f"handoff {hid} already moved (lost the {action} race)") from None
+    with suppress(FileNotFoundError):
         os.unlink(src)
-    except FileNotFoundError:
-        pass
     return {"id": hid, "from": frm, "to": to, "path": str(dst)}
 
 
@@ -448,8 +460,9 @@ class ActiveHandoffLease:
     ``now`` (a ``time.time``-style float clock) is injectable so staleness is deterministic in tests.
     """
 
-    def __init__(self, collab, run_uid: str, *, pid: int | None = None, ttl: float = _LEASE_TTL_S,
-                 now=time.time) -> None:
+    def __init__(
+        self, collab, run_uid: str, *, pid: int | None = None, ttl: float = _LEASE_TTL_S, now=time.time
+    ) -> None:
         self._collab = Path(collab)
         self._run_uid = str(run_uid)
         self._pid = int(pid) if pid is not None else os.getpid()
@@ -512,10 +525,8 @@ class ActiveHandoffLease:
         with cc.collab_lock(self._lockdir):
             rec = self._read()
             if rec and rec.get("run_uid") == self._run_uid:
-                try:
+                with suppress(FileNotFoundError):
                     self._path.unlink()
-                except FileNotFoundError:
-                    pass
                 self._audit("release", hid=rec.get("hid"))
                 return True
             return False
@@ -539,7 +550,7 @@ class ActiveHandoffLease:
             data = json.loads(self._path.read_text("utf-8"))
         except FileNotFoundError:
             return None
-        except (OSError, ValueError):
+        except OSError, ValueError:
             # A torn lease cannot be trusted to prove a live holder; treat as reclaimable rather than
             # deadlocking the board forever. safe_write makes this near-impossible in practice.
             return None

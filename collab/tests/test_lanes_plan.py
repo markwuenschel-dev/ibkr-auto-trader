@@ -36,32 +36,54 @@ def _profile(name: str) -> vp.AssessmentProfile:
 
 def _plan(*, high: bool = False) -> vp.VerificationPlan:
     baseline_spec = vp.LaneSpec(
-        id="change-regression", title="Change regression", category="generic", checklist=("probe",),
-        baseline_guardrails=(), high_risk_guardrails=(), always_baseline=True, revision="v2",
+        id="change-regression",
+        title="Change regression",
+        category="generic",
+        checklist=("probe",),
+        baseline_guardrails=(),
+        high_risk_guardrails=(),
+        always_baseline=True,
+        revision="v2",
     )
     baseline = vp.LanePass("baseline", _profile("baseline"), (baseline_spec,), False)
     high_pass = None
     guardrails = ()
     if high:
         specialist = vp.LaneSpec(
-            id="order-risk-and-idempotency", title="Order", category="trading", checklist=("probe",),
-            baseline_guardrails=(), high_risk_guardrails=("money",), revision="v2",
+            id="order-risk-and-idempotency",
+            title="Order",
+            category="trading",
+            checklist=("probe",),
+            baseline_guardrails=(),
+            high_risk_guardrails=("money",),
+            revision="v2",
         )
         high_pass = vp.LanePass("high-risk-diverse", _profile("high"), (specialist,), True)
         guardrails = ("money",)
     payload = json.dumps({"high": high}, sort_keys=True)
     return vp.VerificationPlan(
-        lane_config_revision="v2", prompt_revision="prompt-v1", assessment_profile_revision="profiles-v1",
-        guardrails=guardrails, baseline=baseline, high_risk=high_pass,
-        identity_payload=payload, identity_digest=f"plan:{'high' if high else 'baseline'}",
+        lane_config_revision="v2",
+        prompt_revision="prompt-v1",
+        assessment_profile_revision="profiles-v1",
+        guardrails=guardrails,
+        baseline=baseline,
+        high_risk=high_pass,
+        identity_payload=payload,
+        identity_digest=f"plan:{'high' if high else 'baseline'}",
     )
 
 
 def _budget(tmp_path):
     return rb.RunBudget(
-        str(tmp_path / "budget"), "001",
-        rb.Limits(max_work_attempts=3, max_verification_passes=6, max_total_model_calls=18,
-                  max_wall_clock_seconds=60.0, max_findings_per_lane=3),
+        str(tmp_path / "budget"),
+        "001",
+        rb.Limits(
+            max_work_attempts=3,
+            max_verification_passes=6,
+            max_total_model_calls=18,
+            max_wall_clock_seconds=60.0,
+            max_findings_per_lane=3,
+        ),
     )
 
 
@@ -82,8 +104,16 @@ def test_resolved_plan_uses_one_batched_verifier_per_pair(tmp_path):
 
     budget = _budget(tmp_path)
     ledger = lanes.run_lanes(
-        collab, "001", seats={}, breaker_seat="unused", verifier_seat="unused", builder_seat="builder",
-        reviewer_seat="reviewer", runner=runner, budget=budget, candidate_id="cand:plan",
+        collab,
+        "001",
+        seats={},
+        breaker_seat="unused",
+        verifier_seat="unused",
+        builder_seat="builder",
+        reviewer_seat="reviewer",
+        runner=runner,
+        budget=budget,
+        candidate_id="cand:plan",
         verification_plan=_plan(high=True),
     )
 
@@ -105,8 +135,15 @@ def test_missing_batch_verdict_is_incomplete_not_a_pass(tmp_path):
         return "VERDICT: CONFIRMED F2 | src/x.py:1 | wrong id"
 
     ledger = lanes.run_lanes(
-        collab, "001", seats={}, breaker_seat="unused", verifier_seat="unused", builder_seat="builder",
-        runner=runner, candidate_id="cand:incomplete", verification_plan=_plan(),
+        collab,
+        "001",
+        seats={},
+        breaker_seat="unused",
+        verifier_seat="unused",
+        builder_seat="builder",
+        runner=runner,
+        candidate_id="cand:incomplete",
+        verification_plan=_plan(),
     )
 
     assert ledger["incomplete"] is True
@@ -124,8 +161,15 @@ def test_batch_protocol_prose_is_incomplete_not_silently_accepted(tmp_path):
         raise AssertionError("malformed no-finding output must not dispatch a verifier")
 
     ledger = lanes.run_lanes(
-        collab, "001", seats={}, breaker_seat="unused", verifier_seat="unused", builder_seat="builder",
-        runner=runner, candidate_id="cand:strict", verification_plan=_plan(),
+        collab,
+        "001",
+        seats={},
+        breaker_seat="unused",
+        verifier_seat="unused",
+        builder_seat="builder",
+        runner=runner,
+        candidate_id="cand:strict",
+        verification_plan=_plan(),
     )
 
     assert ledger["incomplete"] is True
@@ -143,8 +187,15 @@ def test_unavailable_diverse_profile_is_infrastructure_blocked_not_baseline_fall
         return "NO-FINDING"
 
     ledger = lanes.run_lanes(
-        collab, "001", seats={}, breaker_seat="unused", verifier_seat="unused", builder_seat="builder",
-        runner=runner, candidate_id="cand:unavailable", verification_plan=_plan(high=True),
+        collab,
+        "001",
+        seats={},
+        breaker_seat="unused",
+        verifier_seat="unused",
+        builder_seat="builder",
+        runner=runner,
+        candidate_id="cand:unavailable",
+        verification_plan=_plan(high=True),
     )
 
     assert {entry["pass"] for entry in ledger["lanes"]} == {"baseline", "high-risk-diverse"}
@@ -161,8 +212,14 @@ def test_candidate_identity_binds_the_resolved_assurance_plan(tmp_path):
         "reviewer": {"backend": "cli", "cmd": ["reviewer"], "system": "reviewer"},
     }
     common = dict(
-        seats=seats, builder_seat="builder", reviewer_seat="reviewer", source_roots=["src/*.py"],
-        source_base=str(tmp_path), test_path="tests", guardrails=[], builder_output="output",
+        seats=seats,
+        builder_seat="builder",
+        reviewer_seat="reviewer",
+        source_roots=["src/*.py"],
+        source_base=str(tmp_path),
+        test_path="tests",
+        guardrails=[],
+        builder_output="output",
     )
     baseline = ap._compute_candidate(str(tmp_path), "001", verification_plan=_plan(), **common)
     high = ap._compute_candidate(str(tmp_path), "001", verification_plan=_plan(high=True), **common)

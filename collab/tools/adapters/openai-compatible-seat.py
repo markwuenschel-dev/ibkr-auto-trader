@@ -15,9 +15,11 @@ Per-seat config comes from argv (so two seats can use different models); only th
   --timeout <secs>   HTTP timeout (default 120)
 
 Example seats.json cmd (one entry per seat):
-  ["python", "C:\\\\Users\\\\Nalakram\\\\Documents\\\\GitHub\\\\collab-kit\\\\tools\\\\adapters\\\\openai-compatible-seat.py",
+  ["python", "C:\\\\Users\\\\Nalakram\\\\Documents\\\\GitHub\\\\collab-kit\\\\tools\\\\adapters\\\\"
+   "openai-compatible-seat.py",
    "--base", "https://api.x.ai/v1", "--model", "grok-4", "--key-env", "XAI_API_KEY"]
 """
+
 import argparse
 import json
 import os
@@ -48,7 +50,7 @@ def _load_dotenv() -> None:
         key, _, val = line.partition("=")
         key = key.strip()
         if key.startswith("export "):
-            key = key[len("export "):].strip()
+            key = key[len("export ") :].strip()
         os.environ.setdefault(key, val.strip().strip('"').strip("'"))
 
 
@@ -65,8 +67,12 @@ def _post_json(url: str, key: str, payload: dict, timeout: float) -> dict:
 
 def _chat(base: str, model: str, key: str, prompt: str, timeout: float) -> str:
     """Chat Completions API (Grok, Gemini's OpenAI-compat, older OpenAI models, Ollama, ...)."""
-    data = _post_json(f"{base}/chat/completions", key,
-                      {"model": model, "messages": [{"role": "user", "content": prompt}]}, timeout)
+    data = _post_json(
+        f"{base}/chat/completions",
+        key,
+        {"model": model, "messages": [{"role": "user", "content": prompt}]},
+        timeout,
+    )
     return data["choices"][0]["message"]["content"] or ""
 
 
@@ -86,7 +92,11 @@ def _extract_responses_text(data: dict) -> str:
         if not isinstance(item, dict):
             continue
         for c in item.get("content") or []:
-            if isinstance(c, dict) and c.get("type") in ("output_text", "text") and isinstance(c.get("text"), str):
+            if (
+                isinstance(c, dict)
+                and c.get("type") in ("output_text", "text")
+                and isinstance(c.get("text"), str)
+            ):
                 chunks.append(c["text"])
     return "".join(chunks)
 
@@ -105,8 +115,12 @@ def main(argv=None) -> int:
     p.add_argument("--base", default=os.environ.get("SEAT_API_BASE", "https://api.x.ai/v1"))
     p.add_argument("--model", default=os.environ.get("SEAT_API_MODEL", "grok-4"))
     p.add_argument("--key-env", default="SEAT_API_KEY")
-    p.add_argument("--api", choices=("auto", "chat", "responses"), default="auto",
-                   help="which OpenAI-shaped API to call; 'auto' tries chat then falls back to responses on a 404")
+    p.add_argument(
+        "--api",
+        choices=("auto", "chat", "responses"),
+        default="auto",
+        help="which OpenAI-shaped API to call; 'auto' tries chat then falls back to responses on a 404",
+    )
     p.add_argument("--timeout", type=float, default=float(os.environ.get("SEAT_API_TIMEOUT", "120")))
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
 
@@ -128,7 +142,9 @@ def main(argv=None) -> int:
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", "replace")
                 if e.code == 404 and "responses" in body.lower():
-                    sys.stderr.write("openai-compatible-seat: model requires the Responses API; retrying /responses\n")
+                    sys.stderr.write(
+                        "openai-compatible-seat: model requires the Responses API; retrying /responses\n"
+                    )
                     out = _responses(base, args.model, key, prompt, args.timeout)
                 else:
                     sys.stderr.write(f"api error {e.code}: {body[:500]}\n")

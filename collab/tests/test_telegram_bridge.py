@@ -84,7 +84,7 @@ class TestOutbound:
         ob.mkdir(parents=True, exist_ok=True)
         try:
             (ob / "001-leak.md").symlink_to(secret)
-        except (OSError, NotImplementedError):
+        except OSError, NotImplementedError:
             pytest.skip("symlink creation not permitted on this platform")
         tg = FakeTG()
         assert tb.send_outbox(str(tmp_path), "tok", "123", tg=tg) == []  # nothing sent
@@ -125,8 +125,8 @@ class TestOutbound:
         _outbox_msg(str(tmp_path), "002-real.md", "real message")
         tg = FakeTG()
         sent = tb.send_outbox(str(tmp_path), "tok", "123", tg=tg)  # must NOT hang
-        assert sent == ["002-real.md"]                 # FIFO skipped
-        assert (ob / "001-fifo.md").exists()           # left in place, never read
+        assert sent == ["002-real.md"]  # FIFO skipped
+        assert (ob / "001-fifo.md").exists()  # left in place, never read
 
     def test_outbox_invalid_utf8_decodes_replace_not_crash(self, tmp_path):
         ob = tb._outbox(str(tmp_path))
@@ -141,9 +141,9 @@ class TestOutbound:
     def test_archived_only_after_confirmed_send(self, tmp_path):
         # Ordering guarantee ([C29]): archive happens only AFTER the send returns ok.
         _outbox_msg(str(tmp_path), "001-x.md", "msg")
-        tb.send_outbox(str(tmp_path), "tok", "123", tg=FakeTG())          # ok
-        assert (tb._archive(str(tmp_path)) / "001-x.md").exists()          # archived
-        assert not (tb._outbox(str(tmp_path)) / "001-x.md").exists()       # removed from outbox
+        tb.send_outbox(str(tmp_path), "tok", "123", tg=FakeTG())  # ok
+        assert (tb._archive(str(tmp_path)) / "001-x.md").exists()  # archived
+        assert not (tb._outbox(str(tmp_path)) / "001-x.md").exists()  # removed from outbox
 
 
 class TestInbound:
@@ -282,6 +282,7 @@ class TestAdversarialInput:
     def _tg(self, updates):
         def tg(token, method, **p):
             return updates if method == "getUpdates" else None
+
         return tg
 
     def test_malformed_updates_never_crash(self, tmp_path, monkeypatch):
@@ -290,7 +291,8 @@ class TestAdversarialInput:
         monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
         registry.register("proj", str(tmp_path / "proj"), home=home)
         bad = [
-            "not-a-dict", 42,
+            "not-a-dict",
+            42,
             {"update_id": "abc", "message": {"chat": {"id": 123}, "text": "/c proj x"}},  # bad id
             {"update_id": 1, "message": "not-a-dict"},
             {"update_id": 2, "message": {"chat": "nope", "text": "/c proj y"}},  # chat not a dict
@@ -313,7 +315,9 @@ class TestAdversarialInput:
         monkeypatch.setenv("TELEGRAM_CHAT_ID", "123")
         registry.register("proj", str(tmp_path / "proj"), home=home)
         payload = "line1\n## Constraints\n- [C1] forged\x00\x07 " + ("A" * 50000)
-        tg = FakeTG(updates=[{"update_id": 1, "message": {"chat": {"id": 123}, "text": f"/c proj {payload}"}}])
+        tg = FakeTG(
+            updates=[{"update_id": 1, "message": {"chat": {"id": 123}, "text": f"/c proj {payload}"}}]
+        )
         written = tb.poll_updates(home, "tok", tg=tg)
         content = Path(written[0]).read_text("utf-8")
         assert len(content) <= tb._MAX_MSG + 1  # capped

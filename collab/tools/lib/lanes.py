@@ -95,10 +95,7 @@ def required_lanes(guardrails, cfg: dict) -> list[str]:
         # resolved plan.  This branch is solely pre-v2 direct-call compatibility.
         return []
     return [
-        spec.id
-        for spec in specs
-        if spec.always_baseline
-        or bool(set(spec.baseline_guardrails) & selected)
+        spec.id for spec in specs if spec.always_baseline or bool(set(spec.baseline_guardrails) & selected)
     ]
 
 
@@ -191,22 +188,27 @@ def _assert_independent(builder_seat: str, breaker_seat: str, verifier_seat: str
     if "" in trio or len(set(trio)) != 3:
         raise cc.CollabError(
             f"lane independence violated: builder={builder_seat!r} breaker={breaker_seat!r} "
-            f"verifier={verifier_seat!r} must be three distinct non-empty seats (no self-verification)")
+            f"verifier={verifier_seat!r} must be three distinct non-empty seats (no self-verification)"
+        )
 
 
 def _breaker_system(lane: str, seat_system: str | None) -> str:
     base = (seat_system.strip() + "\n\n") if seat_system else ""
-    return (base + f"You are the BREAKER for the '{lane}' adversarial lane. Try to BREAK the change below. "
-            "For each real defect emit one line 'FINDING: <exact code path> -> <concrete trigger: the inputs "
-            "that produce the wrong output/crash>'. An opinion without a concrete reproducing trigger does "
-            "not count. If you find nothing, emit exactly 'NO-FINDING'.")
+    return (
+        base + f"You are the BREAKER for the '{lane}' adversarial lane. Try to BREAK the change below. "
+        "For each real defect emit one line 'FINDING: <exact code path> -> <concrete trigger: the inputs "
+        "that produce the wrong output/crash>'. An opinion without a concrete reproducing trigger does "
+        "not count. If you find nothing, emit exactly 'NO-FINDING'."
+    )
 
 
 def _verifier_system(lane: str, seat_system: str | None) -> str:
     base = (seat_system.strip() + "\n\n") if seat_system else ""
-    return (base + f"You are an INDEPENDENT VERIFIER for the '{lane}' lane. Try to REFUTE the finding below. "
-            "Default to REJECTED. Emit 'VERDICT: CONFIRMED <path> <trigger>' ONLY if you can cite an exact "
-             "code path AND a concrete reproducing trigger; otherwise emit 'VERDICT: REFUTED'.")
+    return (
+        base + f"You are an INDEPENDENT VERIFIER for the '{lane}' lane. Try to REFUTE the finding below. "
+        "Default to REJECTED. Emit 'VERDICT: CONFIRMED <path> <trigger>' ONLY if you can cite an exact "
+        "code path AND a concrete reproducing trigger; otherwise emit 'VERDICT: REFUTED'."
+    )
 
 
 def _batch_breaker_system(lane_pass: vp.LanePass, seat_system: str | None) -> str:
@@ -226,8 +228,7 @@ def _batch_breaker_system(lane_pass: vp.LanePass, seat_system: str | None) -> st
 def _batch_verifier_system(lane_pass: vp.LanePass, seat_system: str | None) -> str:
     base = (seat_system.strip() + "\n\n") if seat_system else ""
     return (
-        base
-        + f"You are the independent VERIFIER for the '{lane_pass.id}' assurance pass. "
+        base + f"You are the independent VERIFIER for the '{lane_pass.id}' assurance pass. "
         "Refute each breaker finding using the repository and allowed tests. For every supplied finding ID, "
         "emit exactly one line: 'VERDICT: CONFIRMED F<n> | <exact code path> | <concrete trigger>' only "
         "when independently reproduced, otherwise 'VERDICT: REFUTED F<n> | <evidence>'. "
@@ -255,13 +256,18 @@ def _parse_batch_findings(raw: str) -> tuple[list[dict], str | None]:
         if not all((path, trigger, impact)):
             bad.append(line[:160])
             continue
-        findings.append({"id": finding_id.upper(), "path": path, "trigger": trigger,
-                         "impact": impact, "description": f"{path} -> {trigger} ({impact})"})
+        findings.append(
+            {
+                "id": finding_id.upper(),
+                "path": path,
+                "trigger": trigger,
+                "impact": impact,
+                "description": f"{path} -> {trigger} ({impact})",
+            }
+        )
     if bad or not findings:
         reason = (
-            "breaker batch protocol malformed"
-            if bad
-            else "breaker emitted neither NO-FINDING nor findings"
+            "breaker batch protocol malformed" if bad else "breaker emitted neither NO-FINDING nor findings"
         )
         return [], reason
     expected_ids = [f"F{i}" for i in range(1, len(findings) + 1)]
@@ -293,8 +299,16 @@ def _parse_batch_verdicts(raw: str, findings: list[dict]) -> tuple[dict[str, dic
     return verdicts, None
 
 
-def _plan_incomplete(lane_pass: vp.LanePass, reason: str, *, findings=None, unverified=None,
-                     overflow: int = 0, breaker_artifact=None, verifier_artifact=None) -> dict:
+def _plan_incomplete(
+    lane_pass: vp.LanePass,
+    reason: str,
+    *,
+    findings=None,
+    unverified=None,
+    overflow: int = 0,
+    breaker_artifact=None,
+    verifier_artifact=None,
+) -> dict:
     findings = findings or []
     unverified = unverified if unverified is not None else findings
     return {
@@ -316,8 +330,16 @@ def _plan_incomplete(lane_pass: vp.LanePass, reason: str, *, findings=None, unve
     }
 
 
-def run_plan_pass(collab, hid: str, lane_pass: vp.LanePass, *, builder_seat: str, runner=ap._cli_runner,
-                  log: str | None = None, budget=None) -> dict:
+def run_plan_pass(
+    collab,
+    hid: str,
+    lane_pass: vp.LanePass,
+    *,
+    builder_seat: str,
+    runner=ap._cli_runner,
+    log: str | None = None,
+    budget=None,
+) -> dict:
     """Run one bounded, pre-resolved breaker→verifier assurance pair."""
     profile = lane_pass.profile
     _assert_independent(builder_seat, profile.breaker_seat, profile.verifier_seat)
@@ -354,22 +376,35 @@ def run_plan_pass(collab, hid: str, lane_pass: vp.LanePass, *, builder_seat: str
     except rb.BudgetExceeded as exc:
         return _plan_incomplete(lane_pass, f"budget:{exc.which}")
     except cc.CollabError as exc:
-        return {**base, "ran": False, "tool_error": {
-            "lane": lane_pass.id, "seat": profile.breaker_seat,
-            "cmd": _cmd_str(profile.breaker_cmd), "error": str(exc)}}
-    breaker_artifact = ap._write_reply(collab, f"{profile.breaker_seat}-breaker-{lane_pass.id}",
-                                       ap._sanitize(braw))
+        return {
+            **base,
+            "ran": False,
+            "tool_error": {
+                "lane": lane_pass.id,
+                "seat": profile.breaker_seat,
+                "cmd": _cmd_str(profile.breaker_cmd),
+                "error": str(exc),
+            },
+        }
+    breaker_artifact = ap._write_reply(
+        collab, f"{profile.breaker_seat}-breaker-{lane_pass.id}", ap._sanitize(braw)
+    )
     findings, finding_error = _parse_batch_findings(braw)
     if finding_error:
-        return _plan_incomplete(lane_pass, finding_error, findings=findings,
-                                overflow=max(0, len(findings) - 3), breaker_artifact=breaker_artifact)
+        return _plan_incomplete(
+            lane_pass,
+            finding_error,
+            findings=findings,
+            overflow=max(0, len(findings) - 3),
+            breaker_artifact=breaker_artifact,
+        )
     if not findings:
         return {**base, "ran": True, "breaker_artifact": breaker_artifact, "verifier_artifact": None}
     if budget is not None:
         split = budget.cap_lane_findings(len(findings))
         if split["overflow"]:
-            unverified = findings[split["verify"]:]
-            findings = findings[:split["verify"]]
+            unverified = findings[split["verify"] :]
+            findings = findings[: split["verify"]]
         else:
             unverified = []
     else:
@@ -384,47 +419,101 @@ def run_plan_pass(collab, hid: str, lane_pass: vp.LanePass, *, builder_seat: str
         vraw = _dispatch(
             runner,
             list(profile.verifier_cmd),
-            ap._build_prompt(_batch_verifier_system(lane_pass, profile.verifier_system),
-                             f"Breaker findings:\n{prompt_findings}\n\nChange under test:\n{content}"),
+            ap._build_prompt(
+                _batch_verifier_system(lane_pass, profile.verifier_system),
+                f"Breaker findings:\n{prompt_findings}\n\nChange under test:\n{content}",
+            ),
             timeout=profile.verifier_timeout,
             unset_env=list(profile.verifier_unset_env) or None,
             budget=budget,
         )
     except rb.BudgetExceeded as exc:
-        return _plan_incomplete(lane_pass, f"budget:{exc.which}", findings=findings,
-                                unverified=unverified + findings, breaker_artifact=breaker_artifact)
+        return _plan_incomplete(
+            lane_pass,
+            f"budget:{exc.which}",
+            findings=findings,
+            unverified=unverified + findings,
+            breaker_artifact=breaker_artifact,
+        )
     except cc.CollabError as exc:
-        return {**base, "ran": False, "breaker_artifact": breaker_artifact, "tool_error": {
-            "lane": lane_pass.id, "seat": profile.verifier_seat,
-            "cmd": _cmd_str(profile.verifier_cmd), "error": str(exc)}}
-    verifier_artifact = ap._write_reply(collab, f"{profile.verifier_seat}-verify-{lane_pass.id}",
-                                        ap._sanitize(vraw))
+        return {
+            **base,
+            "ran": False,
+            "breaker_artifact": breaker_artifact,
+            "tool_error": {
+                "lane": lane_pass.id,
+                "seat": profile.verifier_seat,
+                "cmd": _cmd_str(profile.verifier_cmd),
+                "error": str(exc),
+            },
+        }
+    verifier_artifact = ap._write_reply(
+        collab, f"{profile.verifier_seat}-verify-{lane_pass.id}", ap._sanitize(vraw)
+    )
     verdicts, verdict_error = _parse_batch_verdicts(vraw, findings)
     if verdict_error:
-        return _plan_incomplete(lane_pass, verdict_error, findings=findings,
-                                unverified=unverified + findings, breaker_artifact=breaker_artifact,
-                                verifier_artifact=verifier_artifact)
+        return _plan_incomplete(
+            lane_pass,
+            verdict_error,
+            findings=findings,
+            unverified=unverified + findings,
+            breaker_artifact=breaker_artifact,
+            verifier_artifact=verifier_artifact,
+        )
     confirmed, refuted = [], []
     for finding in findings:
         verdict = verdicts[finding["id"]]
         record = {**finding, "verifier_evidence": verdict["evidence"]}
         (confirmed if verdict["verdict"] == "CONFIRMED" else refuted).append(record)
-    ap._emit_safe(ap._trace.emit, log, run_id=rid, stage="autopilot.lane",
-                  role=profile.verifier_seat, artifact=f"handoff:{hid}",
-                  span_id=f"{hid}:lane:{lane_pass.id}",
-                  decision={"action": "lane", "reason_codes": [f"pass:{lane_pass.id}",
-                            f"confirmed:{len(confirmed)}", f"refuted:{len(refuted)}"], "confidence": None})
-    result = {**base, "ran": not unverified, "breaker_artifact": breaker_artifact,
-              "verifier_artifact": verifier_artifact, "confirmed": confirmed, "refuted": refuted,
-              "overflow": len(unverified), "unverified": unverified}
+    ap._emit_safe(
+        ap._trace.emit,
+        log,
+        run_id=rid,
+        stage="autopilot.lane",
+        role=profile.verifier_seat,
+        artifact=f"handoff:{hid}",
+        span_id=f"{hid}:lane:{lane_pass.id}",
+        decision={
+            "action": "lane",
+            "reason_codes": [
+                f"pass:{lane_pass.id}",
+                f"confirmed:{len(confirmed)}",
+                f"refuted:{len(refuted)}",
+            ],
+            "confidence": None,
+        },
+    )
+    result = {
+        **base,
+        "ran": not unverified,
+        "breaker_artifact": breaker_artifact,
+        "verifier_artifact": verifier_artifact,
+        "confirmed": confirmed,
+        "refuted": refuted,
+        "overflow": len(unverified),
+        "unverified": unverified,
+    }
     if unverified:
         result["incomplete"] = {"reason": "finding_cap"}
     return result
 
 
-def _run_resolved_plan(collab, hid: str, verification_plan: vp.VerificationPlan, *, builder_seat: str,
-                       reviewer_seat: str | None, source_roots, source_base, test_path, tests, runner,
-                       log: str | None, budget, candidate_id: str | None) -> dict:
+def _run_resolved_plan(
+    collab,
+    hid: str,
+    verification_plan: vp.VerificationPlan,
+    *,
+    builder_seat: str,
+    reviewer_seat: str | None,
+    source_roots,
+    source_base,
+    test_path,
+    tests,
+    runner,
+    log: str | None,
+    budget,
+    candidate_id: str | None,
+) -> dict:
     manifest = gr.source_manifest(source_roots, source_base) if (source_roots and source_base) else {}
     log = log or ap._log_default(collab)
     if candidate_id is not None:
@@ -432,32 +521,56 @@ def _run_resolved_plan(collab, hid: str, verification_plan: vp.VerificationPlan,
         if existing is not None:
             return existing
     with ThreadPoolExecutor(max_workers=len(verification_plan.passes)) as executor:
-        results = list(executor.map(
-            lambda lane_pass: run_plan_pass(collab, hid, lane_pass, builder_seat=builder_seat,
-                                             runner=runner, log=log, budget=budget),
-            verification_plan.passes,
-        ))
+        results = list(
+            executor.map(
+                lambda lane_pass: run_plan_pass(
+                    collab, hid, lane_pass, builder_seat=builder_seat, runner=runner, log=log, budget=budget
+                ),
+                verification_plan.passes,
+            )
+        )
     blockers = [
-        {"id": f"{result['pass']}-{finding['id']}", "lane": result["pass"],
-         "contracts": list(result["contracts"]), "description": finding["description"],
-         "fixed": False, "regression_test": None, "evidence": finding.get("verifier_evidence", "")}
-        for result in results for finding in result.get("confirmed") or []
+        {
+            "id": f"{result['pass']}-{finding['id']}",
+            "lane": result["pass"],
+            "contracts": list(result["contracts"]),
+            "description": finding["description"],
+            "fixed": False,
+            "regression_test": None,
+            "evidence": finding.get("verifier_evidence", ""),
+        }
+        for result in results
+        for finding in result.get("confirmed") or []
     ]
     tool_error = next((result["tool_error"] for result in results if result.get("tool_error")), None)
     overflow = sum(int(result.get("overflow", 0) or 0) for result in results)
     unverified = [item for result in results for item in (result.get("unverified") or [])]
     incomplete = bool(overflow) or any(result.get("incomplete") for result in results)
-    preflight = (ap._capture_preflight(source_base, test_path, reviewer_seat, manifest)
-                 if reviewer_seat and source_base else None)
+    preflight = (
+        ap._capture_preflight(source_base, test_path, reviewer_seat, manifest)
+        if reviewer_seat and source_base
+        else None
+    )
     ledger = {
-        "hid": hid, "candidate_id": candidate_id, "generated_ts": ap._now_utc(),
-        "guardrails": list(verification_plan.guardrails), "builder_seat": builder_seat,
-        "reviewer_seat": reviewer_seat, "source_base": str(source_base) if source_base else None,
-        "source_manifest": manifest, "tests": tests or {"passed": None, "run_id": None},
-        "reviewer_preflight": preflight, "verification_plan": verification_plan.identity_data(),
+        "hid": hid,
+        "candidate_id": candidate_id,
+        "generated_ts": ap._now_utc(),
+        "guardrails": list(verification_plan.guardrails),
+        "builder_seat": builder_seat,
+        "reviewer_seat": reviewer_seat,
+        "source_base": str(source_base) if source_base else None,
+        "source_manifest": manifest,
+        "tests": tests or {"passed": None, "run_id": None},
+        "reviewer_preflight": preflight,
+        "verification_plan": verification_plan.identity_data(),
         "verification_plan_digest": verification_plan.identity_digest,
-        "lanes": results, "blockers": blockers, "accepted_residuals": [], "tool_error": tool_error,
-        "overflow": overflow, "unverified": unverified, "incomplete": incomplete,
+        "lanes": results,
+        "blockers": blockers,
+        "accepted_residuals": [],
+        "tool_error": tool_error,
+        "overflow": overflow,
+        "unverified": unverified,
+        "incomplete": incomplete,
     }
     write_ledger(collab, hid, ledger, candidate_id)
     return ledger
@@ -468,9 +581,19 @@ def _run_resolved_plan(collab, hid: str, verification_plan: vp.VerificationPlan,
 # --------------------------------------------------------------------------- #
 
 
-def run_lane(collab, hid: str, lane: str, *, seats: dict, breaker_seat: str, verifier_seat: str,
-             builder_seat: str, runner=ap._cli_runner, log: str | None = None,
-             budget=None) -> dict:
+def run_lane(
+    collab,
+    hid: str,
+    lane: str,
+    *,
+    seats: dict,
+    breaker_seat: str,
+    verifier_seat: str,
+    builder_seat: str,
+    runner=ap._cli_runner,
+    log: str | None = None,
+    budget=None,
+) -> dict:
     """Run one legacy string lane (breaker → independent verifier) and return its result dict.
 
     New candidate execution uses :func:`run_plan_pass`, which has one bounded
@@ -494,21 +617,37 @@ def run_lane(collab, hid: str, lane: str, *, seats: dict, breaker_seat: str, ver
     rid = ap._run_id(collab)
 
     def _tool_error(seat, cfg, exc) -> dict:
-        return {"lane": lane, "ran": False, "confirmed": [], "refuted": [], "overflow": 0,
-                "unverified": [], "tool_error": {"lane": lane, "seat": seat,
-                                                 "cmd": _cmd_str(cfg.get("cmd")), "error": str(exc)}}
+        return {
+            "lane": lane,
+            "ran": False,
+            "confirmed": [],
+            "refuted": [],
+            "overflow": 0,
+            "unverified": [],
+            "tool_error": {"lane": lane, "seat": seat, "cmd": _cmd_str(cfg.get("cmd")), "error": str(exc)},
+        }
 
     def _incomplete(which, confirmed, refuted, unverified) -> dict:
-        return {"lane": lane, "ran": False, "confirmed": confirmed, "refuted": refuted,
-                "overflow": len(unverified), "unverified": unverified,
-                "incomplete": {"reason": "budget", "which": which}}
+        return {
+            "lane": lane,
+            "ran": False,
+            "confirmed": confirmed,
+            "refuted": refuted,
+            "overflow": len(unverified),
+            "unverified": unverified,
+            "incomplete": {"reason": "budget", "which": which},
+        }
 
     # ---- stage 1: breaker ------------------------------------------------- #
     try:
-        braw = _dispatch(runner, list(bcfg["cmd"]),
-                         ap._build_prompt(_breaker_system(lane, bcfg.get("system")), content),
-                         timeout=float(bcfg.get("timeout", ap._DEFAULT_TIMEOUT)),
-                         unset_env=bcfg.get("unset_env"), budget=budget)
+        braw = _dispatch(
+            runner,
+            list(bcfg["cmd"]),
+            ap._build_prompt(_breaker_system(lane, bcfg.get("system")), content),
+            timeout=float(bcfg.get("timeout", ap._DEFAULT_TIMEOUT)),
+            unset_env=bcfg.get("unset_env"),
+            budget=budget,
+        )
     except rb.BudgetExceeded as e:
         return _incomplete(e.which, [], [], [])
     except cc.CollabError as e:
@@ -521,56 +660,116 @@ def run_lane(collab, hid: str, lane: str, *, seats: dict, breaker_seat: str, ver
     if budget is not None and findings:
         split = budget.cap_lane_findings(len(findings))
         if split["overflow"] > 0:
-            unverified = findings[split["verify"]:]
+            unverified = findings[split["verify"] :]
             overflow = split["overflow"]
             findings = findings[: split["verify"]]
 
-    ap._emit_safe(ap._trace.emit, log, run_id=rid, stage="autopilot.lane",
-                  role=breaker_seat, artifact=f"handoff:{hid}", span_id=f"{hid}:lane:{lane}:breaker",
-                  decision={"action": "breaker",
-                            "reason_codes": [f"lane:{lane}", f"findings:{len(findings)}"],
-                            "confidence": None})
+    ap._emit_safe(
+        ap._trace.emit,
+        log,
+        run_id=rid,
+        stage="autopilot.lane",
+        role=breaker_seat,
+        artifact=f"handoff:{hid}",
+        span_id=f"{hid}:lane:{lane}:breaker",
+        decision={
+            "action": "breaker",
+            "reason_codes": [f"lane:{lane}", f"findings:{len(findings)}"],
+            "confidence": None,
+        },
+    )
 
     # ---- stage 2: independent verifier per finding ------------------------ #
     confirmed, refuted, verifier_artifact = [], [], None
     for idx, finding in enumerate(findings, 1):
-        vprompt = ap._build_prompt(_verifier_system(lane, vcfg.get("system")),
-                                   f"Finding to refute:\n{finding}\n\nChange under test:\n{content}")
+        vprompt = ap._build_prompt(
+            _verifier_system(lane, vcfg.get("system")),
+            f"Finding to refute:\n{finding}\n\nChange under test:\n{content}",
+        )
         try:
-            vraw = _dispatch(runner, list(vcfg["cmd"]), vprompt,
-                             timeout=float(vcfg.get("timeout", ap._DEFAULT_TIMEOUT)),
-                             unset_env=vcfg.get("unset_env"), budget=budget)
+            vraw = _dispatch(
+                runner,
+                list(vcfg["cmd"]),
+                vprompt,
+                timeout=float(vcfg.get("timeout", ap._DEFAULT_TIMEOUT)),
+                unset_env=vcfg.get("unset_env"),
+                budget=budget,
+            )
         except rb.BudgetExceeded as e:
-            return _incomplete(e.which, confirmed, refuted, unverified + list(findings[idx - 1:]))
+            return _incomplete(e.which, confirmed, refuted, unverified + list(findings[idx - 1 :]))
         except cc.CollabError as e:
             return _tool_error(verifier_seat, vcfg, e)
         verifier_artifact = ap._write_reply(collab, f"{verifier_seat}-verify-{lane}", ap._sanitize(vraw))
         is_confirmed = bool(_CONFIRMED_RE.search(vraw))
         (confirmed if is_confirmed else refuted).append(finding)
-        ap._emit_safe(ap._trace.emit, log, run_id=rid, stage="autopilot.lane",
-                      role=verifier_seat, artifact=f"handoff:{hid}", span_id=f"{hid}:lane:{lane}:v{idx}",
-                      decision={"action": "verdict",
-                                "reason_codes": [f"lane:{lane}", f"finding:{idx}/{len(findings)}",
-                                                 "verdict:CONFIRMED" if is_confirmed else "verdict:REFUTED"],
-                                "confidence": None})
+        ap._emit_safe(
+            ap._trace.emit,
+            log,
+            run_id=rid,
+            stage="autopilot.lane",
+            role=verifier_seat,
+            artifact=f"handoff:{hid}",
+            span_id=f"{hid}:lane:{lane}:v{idx}",
+            decision={
+                "action": "verdict",
+                "reason_codes": [
+                    f"lane:{lane}",
+                    f"finding:{idx}/{len(findings)}",
+                    "verdict:CONFIRMED" if is_confirmed else "verdict:REFUTED",
+                ],
+                "confidence": None,
+            },
+        )
 
-    ap._emit_safe(ap._trace.emit, log, run_id=rid, stage="autopilot.lane",
-                  role=verifier_seat, artifact=f"handoff:{hid}", span_id=f"{hid}:lane:{lane}",
-                  decision={"action": "lane",
-                            "reason_codes": [f"lane:{lane}", f"confirmed:{len(confirmed)}",
-                                             f"refuted:{len(refuted)}"], "confidence": None})
-    return {"lane": lane, "ran": True, "breaker_seat": breaker_seat, "verifier_seat": verifier_seat,
-            "breaker_artifact": breaker_artifact, "verifier_artifact": verifier_artifact,
-            "confirmed": confirmed, "refuted": refuted, "overflow": overflow, "unverified": unverified}
+    ap._emit_safe(
+        ap._trace.emit,
+        log,
+        run_id=rid,
+        stage="autopilot.lane",
+        role=verifier_seat,
+        artifact=f"handoff:{hid}",
+        span_id=f"{hid}:lane:{lane}",
+        decision={
+            "action": "lane",
+            "reason_codes": [f"lane:{lane}", f"confirmed:{len(confirmed)}", f"refuted:{len(refuted)}"],
+            "confidence": None,
+        },
+    )
+    return {
+        "lane": lane,
+        "ran": True,
+        "breaker_seat": breaker_seat,
+        "verifier_seat": verifier_seat,
+        "breaker_artifact": breaker_artifact,
+        "verifier_artifact": verifier_artifact,
+        "confirmed": confirmed,
+        "refuted": refuted,
+        "overflow": overflow,
+        "unverified": unverified,
+    }
 
 
-def run_lanes(collab, hid: str, *, seats: dict, breaker_seat: str, verifier_seat: str,
-               builder_seat: str | None = None, guardrails=None, lanes_cfg: dict | None = None,
-               source_roots=None, source_base=None, tests: dict | None = None,
-               reviewer_seat: str | None = None, test_path=None,
-               runner=ap._cli_runner, log: str | None = None,
-               budget=None, candidate_id: str | None = None,
-               verification_plan: vp.VerificationPlan | None = None) -> dict:
+def run_lanes(
+    collab,
+    hid: str,
+    *,
+    seats: dict,
+    breaker_seat: str,
+    verifier_seat: str,
+    builder_seat: str | None = None,
+    guardrails=None,
+    lanes_cfg: dict | None = None,
+    source_roots=None,
+    source_base=None,
+    tests: dict | None = None,
+    reviewer_seat: str | None = None,
+    test_path=None,
+    runner=ap._cli_runner,
+    log: str | None = None,
+    budget=None,
+    candidate_id: str | None = None,
+    verification_plan: vp.VerificationPlan | None = None,
+) -> dict:
     """Run every required lane for a handoff, assemble the verification ledger, write it, and return it.
 
     ``builder_seat``/``guardrails`` default to the handoff's ``from``/``guardrails`` frontmatter. Confirmed
@@ -594,9 +793,18 @@ def run_lanes(collab, hid: str, *, seats: dict, breaker_seat: str, verifier_seat
 
     if verification_plan is not None:
         return _run_resolved_plan(
-            collab, hid, verification_plan, builder_seat=builder_seat,
-            reviewer_seat=reviewer_seat, source_roots=source_roots, source_base=source_base,
-            test_path=test_path, tests=tests, runner=runner, log=log, budget=budget,
+            collab,
+            hid,
+            verification_plan,
+            builder_seat=builder_seat,
+            reviewer_seat=reviewer_seat,
+            source_roots=source_roots,
+            source_base=source_base,
+            test_path=test_path,
+            tests=tests,
+            runner=runner,
+            log=log,
+            budget=budget,
             candidate_id=candidate_id,
         )
 
@@ -612,11 +820,20 @@ def run_lanes(collab, hid: str, *, seats: dict, breaker_seat: str, verifier_seat
     if candidate_id is not None:
         existing = read_ledger(collab, hid, candidate_id=candidate_id)
         if existing is not None:
-            ap._emit_safe(ap._trace.emit, log, run_id=ap._run_id(collab), stage="autopilot.lane",
-                          role="autopilot", artifact=f"handoff:{hid}", span_id=f"{hid}:lanes:cached",
-                          decision={"action": "lanes_cached",
-                                    "reason_codes": [f"lanes:{len(lanes)}", "candidate-unchanged"],
-                                    "confidence": None})
+            ap._emit_safe(
+                ap._trace.emit,
+                log,
+                run_id=ap._run_id(collab),
+                stage="autopilot.lane",
+                role="autopilot",
+                artifact=f"handoff:{hid}",
+                span_id=f"{hid}:lanes:cached",
+                decision={
+                    "action": "lanes_cached",
+                    "reason_codes": [f"lanes:{len(lanes)}", "candidate-unchanged"],
+                    "confidence": None,
+                },
+            )
             return existing
 
     results = None
@@ -626,15 +843,29 @@ def run_lanes(collab, hid: str, *, seats: dict, breaker_seat: str, verifier_seat
         # rebuild the ledger so a fresh reviewer preflight / tests block is re-attached (a lane-cache hit
         # must never resurrect a stale preflight — cond. 11). Skips only the slow breaker/verifier suite.
         prior = read_ledger(collab, hid)
-        prior_by_lane = ({r.get("lane"): r for r in (prior.get("lanes") or [])}
-                         if isinstance(prior, dict) else {})
-        if manifest and prior and prior.get("source_manifest") == manifest \
-                and all(prior_by_lane.get(lane, {}).get("ran") for lane in lanes):
-            ap._emit_safe(ap._trace.emit, log, run_id=ap._run_id(collab), stage="autopilot.lane",
-                          role="autopilot", artifact=f"handoff:{hid}", span_id=f"{hid}:lanes:cached",
-                          decision={"action": "lanes_cached",
-                                    "reason_codes": [f"lanes:{len(lanes)}", "source-unchanged"],
-                                    "confidence": None})
+        prior_by_lane = (
+            {r.get("lane"): r for r in (prior.get("lanes") or [])} if isinstance(prior, dict) else {}
+        )
+        if (
+            manifest
+            and prior
+            and prior.get("source_manifest") == manifest
+            and all(prior_by_lane.get(lane, {}).get("ran") for lane in lanes)
+        ):
+            ap._emit_safe(
+                ap._trace.emit,
+                log,
+                run_id=ap._run_id(collab),
+                stage="autopilot.lane",
+                role="autopilot",
+                artifact=f"handoff:{hid}",
+                span_id=f"{hid}:lanes:cached",
+                decision={
+                    "action": "lanes_cached",
+                    "reason_codes": [f"lanes:{len(lanes)}", "source-unchanged"],
+                    "confidence": None,
+                },
+            )
             results = [prior_by_lane[lane] for lane in lanes]
 
     if results is None:
@@ -644,17 +875,37 @@ def run_lanes(collab, hid: str, *, seats: dict, breaker_seat: str, verifier_seat
             # wall-clock becomes the slowest single lane, not the sum. ``executor.map`` preserves order.
             # A shared RunBudget handle is charged atomically under its own lock (single process/lease).
             with ThreadPoolExecutor(max_workers=min(len(lanes), _MAX_LANE_WORKERS)) as ex:
-                results = list(ex.map(
-                    lambda lane: run_lane(collab, hid, lane, seats=seats, breaker_seat=breaker_seat,
-                                          verifier_seat=verifier_seat, builder_seat=builder_seat,
-                                          runner=runner, log=log, budget=budget),
-                    lanes))
+                results = list(
+                    ex.map(
+                        lambda lane: run_lane(
+                            collab,
+                            hid,
+                            lane,
+                            seats=seats,
+                            breaker_seat=breaker_seat,
+                            verifier_seat=verifier_seat,
+                            builder_seat=builder_seat,
+                            runner=runner,
+                            log=log,
+                            budget=budget,
+                        ),
+                        lanes,
+                    )
+                )
         else:
             results = []
 
-    blockers = [{"id": f"{r['lane']}-{i + 1}", "lane": r["lane"], "description": f,
-                 "fixed": False, "regression_test": None}
-                for r in results for i, f in enumerate(r.get("confirmed") or [])]
+    blockers = [
+        {
+            "id": f"{r['lane']}-{i + 1}",
+            "lane": r["lane"],
+            "description": f,
+            "fixed": False,
+            "regression_test": None,
+        }
+        for r in results
+        for i, f in enumerate(r.get("confirmed") or [])
+    ]
     # Aggregate the truthful-terminal signals (ADR-0003 D1): the first tool failure -> infrastructure;
     # any over-cap / budget-exhausted lane -> verification_incomplete (the un-verified excess is named).
     tool_error = next((r["tool_error"] for r in results if r.get("tool_error")), None)
@@ -662,8 +913,11 @@ def run_lanes(collab, hid: str, *, seats: dict, breaker_seat: str, verifier_seat
     unverified = [u for r in results for u in (r.get("unverified") or [])]
     incomplete = bool(overflow) or any(r.get("incomplete") for r in results)
 
-    preflight = (ap._capture_preflight(source_base, test_path, reviewer_seat, manifest)
-                 if (reviewer_seat and source_base) else None)
+    preflight = (
+        ap._capture_preflight(source_base, test_path, reviewer_seat, manifest)
+        if (reviewer_seat and source_base)
+        else None
+    )
     ledger = {
         "hid": hid,
         "candidate_id": candidate_id,

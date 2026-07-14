@@ -28,13 +28,19 @@ def _setup(tmp_path):
 
 def _preflight(base, *, seat="reviewer", **over):
     """A valid reviewer repo-preflight block (condition 11) — hand-built so no real git is needed here."""
-    pre = {"seat": seat, "repo_access": True, "repo_root": str(base),
-           "commands": {"pwd": {"exit_code": 0, "stdout_tail": str(base)},
-                        "git_rev_parse": {"exit_code": 0, "stdout_tail": str(base)},
-                        "git_status_short": {"exit_code": 0, "stdout_tail": ""},
-                        "git_diff_name_only": {"exit_code": 0, "stdout_tail": ""},
-                        "pytest_collect_only": {"exit_code": 0, "stdout_tail": "1 test collected"}},
-           "inspected_files": ["src/m.py"]}
+    pre = {
+        "seat": seat,
+        "repo_access": True,
+        "repo_root": str(base),
+        "commands": {
+            "pwd": {"exit_code": 0, "stdout_tail": str(base)},
+            "git_rev_parse": {"exit_code": 0, "stdout_tail": str(base)},
+            "git_status_short": {"exit_code": 0, "stdout_tail": ""},
+            "git_diff_name_only": {"exit_code": 0, "stdout_tail": ""},
+            "pytest_collect_only": {"exit_code": 0, "stdout_tail": "1 test collected"},
+        },
+        "inspected_files": ["src/m.py"],
+    }
     pre.update(over)
     return pre
 
@@ -43,11 +49,20 @@ def _ledger(collab, hid="001", **over):
     base = Path(collab)
     (base / "src").mkdir(parents=True, exist_ok=True)
     (base / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
-    led = {"hid": hid, "generated_ts": ap._now_utc(), "guardrails": [],
-           "builder_seat": "builder", "reviewer_seat": "reviewer",
-           "source_base": str(base), "source_manifest": gr.source_manifest(["src/*.py"], base),
-           "tests": {"passed": True, "run_id": "t"}, "reviewer_preflight": _preflight(base),
-           "lanes": [], "blockers": [], "accepted_residuals": []}
+    led = {
+        "hid": hid,
+        "generated_ts": ap._now_utc(),
+        "guardrails": [],
+        "builder_seat": "builder",
+        "reviewer_seat": "reviewer",
+        "source_base": str(base),
+        "source_manifest": gr.source_manifest(["src/*.py"], base),
+        "tests": {"passed": True, "run_id": "t"},
+        "reviewer_preflight": _preflight(base),
+        "lanes": [],
+        "blockers": [],
+        "accepted_residuals": [],
+    }
     led.update(over)
     lanes.write_ledger(collab, hid, led)
     return led
@@ -83,19 +98,25 @@ class TestEvaluate:
 
     def test_missing_required_lane_fails(self, tmp_path):
         collab = _setup(tmp_path)
-        _ledger(collab, guardrails=["bounded-autonomy", "untrusted-agent-output"], lanes=[])  # 5 required, 0 ran
+        _ledger(
+            collab, guardrails=["bounded-autonomy", "untrusted-agent-output"], lanes=[]
+        )  # 5 required, 0 ran
         assert "lanes-ran" in _failed(_eval(collab))
 
     def test_unfixed_blocker_fails(self, tmp_path):
         collab = _setup(tmp_path)
-        _ledger(collab, blockers=[{"id": "b1", "lane": "x", "description": "d",
-                                   "fixed": False, "regression_test": "t"}])
+        _ledger(
+            collab,
+            blockers=[{"id": "b1", "lane": "x", "description": "d", "fixed": False, "regression_test": "t"}],
+        )
         assert "blockers-fixed" in _failed(_eval(collab))
 
     def test_blocker_without_regression_fails(self, tmp_path):
         collab = _setup(tmp_path)
-        _ledger(collab, blockers=[{"id": "b1", "lane": "x", "description": "d",
-                                   "fixed": True, "regression_test": None}])
+        _ledger(
+            collab,
+            blockers=[{"id": "b1", "lane": "x", "description": "d", "fixed": True, "regression_test": None}],
+        )
         assert "blocker-regressions" in _failed(_eval(collab))
 
     def test_tests_not_passed_fails(self, tmp_path):
@@ -114,8 +135,7 @@ class TestEvaluate:
         scratch = tmp_path / "scratchpad" / "s"
         (scratch / "src").mkdir(parents=True)
         (scratch / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
-        _ledger(collab, source_base=str(scratch),
-                source_manifest=gr.source_manifest(["src/*.py"], scratch))
+        _ledger(collab, source_base=str(scratch), source_manifest=gr.source_manifest(["src/*.py"], scratch))
         assert "no-stale-evidence" in _failed(_eval(collab))
 
     def test_verdict_hash_is_stable(self, tmp_path):
@@ -163,12 +183,13 @@ class TestReviewerPreflight:
 
     def test_escaping_inspected_path_fails(self, tmp_path):
         collab = _setup(tmp_path)
-        _ledger(collab, reviewer_preflight=_preflight(Path(collab),
-                                                      inspected_files=["../../../etc/passwd"]))
+        _ledger(collab, reviewer_preflight=_preflight(Path(collab), inspected_files=["../../../etc/passwd"]))
         assert "reviewer-repo-preflight" in _failed(_eval(collab))
 
     def test_absolute_inspected_path_fails(self, tmp_path):
         collab = _setup(tmp_path)
-        _ledger(collab, reviewer_preflight=_preflight(Path(collab),
-                                                      inspected_files=[str(Path(collab) / "src" / "m.py")]))
+        _ledger(
+            collab,
+            reviewer_preflight=_preflight(Path(collab), inspected_files=[str(Path(collab) / "src" / "m.py")]),
+        )
         assert "reviewer-repo-preflight" in _failed(_eval(collab))

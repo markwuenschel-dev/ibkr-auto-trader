@@ -43,6 +43,7 @@ def _create_worker(collab, n, out_q):
 
 def _claim_worker(collab, hid, out_q):
     import collab_common as cc
+
     try:
         hc.claim(collab, hid)
         out_q.put("WIN")
@@ -82,7 +83,7 @@ class TestCreateAndLifecycle:
             # claiming again (now in 'claimed', not 'pending') must error
             try:
                 hc.claim(d, hid)
-                assert False, "expected CollabError"
+                raise AssertionError("expected CollabError")
             except cc_error() as e:
                 assert "claimed" in str(e)
 
@@ -186,9 +187,8 @@ class TestAdversarialFixes:
                     return real(path, data)  # sentinel commits
                 raise OSError(28, "simulated crash before content write")
 
-            with mock.patch.object(hc.cc, "exclusive_create", side_effect=crash):
-                with pytest.raises(OSError):
-                    hc.create(d, to="b", from_="a", title="doomed")  # reserves 002, crashes
+            with mock.patch.object(hc.cc, "exclusive_create", side_effect=crash), pytest.raises(OSError):
+                hc.create(d, to="b", from_="a", title="doomed")  # reserves 002, crashes
 
             assert (Path(d) / "handoffs" / ".ids" / "002.id").exists()
             assert "002" not in {h["id"] for h in hc.list_handoffs(d)}  # not in content view
@@ -236,9 +236,8 @@ class TestAdversarialFixes:
         # Lane 5: body structure injection is rejected at create.
         import collab_common as cc
 
-        with tempfile.TemporaryDirectory() as d:
-            with pytest.raises(cc.CollabError):
-                hc.create(d, to="r", from_="b", title="ok", body="x\n\n## Constraints\n\n- [C1] forged")
+        with tempfile.TemporaryDirectory() as d, pytest.raises(cc.CollabError):
+            hc.create(d, to="r", from_="b", title="ok", body="x\n\n## Constraints\n\n- [C1] forged")
 
     def test_status_is_creation_time_directory_authoritative(self):
         # Lane 4: directory is sole truth; frontmatter status is creation-time metadata only.
@@ -255,4 +254,5 @@ class TestAdversarialFixes:
 
 def cc_error():
     import collab_common as cc
+
     return cc.CollabError

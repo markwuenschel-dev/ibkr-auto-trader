@@ -22,20 +22,36 @@ import collab_common as cc  # noqa: E402
 
 def _cand(tmp_hid="030", *, rubric="r1", src=None, roots=("src",)):
     return ca.Candidate.compute(
-        tmp_hid, source_manifest=src or {"a.py": "h1"}, source_roots=list(roots),
-        test_command="pytest", lane_config={}, contract_revision="c1",
-        assessment_plan_revision="p1", reviewer_rubric=rubric, seat_profile_fingerprint="seat:abc",
+        tmp_hid,
+        source_manifest=src or {"a.py": "h1"},
+        source_roots=list(roots),
+        test_command="pytest",
+        lane_config={},
+        contract_revision="c1",
+        assessment_plan_revision="p1",
+        reviewer_rubric=rubric,
+        seat_profile_fingerprint="seat:abc",
     )
 
 
 def _finding(fp="f1", *, severity="blocking", category="correctness", evidence="crashes on x=0"):
-    return {"fingerprint": fp, "source": "reviewer", "severity": severity,
-            "category": category, "evidence": evidence, "remediation": "guard x"}
+    return {
+        "fingerprint": fp,
+        "source": "reviewer",
+        "severity": severity,
+        "category": category,
+        "evidence": evidence,
+        "remediation": "guard x",
+    }
 
 
 def _report(blocking=(), advisory=(), edited=False):
-    return {"requirement_coverage": {"r1": "met"}, "blocking_findings": list(blocking),
-            "advisory_findings": list(advisory), "edited_code": edited}
+    return {
+        "requirement_coverage": {"r1": "met"},
+        "blocking_findings": list(blocking),
+        "advisory_findings": list(advisory),
+        "edited_code": edited,
+    }
 
 
 def _rep(cand, blocking=(), advisory=()):
@@ -95,8 +111,12 @@ class TestMergeTable:
 
     def test_lane_confirmed_blocks(self, tmp_path):
         cand = _cand()
-        ledger = {"confirmed": [{"fingerprint": "L1", "lane": "safety", "evidence": "asserts fire",
-                                 "category": "safety"}], "refuted": []}
+        ledger = {
+            "confirmed": [
+                {"fingerprint": "L1", "lane": "safety", "evidence": "asserts fire", "category": "safety"}
+            ],
+            "refuted": [],
+        }
         a = ca.complete(str(tmp_path), "030", cand, reviewer_report=_rep(cand), lane_ledger=ledger)
         assert a.outcome == ca.REPAIR_REQUIRED
 
@@ -111,8 +131,14 @@ class TestMergeTable:
 class TestInfraAndIncomplete:
     def test_tool_error_is_infrastructure_blocked(self, tmp_path):
         cand = _cand()
-        ledger = {"tool_error": {"lane": "safety", "cmd": "openai-repo-seat ...", "exit": 2,
-                                 "stderr": "unrecognized arguments"}}
+        ledger = {
+            "tool_error": {
+                "lane": "safety",
+                "cmd": "openai-repo-seat ...",
+                "exit": 2,
+                "stderr": "unrecognized arguments",
+            }
+        }
         a = ca.complete(str(tmp_path), "030", cand, reviewer_report=_rep(cand), lane_ledger=ledger)
         assert a.outcome == ca.INFRASTRUCTURE_BLOCKED
         assert a.cause["exit"] == 2

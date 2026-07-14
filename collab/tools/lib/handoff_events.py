@@ -212,7 +212,8 @@ def on_autonomous_done(
         artifact=f"handoff:{handoff_id}",
         span_id=span_id,
         parent_span_id=parent_span_id,
-        decision=_decision("accept", ["claimed->done", f"reviewer:{reviewer}",
-                                       f"contract:{contract_hash[:12]}"]),
+        decision=_decision(
+            "accept", ["claimed->done", f"reviewer:{reviewer}", f"contract:{contract_hash[:12]}"]
+        ),
         failure=None,
     )

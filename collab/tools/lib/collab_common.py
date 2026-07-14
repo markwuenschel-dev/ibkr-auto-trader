@@ -40,10 +40,10 @@ import shutil
 import socket
 import time
 import unicodedata
-from contextlib import contextmanager
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
 
 log = logging.getLogger("collab_common")
 
@@ -78,7 +78,10 @@ _MSYS_DRIVE = re.compile(r"^/([A-Za-z])(/.*)?$")
 
 #: Windows reserved device names that must never become a bare path component.
 _WIN_RESERVED = {
-    "con", "prn", "aux", "nul",
+    "con",
+    "prn",
+    "aux",
+    "nul",
     *(f"com{i}" for i in range(1, 10)),
     *(f"lpt{i}" for i in range(1, 10)),
 }
@@ -174,7 +177,7 @@ def load_dotenv(path: str | os.PathLike | None = None) -> None:
         key, _, val = line.partition("=")
         key = key.strip()
         if key.startswith("export "):
-            key = key[len("export "):].strip()
+            key = key[len("export ") :].strip()
         if key:
             os.environ.setdefault(key, val.strip().strip('"').strip("'"))
 
@@ -248,10 +251,8 @@ def atomic_write(path: str | os.PathLike, data: str | bytes) -> None:
         tmp.write_bytes(_to_bytes(data))
         os.replace(tmp, p)
     except BaseException:
-        try:
+        with suppress(OSError):
             tmp.unlink(missing_ok=True)  # no temp-file leftovers on any failure
-        except OSError:
-            pass
         raise
 
 
@@ -282,10 +283,9 @@ def safe_write(
         except PermissionError as exc:
             last = exc
             if attempt < attempts - 1:
-                time.sleep(backoff * (2 ** attempt))
+                time.sleep(backoff * (2**attempt))
     raise CollabError(
-        f"could not replace {os.fspath(path)} after {attempts} tries; "
-        f"a reader may be holding it open"
+        f"could not replace {os.fspath(path)} after {attempts} tries; a reader may be holding it open"
     ) from last
 
 
@@ -305,18 +305,14 @@ def _write_all(fd: int, data: bytes) -> None:
 
 
 def _best_effort_unlink(p: Path) -> None:
-    try:
+    with suppress(OSError):
         p.unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def _close_quietly(fd: int) -> None:
     """Close ``fd``, swallowing a close-time OSError so it cannot mask the real outcome."""
-    try:
+    with suppress(OSError):
         os.close(fd)
-    except OSError:
-        pass
 
 
 def _fsync_parent_best_effort(path: Path) -> None:
@@ -399,9 +395,7 @@ def exclusive_create(path: str | os.PathLike, data: str | bytes) -> None:
         raise
     except OSError as exc:  # incl. filesystems without hard-link support
         _best_effort_unlink(tmp)
-        raise CollabError(
-            f"could not hard-link publish {os.fspath(final)}: {exc}"
-        ) from exc
+        raise CollabError(f"could not hard-link publish {os.fspath(final)}: {exc}") from exc
     _fsync_parent_best_effort(final)
     _best_effort_unlink(tmp)
     _fsync_parent_best_effort(final)
@@ -446,7 +440,7 @@ class LockHandle:
 def _read_json_or_none(p: Path) -> dict | None:
     try:
         return json.loads(p.read_text("utf-8"))
-    except (FileNotFoundError, ValueError, OSError):
+    except FileNotFoundError, ValueError, OSError:
         return None
 
 
@@ -467,7 +461,7 @@ def _robust_rmtree(path: Path, *, warn_on_partial: bool = False) -> None:
         except FileNotFoundError:
             return
         except PermissionError:
-            time.sleep(0.02 * (2 ** attempt))
+            time.sleep(0.02 * (2**attempt))
     if warn_on_partial:
         log.warning("could not fully remove %s; it may linger until TTL ages it out", path)
     shutil.rmtree(path, ignore_errors=True)
@@ -505,7 +499,7 @@ def _fenced_release(lockdir: Path, token: str) -> bool:
     priv = _unique_sibling(lockdir, "releasing")
     try:
         os.rename(lockdir, priv)  # atomic single-winner capture
-    except (FileNotFoundError, PermissionError):
+    except FileNotFoundError, PermissionError:
         return False  # already gone/broken
     m2 = _read_json_or_none(priv / "meta.json")
     if m2 is not None and m2.get("owner_token") == token:
@@ -571,7 +565,7 @@ def collab_lock(
             graveyard = _unique_sibling(lockdir, "broken")
             try:
                 os.rename(lockdir, graveyard)
-            except (FileNotFoundError, PermissionError):
+            except FileNotFoundError, PermissionError:
                 time.sleep(poll)
                 continue  # another process broke/holds it; loop and wait
             try:
@@ -588,7 +582,9 @@ def collab_lock(
                 continue
             log.warning(
                 "broke stale lock %s (age=%.1fs, old_meta=%r)",
-                lockdir, captured_age, _read_json_or_none(graveyard / "meta.json"),
+                lockdir,
+                captured_age,
+                _read_json_or_none(graveyard / "meta.json"),
             )
             _robust_rmtree(graveyard)
             continue  # re-enter the loop; a fresh mkdir decides ownership

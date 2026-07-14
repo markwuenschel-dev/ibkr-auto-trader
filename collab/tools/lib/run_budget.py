@@ -174,9 +174,7 @@ class RunBudget:
                 if candidate is None:
                     raise ValueError("REVIEW_DECISION requires a candidate id")
                 seen = int(cur["review_decisions"].get(candidate, 0))
-                self._guard(
-                    "review_decisions", seen, self._limits.max_review_decisions_per_candidate
-                )
+                self._guard("review_decisions", seen, self._limits.max_review_decisions_per_candidate)
                 self._guard_total(cur)
                 cur["review_decisions"][candidate] = seen + 1
                 cur["actor_turns"] += 1
@@ -320,8 +318,7 @@ class RunBudget:
             except PermissionError as exc:
                 if attempt == 4:
                     raise cc.CollabError(
-                        f"could not read budget {self._path} after retries "
-                        f"(locked by a concurrent writer?)"
+                        f"could not read budget {self._path} after retries (locked by a concurrent writer?)"
                     ) from exc
                 time.sleep(0.02 * (2**attempt))
         try:

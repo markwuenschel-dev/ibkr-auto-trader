@@ -41,6 +41,12 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+# ``dashboard_web.py`` embeds a self-contained HTML/CSS/JavaScript application
+# in one Python string. E501 is a Python-source readability rule and does not
+# meaningfully apply to that payload; all other Ruff rules still apply there.
+"collab/tools/lib/dashboard_web.py" = ["E501"]
+
 [tool.pyright]
 include = ["src", "tests"]
 pythonVersion = "3.14"

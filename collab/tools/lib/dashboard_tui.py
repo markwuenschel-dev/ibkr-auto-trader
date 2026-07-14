@@ -14,15 +14,15 @@ from __future__ import annotations
 import os
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
+import collab_common as cc  # noqa: E402
 import dashboard_core as dc  # noqa: E402
 import handoff_core as hc  # noqa: E402
-import collab_common as cc  # noqa: E402
-
 
 # --------------------------------------------------------------------------- #
 # ANSI helpers
@@ -30,12 +30,24 @@ import collab_common as cc  # noqa: E402
 
 _RESET = "\x1b[0m"
 _STYLE = {
-    "dim": "\x1b[2m", "bold": "\x1b[1m", "red": "\x1b[31m", "green": "\x1b[32m",
-    "yellow": "\x1b[33m", "blue": "\x1b[34m", "magenta": "\x1b[35m", "cyan": "\x1b[36m",
+    "dim": "\x1b[2m",
+    "bold": "\x1b[1m",
+    "red": "\x1b[31m",
+    "green": "\x1b[32m",
+    "yellow": "\x1b[33m",
+    "blue": "\x1b[34m",
+    "magenta": "\x1b[35m",
+    "cyan": "\x1b[36m",
     "inv": "\x1b[7m",
 }
-_PHASE_COLOR = {"thinking": "cyan", "sleeping": "blue", "idle": "dim", "paused": "yellow",
-                "capped": "magenta", "done": "green"}
+_PHASE_COLOR = {
+    "thinking": "cyan",
+    "sleeping": "blue",
+    "idle": "dim",
+    "paused": "yellow",
+    "capped": "magenta",
+    "done": "green",
+}
 
 
 def _c(text: str, *styles: str) -> str:
@@ -48,10 +60,8 @@ def _enable_vt() -> None:
     tolerant of the Unicode glyphs we draw (a cp1252 console would otherwise raise on '●'/'→')."""
     if os.name == "nt":
         os.system("")  # side effect: enables VT100 processing on the attached console
-    try:
+    with suppress(AttributeError, ValueError):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # py3.7+
-    except (AttributeError, ValueError):
-        pass
 
 
 def _fmt_age(sec) -> str:
@@ -136,8 +146,7 @@ def render(snap: dict, selected: int, confirm: str | None, notice: str | None) -
     # header
     banner = _c(f" AUTOPILOT · {name} ", "bold", "inv")
     prog = f"round {rnd}/{mx}" if mx else "round —"
-    L.append(f"{banner}  {prog}  phase:{_c(phase, pcolor)}"
-             + (f"  pid:{st['pid']}" if st.get("pid") else ""))
+    L.append(f"{banner}  {prog}  phase:{_c(phase, pcolor)}" + (f"  pid:{st['pid']}" if st.get("pid") else ""))
     if snap.get("paused"):
         L.append(_c("  ‖ PAUSED — the loop is idling; press r to resume ", "yellow", "inv"))
     L.append("")
@@ -188,9 +197,19 @@ def render(snap: dict, selected: int, confirm: str | None, notice: str | None) -
         L.append(_c(f"  Approve (advance) {confirm} to done? [y/N] ", "yellow", "inv"))
     elif notice:
         L.append("  " + _c(notice, "green"))
-    L.append(_c("  keys: ", "dim") + _c("p", "bold") + " pause  " + _c("r", "bold")
-             + " resume  " + _c("j/k", "bold") + " select  " + _c("a", "bold")
-             + " approve  " + _c("q", "bold") + " quit")
+    L.append(
+        _c("  keys: ", "dim")
+        + _c("p", "bold")
+        + " pause  "
+        + _c("r", "bold")
+        + " resume  "
+        + _c("j/k", "bold")
+        + " select  "
+        + _c("a", "bold")
+        + " approve  "
+        + _c("q", "bold")
+        + " quit"
+    )
     return "\n".join(L)
 
 
@@ -205,9 +224,13 @@ def _fmt_event(ev: dict) -> str:
     lat = metrics.get("latency_ms")
 
     if stage == "autopilot.round" and action == "reply":
-        newid = next((rc.split(":", 1)[1] for rc in dec.get("reason_codes", []) if rc.startswith("new:")), "?")
+        newid = next(
+            (rc.split(":", 1)[1] for rc in dec.get("reason_codes", []) if rc.startswith("new:")), "?"
+        )
         bar = _bar(lat)
-        return _c(f"{ts} ", "dim") + _c(f"{role} answered {art} → {newid}", "green") + f"  {_fmt_ms(lat)} {bar}"
+        return (
+            _c(f"{ts} ", "dim") + _c(f"{role} answered {art} → {newid}", "green") + f"  {_fmt_ms(lat)} {bar}"
+        )
     if stage == "autopilot.round" and action == "fail":
         msg = (ev.get("failure") or {}).get("message", "")[:40]
         return _c(f"{ts} ", "dim") + _c(f"{role} FAILED {art}: {msg}", "red")
@@ -246,7 +269,7 @@ def run_tui(collab, home=None, *, interval: float = 1.0) -> int:
     _enable_vt()
     collab = str(collab)
     selected = 0
-    confirm: str | None = None   # handoff id awaiting a y/n approve confirmation
+    confirm: str | None = None  # handoff id awaiting a y/n approve confirmation
     notice: str | None = None
     snap = dc.snapshot(collab, home)
     last_poll = time.monotonic()
@@ -292,10 +315,7 @@ def run_tui(collab, home=None, *, interval: float = 1.0) -> int:
                         confirm = openh[selected]["id"]
 
                 openh = snap.get("open") or []
-                if openh:
-                    selected = max(0, min(selected, len(openh) - 1))
-                else:
-                    selected = 0
+                selected = max(0, min(selected, len(openh) - 1)) if openh else 0
 
                 if dirty:
                     frame = render(snap, selected, confirm, notice)

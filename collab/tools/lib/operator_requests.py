@@ -59,15 +59,28 @@ def _now_utc() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def write(collab, hid: str, action: str, *, by: str = "dashboard", note: str | None = None,
-          now_ts: str | None = None) -> dict:
+def write(
+    collab,
+    hid: str,
+    action: str,
+    *,
+    by: str = "dashboard",
+    note: str | None = None,
+    now_ts: str | None = None,
+) -> dict:
     """File a durable operator request for ``hid`` (atomic). Supersedes any open request for the same
     handoff — the operator's latest intent wins. Raises :class:`BadRequest` on a bad id or unknown action."""
     _validate_hid(hid)
     if action not in _ACTIONS:
         raise BadRequest(f"unknown request action {action!r}; expected one of {_ACTIONS}")
-    rec = {"schema_version": "0.1", "hid": hid, "action": action, "requested_by": by,
-           "requested_ts": now_ts or _now_utc(), "note": note}
+    rec = {
+        "schema_version": "0.1",
+        "hid": hid,
+        "action": action,
+        "requested_by": by,
+        "requested_ts": now_ts or _now_utc(),
+        "note": note,
+    }
     p = _path(collab, hid)
     p.parent.mkdir(parents=True, exist_ok=True)
     cc.safe_write(p, json.dumps(rec, separators=(",", ":")) + "\n")
@@ -80,7 +93,7 @@ def get(collab, hid: str) -> dict | None:
         doc = json.loads(_path(collab, hid).read_text("utf-8"))
     except BadRequest:
         raise
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
     if not isinstance(doc, dict) or doc.get("action") not in _ACTIONS:
         return None
@@ -113,5 +126,5 @@ def consume(collab, hid: str) -> bool:
     try:
         _path(collab, hid).unlink()
         return True
-    except (OSError, BadRequest):
+    except OSError, BadRequest:
         return False

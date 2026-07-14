@@ -42,37 +42,59 @@ import lanes  # noqa: E402
 
 EXIT_OK, EXIT_USAGE = 0, 1
 
-SCENARIOS = ("clean", "self-approval", "missing-ledger", "source-drift", "test-failure",
-             "missing-preflight", "confirmed-finding")
+SCENARIOS = (
+    "clean",
+    "self-approval",
+    "missing-ledger",
+    "source-drift",
+    "test-failure",
+    "missing-preflight",
+    "confirmed-finding",
+)
 GUARDRAILS = ["path-safety", "data-integrity", "bounded-autonomy", "untrusted-agent-output"]
 _TITLE = "Add closeout-report command for autonomous closeout evidence summaries"
-BUNDLE_FILES = ("summary.json", "reviewer.md", "lanes.json", "tests.json",
-                "source_manifest.json", "done_contract.json")
+BUNDLE_FILES = (
+    "summary.json",
+    "reviewer.md",
+    "lanes.json",
+    "tests.json",
+    "source_manifest.json",
+    "done_contract.json",
+)
 
 
 def _seats() -> dict:
     """Builder + independent breaker/verifier + a can_sign_off reviewer (three distinct lane seats)."""
-    return {"builder": {"backend": "cli", "cmd": ["fake-builder"], "system": "builder"},
-            "grok": {"backend": "cli", "cmd": ["fake-grok"], "system": "breaker"},
-            "gemini": {"backend": "cli", "cmd": ["fake-gemini"], "system": "verifier"},
-            "reviewer": {"backend": "cli", "cmd": ["fake-reviewer"], "system": "reviewer",
-                         "can_sign_off": True}}
+    return {
+        "builder": {"backend": "cli", "cmd": ["fake-builder"], "system": "builder"},
+        "grok": {"backend": "cli", "cmd": ["fake-grok"], "system": "breaker"},
+        "gemini": {"backend": "cli", "cmd": ["fake-gemini"], "system": "verifier"},
+        "reviewer": {"backend": "cli", "cmd": ["fake-reviewer"], "system": "reviewer", "can_sign_off": True},
+    }
 
 
 def _scripted_runner(inject: str):
     """A deterministic fake agent (no network), routed by the seat's cmd[0]. The breaker/verifier drive the
     lanes; ``confirmed-finding`` makes the breaker report a defect the verifier CONFIRMS."""
+
     def run(cmd, prompt, *, timeout, **kw):
         who = cmd[0]
         if "reviewer" in who:
             return "Reviewed against source; inspected closeout_report.py.\n[[SIGNOFF]]"
         if "grok" in who or "breaker" in who:
-            return ("FINDING: closeout_report.collect -> a crafted ledger yields a wrong verdict"
-                    if inject == "confirmed-finding" else "NO-FINDING")
+            return (
+                "FINDING: closeout_report.collect -> a crafted ledger yields a wrong verdict"
+                if inject == "confirmed-finding"
+                else "NO-FINDING"
+            )
         if "gemini" in who or "verifier" in who:
-            return ("VERDICT: CONFIRMED closeout_report.collect crafted-ledger trigger reproduces"
-                    if inject == "confirmed-finding" else "VERDICT: REFUTED")
+            return (
+                "VERDICT: CONFIRMED closeout_report.collect crafted-ledger trigger reproduces"
+                if inject == "confirmed-finding"
+                else "VERDICT: REFUTED"
+            )
         return "ok"
+
     return run
 
 
@@ -87,14 +109,18 @@ def _inject_guardrails(collab, hid: str, guardrails: list[str]) -> None:
 def _corruptor(inject: str, collab, hid: str, src_base: Path):
     """Return a callable that corrupts one piece of evidence AFTER the ledger is built (or ``None``)."""
     if inject == "source-drift":
+
         def c():
             (src_base / "closeout_report.py").write_text("# drift after manifest\n", encoding="utf-8")
+
         return c
     if inject == "missing-preflight":
+
         def c():
             led = lanes.read_ledger(collab, hid) or {}
             led["reviewer_preflight"] = None
             lanes.write_ledger(collab, hid, led)
+
         return c
     return None
 
@@ -112,11 +138,20 @@ def _write_bundle(collab, hid: str, verdict: dict) -> Path:
 
     _w("summary.json", summary)
     cc.safe_write(d / "reviewer.md", cr.render_markdown(summary))
-    _w("lanes.json", {"required": summary["lanes"]["required"], "ran": summary["lanes"]["ran"],
-                      "lanes": ledger.get("lanes") or [], "blockers": ledger.get("blockers") or []})
+    _w(
+        "lanes.json",
+        {
+            "required": summary["lanes"]["required"],
+            "ran": summary["lanes"]["ran"],
+            "lanes": ledger.get("lanes") or [],
+            "blockers": ledger.get("blockers") or [],
+        },
+    )
     _w("tests.json", ledger.get("tests") or {})
-    _w("source_manifest.json", {"source_base": ledger.get("source_base"),
-                                "source_manifest": ledger.get("source_manifest") or {}})
+    _w(
+        "source_manifest.json",
+        {"source_base": ledger.get("source_base"), "source_manifest": ledger.get("source_manifest") or {}},
+    )
     _w("done_contract.json", verdict)  # the verdict CAPTURED at decision time (state=claimed)
     return d
 
@@ -145,7 +180,7 @@ def run_smoke(*, inject: str = "clean", workspace=None, real: bool = False, coll
         source_roots = ["*.py"]
         ok = inject != "test-failure"
         test_file = ws / "test_slice.py"
-        test_file.write_text(f"def test_slice():\n    assert {str(ok)}\n", encoding="utf-8")
+        test_file.write_text(f"def test_slice():\n    assert {ok!s}\n", encoding="utf-8")
         subprocess.run(["git", "init"], cwd=str(ws), capture_output=True)  # preflight git needs a repo
 
     # --- create + claim the real handoff ---
@@ -155,45 +190,67 @@ def run_smoke(*, inject: str = "clean", workspace=None, real: bool = False, coll
     hc.claim(collab_p, hid)
 
     seats = _seats()
-    closeout = {"breaker": "grok", "verifier": "gemini", "source_base": str(src_base),
-                "source_roots": source_roots, "test_path": str(test_file)}
+    closeout = {
+        "breaker": "grok",
+        "verifier": "gemini",
+        "source_base": str(src_base),
+        "source_roots": source_roots,
+        "test_path": str(test_file),
+    }
     runner = _scripted_runner(inject)
     log = ap._log_default(collab_p)
 
     # --- the genuine closeout decision (the same primitives the driver's run_round uses) ---
     if inject != "missing-ledger":
-        ap._autoclose_ledger(collab_p, hid, builder, closeout, seats=seats, runner=runner, log=log,
-                             reviewer_seat="reviewer")
+        ap._autoclose_ledger(
+            collab_p, hid, builder, closeout, seats=seats, runner=runner, log=log, reviewer_seat="reviewer"
+        )
     corrupt = _corruptor(inject, collab_p, hid, src_base)
     if corrupt:
         corrupt()
     verdict = dcon.evaluate(collab_p, hid, seats=seats, reviewer_seat="reviewer", builder_seat=builder)
     if verdict["satisfied"]:
         hc.done(collab_p, hid)  # the transition is caused ONLY by a satisfied verdict
-        ap._emit_safe(he.on_autonomous_done, log, ap._run_id(collab_p), hid, span_id=f"{hid}:signoff",
-                      parent_span_id=None, reviewer="reviewer", contract_hash=verdict["hash"])
+        ap._emit_safe(
+            he.on_autonomous_done,
+            log,
+            ap._run_id(collab_p),
+            hid,
+            span_id=f"{hid}:signoff",
+            parent_span_id=None,
+            reviewer="reviewer",
+            contract_hash=verdict["hash"],
+        )
 
     final_state = hc.state_of(collab_p, hid)
     bundle_dir = _write_bundle(collab_p, hid, verdict)
     return {
-        "scenario": inject, "real": real,
-        "workspace": str(ws), "collab": str(collab_p), "home": str(home),
-        "handoff_id": hid, "run_id": ap._run_id(collab_p),
-        "final_state": final_state, "reached_done": final_state == "done",
-        "satisfied": verdict["satisfied"], "contract_hash": verdict["hash"],
+        "scenario": inject,
+        "real": real,
+        "workspace": str(ws),
+        "collab": str(collab_p),
+        "home": str(home),
+        "handoff_id": hid,
+        "run_id": ap._run_id(collab_p),
+        "final_state": final_state,
+        "reached_done": final_state == "done",
+        "satisfied": verdict["satisfied"],
+        "contract_hash": verdict["hash"],
         "unmet": [c["name"] for c in verdict["conditions"] if c["status"] != "pass"],
         "bundle_dir": str(bundle_dir),
     }
 
 
 def _render_result(r: dict) -> str:
-    L = [f"self-host smoke — scenario '{r['scenario']}'{' (--real)' if r['real'] else ''}",
-         f"  workspace : {r['workspace']}",
-         f"  collab    : {r['collab']}",
-         f"  handoff   : {r['handoff_id']}  (run {r['run_id']})",
-         f"  satisfied : {r['satisfied']}",
-         f"  final     : {r['final_state']}  (reached done: {r['reached_done']})",
-         f"  bundle    : {r['bundle_dir']}"]
+    L = [
+        f"self-host smoke — scenario '{r['scenario']}'{' (--real)' if r['real'] else ''}",
+        f"  workspace : {r['workspace']}",
+        f"  collab    : {r['collab']}",
+        f"  handoff   : {r['handoff_id']}  (run {r['run_id']})",
+        f"  satisfied : {r['satisfied']}",
+        f"  final     : {r['final_state']}  (reached done: {r['reached_done']})",
+        f"  bundle    : {r['bundle_dir']}",
+    ]
     if r["unmet"]:
         L.append(f"  unmet     : {', '.join(r['unmet'])}")
     return "\n".join(L) + "\n"
@@ -201,12 +258,20 @@ def _render_result(r: dict) -> str:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    p = argparse.ArgumentParser(prog="self-host-smoke",
-                                description="self-hosting autonomous-closeout harness (disposable)")
-    p.add_argument("--inject", choices=SCENARIOS, default="clean",
-                   help="run a negative scenario (must be blocked); default 'clean' must reach done")
-    p.add_argument("--real", action="store_true",
-                   help="review the LIVE repo source + run the real suite (manual, slow; not CI)")
+    p = argparse.ArgumentParser(
+        prog="self-host-smoke", description="self-hosting autonomous-closeout harness (disposable)"
+    )
+    p.add_argument(
+        "--inject",
+        choices=SCENARIOS,
+        default="clean",
+        help="run a negative scenario (must be blocked); default 'clean' must reach done",
+    )
+    p.add_argument(
+        "--real",
+        action="store_true",
+        help="review the LIVE repo source + run the real suite (manual, slow; not CI)",
+    )
     p.add_argument("--collab", help="use this collab path instead of a disposable one (may touch real state)")
     p.add_argument("--workspace", help="use this workspace dir instead of a fresh temp dir")
     p.add_argument("--format", choices=("text", "json"), default="text")
@@ -219,8 +284,9 @@ def main(argv=None) -> int:
     except (cc.CollabError, hc.HandoffNotFound, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return EXIT_USAGE
-    sys.stdout.write(json.dumps(r, indent=2, sort_keys=True) + "\n" if args.format == "json"
-                     else _render_result(r))
+    sys.stdout.write(
+        json.dumps(r, indent=2, sort_keys=True) + "\n" if args.format == "json" else _render_result(r)
+    )
     # Exit code encodes the invariant: clean MUST reach done; a negative scenario MUST be blocked.
     expected_done = args.inject == "clean"
     return EXIT_OK if r["reached_done"] == expected_done else EXIT_USAGE

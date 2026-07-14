@@ -32,8 +32,9 @@ def _path(collab, hid: str) -> Path:
     return _dir(collab) / f"{hid}.md"
 
 
-def render(hid: str, blockers: list, *, attempts: int, title: str | None = None,
-           run_uid: str | None = None) -> str:
+def render(
+    hid: str, blockers: list, *, attempts: int, title: str | None = None, run_uid: str | None = None
+) -> str:
     """The escalation markdown: what was confirmed, how many auto-fixes were tried, and how to clear it."""
     L = [_START.format(hid=hid)]
     head = f"# ⚠ Verified defect — needs a terminal fix: {hid}"
@@ -42,9 +43,11 @@ def render(hid: str, blockers: list, *, attempts: int, title: str | None = None,
     L.append(head)
     L.append("")
     n = len(blockers or [])
-    L.append(f"The adversarial lanes CONFIRMED **{n} defect{'s' if n != 1 else ''}**, and **{attempts} "
-             f"autonomous fix attempt{'s' if attempts != 1 else ''}** did not clear them. The auto-fix loop "
-             f"stopped here rather than thrash — this needs a human/expert fix.")
+    L.append(
+        f"The adversarial lanes CONFIRMED **{n} defect{'s' if n != 1 else ''}**, and **{attempts} "
+        f"autonomous fix attempt{'s' if attempts != 1 else ''}** did not clear them. The auto-fix loop "
+        f"stopped here rather than thrash — this needs a human/expert fix."
+    )
     if run_uid:
         L.append("")
         L.append(f"_Run: {run_uid}._")
@@ -61,14 +64,17 @@ def render(hid: str, blockers: list, *, attempts: int, title: str | None = None,
         L.append("- (no structured findings were recorded in the ledger)")
     L.append("")
     L.append("## How to clear it")
-    L.append("1. Fix the cited code. 2. Re-queue the handoff (or re-run the lanes). "
-             "3. Once the lanes are clean, delete this file (`escalation.clear`).")
+    L.append(
+        "1. Fix the cited code. 2. Re-queue the handoff (or re-run the lanes). "
+        "3. Once the lanes are clean, delete this file (`escalation.clear`)."
+    )
     L.append(_END.format(hid=hid))
     return "\n".join(L) + "\n"
 
 
-def write(collab, hid: str, blockers: list, *, attempts: int, title: str | None = None,
-          run_uid: str | None = None) -> Path:
+def write(
+    collab, hid: str, blockers: list, *, attempts: int, title: str | None = None, run_uid: str | None = None
+) -> Path:
     """Persist the escalation to ``autopilot/escalations/<hid>.md`` (atomic). Returns the path."""
     p = _path(collab, hid)
     p.parent.mkdir(parents=True, exist_ok=True)

@@ -40,6 +40,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, suppress
 from dataclasses import replace
 from pathlib import Path
 
@@ -67,9 +68,9 @@ def _load_local(alias: str, filename: str):
 
 _trace = _load_local("collab_trace", "trace.py")
 
-_MAX_RESP_BYTES = 256 * 1024   # process-boundary cap on an agent's stdout ([C38] — a runaway can't OOM us)
+_MAX_RESP_BYTES = 256 * 1024  # process-boundary cap on an agent's stdout ([C38] — a runaway can't OOM us)
 _MAX_STDERR_BYTES = 64 * 1024  # process-boundary cap on an agent's stderr
-_DEFAULT_TIMEOUT = 300.0       # per-backend-invocation wall clock ([C39])
+_DEFAULT_TIMEOUT = 300.0  # per-backend-invocation wall clock ([C39])
 _POINTER_RE = re.compile(r"^AUTOPILOT_REPLY (\S+)\s*$", re.M)
 
 # Reviewer sign-off token (§18). A seat marked "can_sign_off": true in seats.json ASSERTS the §18.3 evidence
@@ -139,7 +140,7 @@ def _write_status(collab, **fields) -> None:
             cur = json.loads(p.read_text("utf-8"))
             if not isinstance(cur, dict):
                 cur = {}
-        except (OSError, ValueError):
+        except OSError, ValueError:
             cur = {}
         cur.setdefault("schema_version", "0.1")
         cur.update(fields)
@@ -150,7 +151,9 @@ def _write_status(collab, **fields) -> None:
         print(f"[autopilot] status write failed: {e}", file=sys.stderr)
 
 
-_HEARTBEAT_S = 5.0  # while a backend call is in flight, refresh the status heartbeat this often (visible liveness)
+_HEARTBEAT_S = (
+    5.0  # while a backend call is in flight, refresh the status heartbeat this often (visible liveness)
+)
 
 
 class _Heartbeat:
@@ -199,9 +202,12 @@ def _read_control(collab) -> dict:
             return default
         mr = doc.get("max_rounds")
         mr = mr if (isinstance(mr, int) and not isinstance(mr, bool) and mr > 0) else None
-        return {"paused": bool(doc.get("paused", False)), "stop": bool(doc.get("stop", False)),
-                "max_rounds": mr}
-    except (OSError, ValueError):
+        return {
+            "paused": bool(doc.get("paused", False)),
+            "stop": bool(doc.get("stop", False)),
+            "max_rounds": mr,
+        }
+    except OSError, ValueError:
         return default
 
 
@@ -215,7 +221,9 @@ def _seats_file(home) -> Path:
 
 
 def load_seats(home) -> dict:
-    """Load ``seats.json`` -> ``{seat: {backend, cmd, system, timeout}}``. Refuse-on-corrupt ([data-integrity]).
+    """Load ``seats.json`` into ``{seat: {backend, cmd, system, timeout}}``.
+
+    Refuse corrupt configuration ([data-integrity]).
 
     A missing file is an empty config (no seat is automated — every handoff waits for a human). A file that
     exists but is unparseable/mis-shaped raises rather than silently driving nothing or the wrong thing.
@@ -269,7 +277,7 @@ def load_models(home) -> dict:
     f = _seats_file(home)
     try:
         doc = json.loads(f.read_text("utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return {}
     models = doc.get("models") if isinstance(doc, dict) else None
     return models if isinstance(models, dict) else {}
@@ -297,6 +305,7 @@ def _resolve_assurance_plan(home, guardrails):
         return None
     try:
         import verification_plan as vp
+
         lanes_file = Path(cc.resolve_kit_root()) / "telemetry" / "lanes.json"
         lanes_doc = json.loads(lanes_file.read_text("utf-8"))
         return vp.resolve_verification_plan(lanes_doc, doc, guardrails=guardrails)
@@ -429,18 +438,14 @@ def _feed_stdin(proc, data: bytes) -> None:
 
 
 def _kill(proc) -> None:
-    try:
+    with suppress(OSError):
         proc.kill()
-    except OSError:
-        pass
-    try:
+    with suppress(Exception):
         proc.wait(timeout=5)
-    except Exception:
-        pass
 
 
 def _fsize(f) -> int:
-    """On-disk size of a capture temp file — reflects the CHILD's writes (the parent's file offset does not)."""
+    """Return a capture file's on-disk size, reflecting the child's writes rather than this offset."""
     try:
         return os.fstat(f.fileno()).st_size
     except OSError:
@@ -468,16 +473,19 @@ def _cli_runner(cmd: list, prompt: str, *, timeout: float, unset_env=None) -> st
     if unset_env:
         drop = {str(k) for k in unset_env}
         child_env = {k: v for k, v in os.environ.items() if k not in drop}
+    capture = ExitStack()
     try:
-        fout = tempfile.TemporaryFile()
-        ferr = tempfile.TemporaryFile()
+        fout = capture.enter_context(tempfile.TemporaryFile())  # noqa: SIM115 - ExitStack owns it below
+        ferr = capture.enter_context(tempfile.TemporaryFile())  # noqa: SIM115 - ExitStack owns it below
     except OSError as e:
+        capture.close()
         raise cc.CollabError(f"backend {name!r}: cannot open capture buffers: {e}") from e
     breach = None
-    try:
+    with capture:
         try:
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=fout, stderr=ferr, shell=False,
-                                    env=child_env)
+            proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=fout, stderr=ferr, shell=False, env=child_env
+            )
         except OSError as e:
             raise cc.CollabError(f"backend {name!r} could not be launched: {e}") from e
         threading.Thread(target=_feed_stdin, args=(proc, prompt.encode("utf-8")), daemon=True).start()
@@ -495,12 +503,9 @@ def _cli_runner(cmd: list, prompt: str, *, timeout: float, unset_env=None) -> st
             _kill(proc)
         rc = proc.returncode
         fout.seek(0)
-        out = fout.read(_MAX_RESP_BYTES)   # bounded read-back: never the full on-disk flood
+        out = fout.read(_MAX_RESP_BYTES)  # bounded read-back: never the full on-disk flood
         ferr.seek(0)
         err = ferr.read(_MAX_STDERR_BYTES)
-    finally:
-        fout.close()
-        ferr.close()
     if breach == "timeout":
         raise cc.CollabError(f"backend {name!r} timed out after {timeout}s (process killed)")
     if breach == "cap":
@@ -522,7 +527,7 @@ def load_closeout(home) -> dict | None:
     ``source_roots`` (globs), ``test_path`` (pytest target run before closeout)."""
     try:
         doc = json.loads(_seats_file(home).read_text("utf-8"))
-    except (OSError, ValueError, cc.CollabError):
+    except OSError, ValueError, cc.CollabError:
         return None
     c = doc.get("closeout") if isinstance(doc, dict) else None
     return c if isinstance(c, dict) else None
@@ -534,8 +539,13 @@ def _run_test_suite(test_path, cwd) -> dict:
     if not test_path:
         return {"passed": None, "run_id": None}
     try:
-        proc = subprocess.run([sys.executable, "-m", "pytest", str(test_path), "-q"],
-                              cwd=str(cwd) if cwd else None, capture_output=True, text=True, timeout=1800)
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", str(test_path), "-q"],
+            cwd=str(cwd) if cwd else None,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+        )
         return {"passed": proc.returncode == 0, "run_id": f"pytest-{time.time_ns()}"}
     except (OSError, subprocess.SubprocessError) as e:
         return {"passed": False, "run_id": f"pytest-error: {str(e)[:120]}"}
@@ -549,15 +559,20 @@ def _capture_preflight(base, test_path, reviewer_seat, manifest) -> dict:
     ``--collect-only``) plus the files under review (``inspected_files`` = the attested manifest paths).
     The done-contract refuses an autonomous close without a valid block — a text-only "reviewed it" is not
     repo awareness ([C42]). Captured by the DRIVER, never parsed from untrusted agent stdout ([C38])."""
+
     def _run(argv):
         try:
             p = subprocess.run(argv, cwd=str(base), capture_output=True, text=True, timeout=300)
             return {"exit_code": p.returncode, "stdout_tail": (p.stdout or "")[-2000:]}
         except (OSError, subprocess.SubprocessError) as e:
             return {"exit_code": -1, "stdout_tail": f"error: {str(e)[:200]}"}
+
     git_rev = _run(["git", "rev-parse", "--show-toplevel"])
-    collect = (_run([sys.executable, "-m", "pytest", "--collect-only", "-q", str(test_path)])
-               if test_path else {"exit_code": -1, "stdout_tail": "no test_path configured"})
+    collect = (
+        _run([sys.executable, "-m", "pytest", "--collect-only", "-q", str(test_path)])
+        if test_path
+        else {"exit_code": -1, "stdout_tail": "no test_path configured"}
+    )
     ok_root = git_rev["exit_code"] == 0
     top = git_rev["stdout_tail"].strip()
     repo_root = top.splitlines()[-1] if (ok_root and top) else str(base)
@@ -582,14 +597,26 @@ def _autoclose_ledger(collab, hid, builder_seat, closeout, *, seats, runner, log
     captures the reviewer repo-preflight (condition 11) and writes
     ``<collab>/autopilot/verification/<hid>.ledger.json`` that the done-contract then reads."""
     import lanes as _lanes  # lazy: lanes imports autopilot; autopilot must not import lanes at module top
+
     base = closeout.get("source_base") or str(cc.resolve_kit_root())
     roots = closeout.get("source_roots") or ["**/*.py"]
     test_path = closeout.get("test_path")
     tests = _run_test_suite(test_path, base)
-    return _lanes.run_lanes(collab, hid, seats=seats, breaker_seat=closeout.get("breaker"),
-                            verifier_seat=closeout.get("verifier"), builder_seat=builder_seat,
-                            reviewer_seat=reviewer_seat, source_roots=roots, source_base=base,
-                            test_path=test_path, tests=tests, runner=runner, log=log)
+    return _lanes.run_lanes(
+        collab,
+        hid,
+        seats=seats,
+        breaker_seat=closeout.get("breaker"),
+        verifier_seat=closeout.get("verifier"),
+        builder_seat=builder_seat,
+        reviewer_seat=reviewer_seat,
+        source_roots=roots,
+        source_base=base,
+        test_path=test_path,
+        tests=tests,
+        runner=runner,
+        log=log,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -597,8 +624,19 @@ def _autoclose_ledger(collab, hid, builder_seat, closeout, *, seats, runner, log
 # --------------------------------------------------------------------------- #
 
 
-def _dispatch_seat(collab, seat: str, *, seats: dict, runner, hid: str, transcript: str, log: str,
-                   rid: str, attempt: int, span_role: str) -> str | None:
+def _dispatch_seat(
+    collab,
+    seat: str,
+    *,
+    seats: dict,
+    runner,
+    hid: str,
+    transcript: str,
+    log: str,
+    rid: str,
+    attempt: int,
+    span_role: str,
+) -> str | None:
     """Run ONE seat turn against the already-claimed handoff ``hid`` and return its raw stdout, or ``None``
     on a backend failure. A turn is *conversation*, not a handoff (ADR-0001): it is persisted only as an
     inert reply artifact + ``autopilot.round`` telemetry — it NEVER creates or transitions a board entry.
@@ -610,13 +648,27 @@ def _dispatch_seat(collab, seat: str, *, seats: dict, runner, hid: str, transcri
     if cfg is None:
         return None  # human/web seat mid-exchange — the caller treats it as awaiting a person
     sp = f"{span_role}:{hid}:{attempt}"
-    _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.round", role=seat,
-               artifact=f"handoff:{hid}", span_id=sp,
-               decision={"action": "start", "reason_codes": [f"seat:{seat}"], "confidence": None},
-               metrics={"round_no": attempt})
+    _emit_safe(
+        _trace.emit,
+        log,
+        run_id=rid,
+        stage="autopilot.round",
+        role=seat,
+        artifact=f"handoff:{hid}",
+        span_id=sp,
+        decision={"action": "start", "reason_codes": [f"seat:{seat}"], "confidence": None},
+        metrics={"round_no": attempt},
+    )
     timeout_s = float(cfg.get("timeout", _DEFAULT_TIMEOUT))
-    _write_status(collab, phase="thinking", active_seat=seat, current_hid=hid, round=attempt,
-                  active_since=_now_utc(), timeout=timeout_s)  # active_since => elapsed; timeout => deadline
+    _write_status(
+        collab,
+        phase="thinking",
+        active_seat=seat,
+        current_hid=hid,
+        round=attempt,
+        active_since=_now_utc(),
+        timeout=timeout_s,
+    )  # active_since => elapsed; timeout => deadline
     prompt = _build_prompt(cfg.get("system"), transcript)
     t0 = time.monotonic()
     try:
@@ -625,21 +677,39 @@ def _dispatch_seat(collab, seat: str, *, seats: dict, runner, hid: str, transcri
     except cc.CollabError as e:
         lat_ms = round((time.monotonic() - t0) * 1000, 1)
         print(f"[autopilot] backend for seat {seat!r} failed on {hid}: {e}", file=sys.stderr)
-        _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.round", role=seat,
-                   artifact=f"handoff:{hid}", span_id=f"{sp}:fail", parent_span_id=sp,
-                   decision={"action": "fail", "reason_codes": ["backend_error"], "confidence": None},
-                   failure={"kind": "backend", "message": str(e)[:500]}, metrics={"latency_ms": lat_ms})
-        _write_status(collab, active_seat=None, current_hid=None, last_error=str(e)[:200],
-                      last_latency_ms=lat_ms)
+        _emit_safe(
+            _trace.emit,
+            log,
+            run_id=rid,
+            stage="autopilot.round",
+            role=seat,
+            artifact=f"handoff:{hid}",
+            span_id=f"{sp}:fail",
+            parent_span_id=sp,
+            decision={"action": "fail", "reason_codes": ["backend_error"], "confidence": None},
+            failure={"kind": "backend", "message": str(e)[:500]},
+            metrics={"latency_ms": lat_ms},
+        )
+        _write_status(
+            collab, active_seat=None, current_hid=None, last_error=str(e)[:200], last_latency_ms=lat_ms
+        )
         return None  # handoff stays claimed for a human; the drive stalls ([C39])
     lat_ms = round((time.monotonic() - t0) * 1000, 1)
     resp_bytes = len(raw.encode("utf-8", "replace"))
     relpath = _write_reply(collab, seat, _sanitize(raw))  # the turn, stored as an inert artifact
     _write_status(collab, active_seat=None, current_hid=None, last_latency_ms=lat_ms, last_error=None)
-    _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.round", role=seat,
-               artifact=f"handoff:{hid}", span_id=f"{sp}:done", parent_span_id=sp,
-               decision={"action": "turn", "reason_codes": [f"reply:{relpath}"], "confidence": None},
-               metrics={"latency_ms": lat_ms, "resp_bytes": resp_bytes})
+    _emit_safe(
+        _trace.emit,
+        log,
+        run_id=rid,
+        stage="autopilot.round",
+        role=seat,
+        artifact=f"handoff:{hid}",
+        span_id=f"{sp}:done",
+        parent_span_id=sp,
+        decision={"action": "turn", "reason_codes": [f"reply:{relpath}"], "confidence": None},
+        metrics={"latency_ms": lat_ms, "resp_bytes": resp_bytes},
+    )
     print(f"[autopilot] {seat} took a turn on {hid} (attempt {attempt})")
     return raw
 
@@ -662,15 +732,29 @@ def _synth_reviewer_report(raw: str | None, candidate_id: str, *, can_sign_off: 
     if raw is None:
         return None
     if can_sign_off and _SIGNOFF_RE.search(raw):
-        payload = {"requirement_coverage": {}, "blocking_findings": [], "advisory_findings": [],
-                   "edited_code": False}
+        payload = {
+            "requirement_coverage": {},
+            "blocking_findings": [],
+            "advisory_findings": [],
+            "edited_code": False,
+        }
     else:
         prose = _sanitize(raw).strip() or "reviewer withheld sign-off without stating a reason"
-        payload = {"requirement_coverage": {}, "advisory_findings": [], "edited_code": False,
-                   "blocking_findings": [{"source": "reviewer", "severity": ca.BLOCKING, "category": "contract",
-                                          "title": "reviewer withheld sign-off", "evidence": prose[:8000],
-                                          "remediation": "address the reviewer's blocking concerns, then "
-                                                         "re-request sign-off"}]}
+        payload = {
+            "requirement_coverage": {},
+            "advisory_findings": [],
+            "edited_code": False,
+            "blocking_findings": [
+                {
+                    "source": "reviewer",
+                    "severity": ca.BLOCKING,
+                    "category": "contract",
+                    "title": "reviewer withheld sign-off",
+                    "evidence": prose[:8000],
+                    "remediation": "address the reviewer's blocking concerns, then re-request sign-off",
+                }
+            ],
+        }
     return ca.ReviewerReport.parse(payload, candidate_id=candidate_id)
 
 
@@ -680,23 +764,47 @@ def _assessment_lane_ledger(led: dict | None) -> dict:
     blockers become blocking correctness findings; the ``tool_error``/``incomplete``/``overflow`` signals
     pass through so an infrastructure/verification-incomplete run is never laundered into a clean pass."""
     led = led or {}
-    confirmed = [{"fingerprint": b.get("id"), "lane": b.get("lane"),
-                  "evidence": (b.get("description") or "").strip(), "category": "correctness",
-                  "remediation": b.get("regression_test") or ""}
-                 for b in (led.get("blockers") or [])]
-    return {"confirmed": confirmed, "refuted": [], "tool_error": led.get("tool_error"),
-            "incomplete": led.get("incomplete"), "overflow": int(led.get("overflow", 0) or 0),
-            "unverified": led.get("unverified", [])}
+    confirmed = [
+        {
+            "fingerprint": b.get("id"),
+            "lane": b.get("lane"),
+            "evidence": (b.get("description") or "").strip(),
+            "category": "correctness",
+            "remediation": b.get("regression_test") or "",
+        }
+        for b in (led.get("blockers") or [])
+    ]
+    return {
+        "confirmed": confirmed,
+        "refuted": [],
+        "tool_error": led.get("tool_error"),
+        "incomplete": led.get("incomplete"),
+        "overflow": int(led.get("overflow", 0) or 0),
+        "unverified": led.get("unverified", []),
+    }
 
 
-def _compute_candidate(collab, hid, *, seats, builder_seat, reviewer_seat, source_roots, source_base,
-                       test_path, guardrails, builder_output=None, verification_plan=None):
+def _compute_candidate(
+    collab,
+    hid,
+    *,
+    seats,
+    builder_seat,
+    reviewer_seat,
+    source_roots,
+    source_base,
+    test_path,
+    guardrails,
+    builder_output=None,
+    verification_plan=None,
+):
     """Compute the candidate identity for the builder's current output. For CODE work the source manifest
     drives the id (so an unchanged fix mints the SAME id — the no-progress signal); the reviewer rubric +
     builder seat profile are folded in so a changed lens can never reuse evidence under the old one
     (ADR-0003 D4). For a TEXT-ONLY handoff (no source tree) there is nothing to hash on disk, so the
     builder's OUTPUT digest stands in — distinct output per attempt still mints a new candidate."""
     import gate_runner as gr  # lazy: gate_runner is heavy and only needed on the assess path
+
     manifest = gr.source_manifest(source_roots, source_base) if (source_roots and source_base) else {}
     if not manifest and builder_output is not None:  # text-only handoff: identity from the builder's output
         manifest = {"__builder_output__": _sha256(builder_output)}
@@ -710,31 +818,59 @@ def _compute_candidate(collab, hid, *, seats, builder_seat, reviewer_seat, sourc
         fp = "assessment:" + _sha256(json.dumps(profile_payload, sort_keys=True))[:16]
     except Exception:
         fp = ""
-    lane_config = (json.loads(verification_plan.identity_payload) if verification_plan is not None
-                   else {"guardrails": list(guardrails or [])})
+    lane_config = (
+        json.loads(verification_plan.identity_payload)
+        if verification_plan is not None
+        else {"guardrails": list(guardrails or [])}
+    )
     return ca.Candidate.compute(
-        hid, source_manifest=manifest, source_roots=list(source_roots or []), test_command=test_path,
+        hid,
+        source_manifest=manifest,
+        source_roots=list(source_roots or []),
+        test_command=test_path,
         lane_config=lane_config,
-        assessment_plan_revision=(verification_plan.lane_config_revision if verification_plan is not None else ""),
-        reviewer_rubric=str(rcfg.get("system") or ""), seat_profile_fingerprint=fp,
+        assessment_plan_revision=(
+            verification_plan.lane_config_revision if verification_plan is not None else ""
+        ),
+        reviewer_rubric=str(rcfg.get("system") or ""),
+        seat_profile_fingerprint=fp,
     )
 
 
 def _sha256(s: str) -> str:
     import hashlib
+
     return hashlib.sha256(s.encode("utf-8", "replace")).hexdigest()
 
 
-def _assess_candidate(collab, hid, candidate, *, seats, closeout, builder_seat, reviewer_seat,
-                       reviewer_transcript, runner, budget, log, rid, source_base, source_roots,
-                       test_path, guardrails, verification_plan=None):
+def _assess_candidate(
+    collab,
+    hid,
+    candidate,
+    *,
+    seats,
+    closeout,
+    builder_seat,
+    reviewer_seat,
+    reviewer_transcript,
+    runner,
+    budget,
+    log,
+    rid,
+    source_base,
+    source_roots,
+    test_path,
+    guardrails,
+    verification_plan=None,
+):
     """Gather one candidate's evidence: the reviewer DECISION ∥ the adversarial LANES, fanned out under a
     ThreadPoolExecutor and charged atomically through the shared ``RunBudget``. Returns
     ``(reviewer_report, lane_ledger)`` (the raw ``run_lanes`` ledger). A budget denial before fan-out, a
     lane exception, or a source edit DURING assessment (manifest drift) yields an infra/incomplete ledger —
     never a silent pass."""
     import gate_runner as gr  # lazy
-    import lanes as _lanes     # lazy (lanes imports ap at module top)
+    import lanes as _lanes  # lazy (lanes imports ap at module top)
+
     cid = candidate.candidate_id
     manifest_before = gr.source_manifest(source_roots, source_base) if (source_roots and source_base) else {}
     # Reserve the reviewer decision before concurrent dispatch. Resolved v2 lane pairs reserve their own
@@ -744,36 +880,69 @@ def _assess_candidate(collab, hid, candidate, *, seats, closeout, builder_seat, 
         if verification_plan is None:
             budget.charge(rb.VERIFICATION_PASS)
     except rb.BudgetExceeded as e:
-        return None, {"blockers": [], "tool_error": None, "overflow": 0, "unverified": [],
-                      "incomplete": {"reason": "budget", "which": e.which}}
+        return None, {
+            "blockers": [],
+            "tool_error": None,
+            "overflow": 0,
+            "unverified": [],
+            "incomplete": {"reason": "budget", "which": e.which},
+        }
     tests = _run_test_suite(test_path, source_base)
     base = closeout or {}
 
     def _review():
-        return _dispatch_seat(collab, reviewer_seat, seats=seats, runner=runner, hid=hid,
-                              transcript=reviewer_transcript, log=log, rid=rid,
-                              attempt=int(budget.consumed().get("actor_turns", 0)), span_role="reviewer")
+        return _dispatch_seat(
+            collab,
+            reviewer_seat,
+            seats=seats,
+            runner=runner,
+            hid=hid,
+            transcript=reviewer_transcript,
+            log=log,
+            rid=rid,
+            attempt=int(budget.consumed().get("actor_turns", 0)),
+            span_role="reviewer",
+        )
 
     def _run_lanes():
-        return _lanes.run_lanes(collab, hid, seats=seats, breaker_seat=base.get("breaker"),
-                                verifier_seat=base.get("verifier"), builder_seat=builder_seat,
-                                reviewer_seat=reviewer_seat, guardrails=guardrails, source_roots=source_roots,
-                                 source_base=source_base, test_path=test_path, tests=tests, runner=runner,
-                                 log=log, budget=budget, candidate_id=cid,
-                                 verification_plan=verification_plan)
+        return _lanes.run_lanes(
+            collab,
+            hid,
+            seats=seats,
+            breaker_seat=base.get("breaker"),
+            verifier_seat=base.get("verifier"),
+            builder_seat=builder_seat,
+            reviewer_seat=reviewer_seat,
+            guardrails=guardrails,
+            source_roots=source_roots,
+            source_base=source_base,
+            test_path=test_path,
+            tests=tests,
+            runner=runner,
+            log=log,
+            budget=budget,
+            candidate_id=cid,
+            verification_plan=verification_plan,
+        )
 
-    _write_status(collab, phase="thinking", active_seat="assess", current_hid=hid,
-                  active_since=_now_utc(), timeout=0)
-    with _Heartbeat(collab):  # keep updated_ts fresh through the multi-minute reviewer ∥ lanes fan-out
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            f_rev = ex.submit(_review)
-            f_lanes = ex.submit(_run_lanes)
-            rev_raw = f_rev.result()
-            try:
-                lane_ledger = f_lanes.result()
-            except (cc.CollabError, hc.HandoffNotFound) as e:
-                lane_ledger = {"blockers": [], "overflow": 0, "unverified": [], "incomplete": None,
-                               "tool_error": {"reason": "lane_exception", "error": str(e)[:200]}}
+    _write_status(
+        collab, phase="thinking", active_seat="assess", current_hid=hid, active_since=_now_utc(), timeout=0
+    )
+    # Keep updated_ts fresh through the multi-minute reviewer ∥ lanes fan-out.
+    with _Heartbeat(collab), ThreadPoolExecutor(max_workers=2) as ex:
+        f_rev = ex.submit(_review)
+        f_lanes = ex.submit(_run_lanes)
+        rev_raw = f_rev.result()
+        try:
+            lane_ledger = f_lanes.result()
+        except (cc.CollabError, hc.HandoffNotFound) as e:
+            lane_ledger = {
+                "blockers": [],
+                "overflow": 0,
+                "unverified": [],
+                "incomplete": None,
+                "tool_error": {"reason": "lane_exception", "error": str(e)[:200]},
+            }
     _write_status(collab, active_seat=None)
     # source==tested integrity: a source edit during the assessment invalidates the evidence just gathered.
     manifest_after = gr.source_manifest(source_roots, source_base) if (source_roots and source_base) else {}
@@ -806,8 +975,10 @@ def _promote_next_draft(collab, *, log: str | None = None, rid: str | None = Non
     driver is polling. Returns the promoted numeric id, or ``None`` when ``draft/`` is empty."""
     draft = Path(collab) / "handoffs" / "draft"
     try:
-        staged = sorted((p for p in draft.glob("*.md") if re.match(r"^\d+-", p.name)),
-                        key=lambda p: int(re.match(r"^(\d+)", p.name).group(1)))
+        staged = sorted(
+            (p for p in draft.glob("*.md") if re.match(r"^\d+-", p.name)),
+            key=lambda p: int(re.match(r"^(\d+)", p.name).group(1)),
+        )
     except OSError:
         return None
     if not staged:
@@ -822,15 +993,31 @@ def _promote_next_draft(collab, *, log: str | None = None, rid: str | None = Non
         return None
     hid = re.match(r"^(\d+)", src.name).group(1)
     if log:
-        _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.promote", role="autopilot",
-                   artifact=f"handoff:{hid}",
-                   decision={"action": "promote", "reason_codes": [f"hid:{hid}", "from:draft"], "confidence": None})
+        _emit_safe(
+            _trace.emit,
+            log,
+            run_id=rid,
+            stage="autopilot.promote",
+            role="autopilot",
+            artifact=f"handoff:{hid}",
+            decision={"action": "promote", "reason_codes": [f"hid:{hid}", "from:draft"], "confidence": None},
+        )
     print(f"[autopilot] promoted {src.name}: draft/ -> pending/ (next slice, in order)")
     return hid
 
 
-def run(collab, *, seats: dict, max_rounds: int | None = None, limits=None, runner=_cli_runner,
-        watch: bool = False, interval: float = 2.0, home=None, log: str | None = None) -> int:
+def run(
+    collab,
+    *,
+    seats: dict,
+    max_rounds: int | None = None,
+    limits=None,
+    runner=_cli_runner,
+    watch: bool = False,
+    interval: float = 2.0,
+    home=None,
+    log: str | None = None,
+) -> int:
     """Drive the CANDIDATE lifecycle ONE HANDOFF AT A TIME (ADR-0002/0003). Returns the total seat turns.
 
     The run holds a board-level ``ActiveHandoffLease`` (ADR-0003 D2) so exactly one driver ever selects or
@@ -863,8 +1050,9 @@ def run(collab, *, seats: dict, max_rounds: int | None = None, limits=None, runn
     started_ts = _now_utc()
     run_uid = re.sub(r"[^A-Za-z0-9]", "", started_ts) + f"-{pid}"  # e.g. 20260709T001844Z-6808
     run_git_sha = _rh.git_sha(collab)
-    seats_snapshot = {name: (cfg.get("model") if isinstance(cfg, dict) else None)
-                      for name, cfg in (seats or {}).items()}
+    seats_snapshot = {
+        name: (cfg.get("model") if isinstance(cfg, dict) else None) for name, cfg in (seats or {}).items()
+    }
     lease = hc.ActiveHandoffLease(collab, run_uid, pid=pid)
     # ROTATE+WIPE the live feed so this run starts clean: the prior run archived ITS log at its own end
     # (finally, below), so truncating here only discards already-archived leftovers. Guard a fresh collab.
@@ -874,17 +1062,42 @@ def run(collab, *, seats: dict, max_rounds: int | None = None, limits=None, runn
             cc.safe_write(_live_log, "")
     except (OSError, cc.CollabError) as _e:
         print(f"[autopilot] could not rotate events log: {_e}", file=sys.stderr)
-    _write_status(collab, pid=pid, started_ts=started_ts, run_uid=run_uid, git_sha=run_git_sha,
-                  run_seats=seats_snapshot, phase="thinking", round=0,
-                  max_rounds=base_limits.max_work_attempts, watch=watch, interval=interval,
-                  active_seat=None, current_hid=None, last_latency_ms=None, last_error=None)
+    _write_status(
+        collab,
+        pid=pid,
+        started_ts=started_ts,
+        run_uid=run_uid,
+        git_sha=run_git_sha,
+        run_seats=seats_snapshot,
+        phase="thinking",
+        round=0,
+        max_rounds=base_limits.max_work_attempts,
+        watch=watch,
+        interval=interval,
+        active_seat=None,
+        current_hid=None,
+        last_latency_ms=None,
+        last_error=None,
+    )
     try:
-        return _run_loop(collab, seats=seats, base_limits=base_limits, runner=runner, watch=watch,
-                         interval=interval, home=home, log=log, rid=rid, closeout=closeout,
-                         driven=driven, lease=lease)
+        return _run_loop(
+            collab,
+            seats=seats,
+            base_limits=base_limits,
+            runner=runner,
+            watch=watch,
+            interval=interval,
+            home=home,
+            log=log,
+            rid=rid,
+            closeout=closeout,
+            driven=driven,
+            lease=lease,
+        )
     finally:
         # [C15] best-effort teardown on ANY exit (return, pause, stall, exception, kill): release the board
-        # lease so the next run can start, then archive this run's evidence. Never masks the real return/raise.
+        # lease so the next run can start, then archive this run's evidence.
+        # Never mask the real return/raise.
         try:
             lease.release()
         except Exception as _e:  # broad: lease release is teardown, never worth breaking the driver's exit
@@ -896,8 +1109,9 @@ def run(collab, *, seats: dict, max_rounds: int | None = None, limits=None, runn
             print(f"[autopilot] run archival failed (run already complete): {_e}", file=sys.stderr)
 
 
-def _run_loop(collab, *, seats, base_limits, runner, watch, interval, home, log, rid, closeout,
-              driven, lease) -> int:
+def _run_loop(
+    collab, *, seats, base_limits, runner, watch, interval, home, log, rid, closeout, driven, lease
+) -> int:
     """The bounded drive loop, factored out of :func:`run` so ``run`` can wrap it in one try/finally that
     guarantees lease release + archival on EVERY exit path. Returns the total seat turns executed."""
     total_calls = 0
@@ -905,21 +1119,39 @@ def _run_loop(collab, *, seats, base_limits, runner, watch, interval, home, log,
     while True:
         ctrl = _read_control(collab)  # human control file — only ever pauses/stops the loop ([C36])
         if ctrl.get("stop"):
-            _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.control", role="autopilot",
-                       decision={"action": "stop", "reason_codes": [], "confidence": None})
+            _emit_safe(
+                _trace.emit,
+                log,
+                run_id=rid,
+                stage="autopilot.control",
+                role="autopilot",
+                decision={"action": "stop", "reason_codes": [], "confidence": None},
+            )
             _write_status(collab, phase="done", active_seat=None, current_hid=None)
             return total_calls  # graceful, reversible exit: no done/, no commit — the human resumes later
         if ctrl.get("paused"):
             if last_phase != "paused":
-                _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.control", role="autopilot",
-                           decision={"action": "pause", "reason_codes": [], "confidence": None})
+                _emit_safe(
+                    _trace.emit,
+                    log,
+                    run_id=rid,
+                    stage="autopilot.control",
+                    role="autopilot",
+                    decision={"action": "pause", "reason_codes": [], "confidence": None},
+                )
                 _write_status(collab, phase="paused", active_seat=None, current_hid=None)
                 last_phase = "paused"
             time.sleep(interval)
             continue
         if last_phase == "paused":
-            _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.control", role="autopilot",
-                       decision={"action": "resume", "reason_codes": [], "confidence": None})
+            _emit_safe(
+                _trace.emit,
+                log,
+                run_id=rid,
+                stage="autopilot.control",
+                role="autopilot",
+                decision={"action": "resume", "reason_codes": [], "confidence": None},
+            )
             last_phase = None
 
         # Durable operator requests (ADR-0003) take priority over fresh work: a human filed a retry/adopt on
@@ -927,10 +1159,22 @@ def _run_loop(collab, *, seats, base_limits, runner, watch, interval, home, log,
         req = _next_request(collab, seats)
         if req is not None:
             last_phase = None
-            outcome, calls = _drive_candidate(collab, req["hid"], seats=seats, closeout=closeout,
-                                              runner=runner, home=home, log=log, rid=rid, lease=lease,
-                                              base_limits=base_limits, reopen=req["action"])
-            opreq.consume(collab, req["hid"])  # acted on -> the request is spent (the operator re-files to repeat)
+            outcome, calls = _drive_candidate(
+                collab,
+                req["hid"],
+                seats=seats,
+                closeout=closeout,
+                runner=runner,
+                home=home,
+                log=log,
+                rid=rid,
+                lease=lease,
+                base_limits=base_limits,
+                reopen=req["action"],
+            )
+            opreq.consume(
+                collab, req["hid"]
+            )  # acted on -> the request is spent (the operator re-files to repeat)
             total_calls += calls
             if outcome == "closed":
                 _promote_next_draft(collab, log=log, rid=rid)
@@ -946,8 +1190,14 @@ def _run_loop(collab, *, seats, base_limits, runner, watch, interval, home, log,
         if root is None:  # board drained of fresh work (only human-seat handoffs remain)
             idle_phase = "sleeping" if watch else "idle"
             if last_phase != idle_phase:
-                _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.idle", role="autopilot",
-                           decision={"action": "idle", "reason_codes": [], "confidence": None})
+                _emit_safe(
+                    _trace.emit,
+                    log,
+                    run_id=rid,
+                    stage="autopilot.idle",
+                    role="autopilot",
+                    decision={"action": "idle", "reason_codes": [], "confidence": None},
+                )
                 _write_status(collab, phase=idle_phase, active_seat=None, current_hid=None)
                 last_phase = idle_phase
             if not watch:
@@ -959,11 +1209,23 @@ def _run_loop(collab, *, seats, base_limits, runner, watch, interval, home, log,
 
         last_phase = None
         driven.add(root)
-        outcome, calls = _drive_candidate(collab, root, seats=seats, closeout=closeout, runner=runner,
-                                          home=home, log=log, rid=rid, lease=lease, base_limits=base_limits)
+        outcome, calls = _drive_candidate(
+            collab,
+            root,
+            seats=seats,
+            closeout=closeout,
+            runner=runner,
+            home=home,
+            log=log,
+            rid=rid,
+            lease=lease,
+            base_limits=base_limits,
+        )
         total_calls += calls
         if outcome == "closed":
-            _promote_next_draft(collab, log=log, rid=rid)  # a slice shipped -> pull the next staged slice in, in order
+            _promote_next_draft(
+                collab, log=log, rid=rid
+            )  # a slice shipped -> pull the next staged slice in, in order
             continue  # ONLY an approved+contract-satisfied candidate advances -> select the next handoff
         if outcome == "stopped" or _read_control(collab).get("stop"):
             continue  # let the top of the loop emit the stop + return cleanly
@@ -971,38 +1233,57 @@ def _run_loop(collab, *, seats, base_limits, runner, watch, interval, home, log,
         # for infra/incomplete/no_progress/budget/contract) -> ping the human and STOP: nothing moves past
         # this handoff until it is resolved.
         if outcome in ("stalled", "human", "lease_held"):
-            _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.pause", role="autopilot",
-                       decision={"action": "pause", "reason_codes": [f"root:{root}", f"outcome:{outcome}"],
-                                 "confidence": None})
+            _emit_safe(
+                _trace.emit,
+                log,
+                run_id=rid,
+                stage="autopilot.pause",
+                role="autopilot",
+                decision={
+                    "action": "pause",
+                    "reason_codes": [f"root:{root}", f"outcome:{outcome}"],
+                    "confidence": None,
+                },
+            )
             _write_status(collab, phase="capped", last_error=f"{root} not closed ({outcome}); awaiting human")
             _pause_note(collab, home, base_limits.max_work_attempts)
         return total_calls
 
 
 def _limits_from_control(collab, base_limits):
-    """Apply the dashboard's live ``max_rounds`` control knob to the work-attempt ceiling. A positive
-    control.json ``max_rounds`` raises/lowers ``max_work_attempts`` for this handoff (the "give it more
-    attempts" affordance); a missing/invalid value keeps the launch-time budget. Reversible/bounded ([C35])."""
+    """Apply the dashboard's live ``max_rounds`` control to the work-attempt ceiling.
+
+    A positive control.json value changes this handoff's ``max_work_attempts``;
+    a missing or invalid value keeps the launch-time budget. Reversible/bounded ([C35]).
+    """
     mr = _read_control(collab).get("max_rounds")
     return replace(base_limits, max_work_attempts=int(mr)) if mr else base_limits
 
 
 def _next_request(collab, seats):
-    """The lowest-id consumable operator request (retry/adopt), or ``None``. A request whose handoff is gone,
-    already closed, or addressed to a human seat can never be re-driven, so it is consumed here and skipped."""
+    """Return the lowest-id consumable retry/adopt request, or ``None``.
+
+    A missing, closed, or human-routed handoff cannot be re-driven, so its request
+    is consumed here and skipped.
+    """
     for req in opreq.pending(collab):
         hid = req["hid"]
         state, path = hc._reconcile(collab, hid)
         to, _frm = _to_from(Path(path)) if path else (None, None)
-        if path is None or state not in ("pending", "claimed") or _cli_seat(seats, (to or "").strip()) is None:
+        if (
+            path is None
+            or state not in ("pending", "claimed")
+            or _cli_seat(seats, (to or "").strip()) is None
+        ):
             opreq.consume(collab, hid)  # nothing to re-drive -> discard the stale request
             continue
         return req
     return None
 
 
-def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, lease, base_limits,
-                     reopen=None):
+def _drive_candidate(
+    collab, root, *, seats, closeout, runner, home, log, rid, lease, base_limits, reopen=None
+):
     """Drive ONE handoff through the candidate lifecycle (ADR-0003 D1/D4). Returns ``(outcome, calls)``
     where ``calls`` is the number of seat turns dispatched (for run_history's per-run count).
 
@@ -1019,7 +1300,7 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
     calls = 0
     _rstate, rpath = hc._reconcile(collab, root)
     to_seat, from_seat = _to_from(Path(rpath)) if rpath else (None, None)
-    builder_seat = (to_seat or "").strip()    # the handoff is addressed to the worker (acts first)
+    builder_seat = (to_seat or "").strip()  # the handoff is addressed to the worker (acts first)
     reviewer_seat = (from_seat or "").strip()  # the counterpart authors the work and reviews the result
     request = _substance(collab, Path(rpath)) if rpath else ""  # read BEFORE claim moves it out of pending/
     guardrails = _root_guardrails(rpath)
@@ -1029,14 +1310,16 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
     if _rstate not in drivable:
         return "stalled", calls  # a fresh drive needs pending; a reopen accepts the paused claimed state
     if _cli_seat(seats, builder_seat) is None:
-        return "human", calls    # addressed to a human/web seat — left for the bridge
+        return "human", calls  # addressed to a human/web seat — left for the bridge
 
     # Acquire the board BEFORE claiming (ADR-0003 D2): a live foreign lease means another driver owns the
     # board — refuse to start a second concurrent run rather than race it onto a different handoff.
     try:
         lease.acquire(root)
     except hc.LeaseHeld:
-        _write_status(collab, phase="capped", last_error=f"board lease held by another run; cannot drive {root}")
+        _write_status(
+            collab, phase="capped", last_error=f"board lease held by another run; cannot drive {root}"
+        )
         return "lease_held", calls
     if _rstate == "pending":
         try:
@@ -1059,8 +1342,9 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
         verification_plan = _resolve_assurance_plan(home, guardrails)
     except cc.CollabError as exc:
         budget = rb.RunBudget(collab, root, _limits_from_control(collab, base_limits))
-        _escalate_pause(collab, root, home, budget, reason="infrastructure_blocked", log=log, rid=rid,
-                        cause=str(exc))
+        _escalate_pause(
+            collab, root, home, budget, reason="infrastructure_blocked", log=log, rid=rid, cause=str(exc)
+        )
         return "infrastructure_blocked", calls
 
     budget = rb.RunBudget(collab, root, _limits_from_control(collab, base_limits))
@@ -1069,15 +1353,25 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
         # the record. Clear the stale escalation — this pause is being retried.
         budget.new_epoch(authorized_by=f"operator:{reopen}")
         esc.clear(collab, root)
-        _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.reopen", role="human",
-                   artifact=f"handoff:{root}",
-                   decision={"action": reopen, "reason_codes": [f"epoch:{budget.epoch}", f"hid:{root}"],
-                             "confidence": None})
+        _emit_safe(
+            _trace.emit,
+            log,
+            run_id=rid,
+            stage="autopilot.reopen",
+            role="human",
+            artifact=f"handoff:{root}",
+            decision={
+                "action": reopen,
+                "reason_codes": [f"epoch:{budget.epoch}", f"hid:{root}"],
+                "confidence": None,
+            },
+        )
     transcript = request
     last_candidate_id = None
-    last_blockers: list = []  # the most recent repair's blockers — embedded in a budget/no-progress escalation
+    # The most recent repair's blockers, embedded in a budget/no-progress escalation.
+    last_blockers: list = []
     repaired = False
-    adopt_pending = (reopen == "adopt")  # adopt: skip the FIRST builder attempt, assess the current source
+    adopt_pending = reopen == "adopt"  # adopt: skip the FIRST builder attempt, assess the current source
     attempt = 0
     while True:
         ctrl = _read_control(collab)
@@ -1088,14 +1382,27 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
         live_limits = _limits_from_control(collab, base_limits)
         if live_limits != budget.limits:
             budget = rb.RunBudget(collab, root, live_limits)
-        _write_status(collab, max_rounds=live_limits.max_work_attempts, stage="builder",
-                      pause_reason=None, budget=budget.report())
+        _write_status(
+            collab,
+            max_rounds=live_limits.max_work_attempts,
+            stage="builder",
+            pause_reason=None,
+            budget=budget.report(),
+        )
         # Charge a work attempt BEFORE dispatch (ADR-0002 D6). A denial is a terminal budget pause.
         try:
             budget.charge(rb.WORK_ATTEMPT)
         except rb.BudgetExceeded:
-            _escalate_pause(collab, root, home, budget, reason="budget_exhausted", log=log, rid=rid,
-                            blockers=last_blockers)
+            _escalate_pause(
+                collab,
+                root,
+                home,
+                budget,
+                reason="budget_exhausted",
+                log=log,
+                rid=rid,
+                blockers=last_blockers,
+            )
             return "budget_exhausted", calls
         attempt += 1
         if adopt_pending:
@@ -1104,74 +1411,147 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
             adopt_pending = False
             builder_raw = "[operator adopted the current on-disk source as this candidate]"
         else:
-            builder_raw = _dispatch_seat(collab, builder_seat, seats=seats, runner=runner, hid=root,
-                                         transcript=transcript, log=log, rid=rid, attempt=attempt,
-                                         span_role="builder")
+            builder_raw = _dispatch_seat(
+                collab,
+                builder_seat,
+                seats=seats,
+                runner=runner,
+                hid=root,
+                transcript=transcript,
+                log=log,
+                rid=rid,
+                attempt=attempt,
+                span_role="builder",
+            )
             calls += 1
             if builder_raw is None:
                 return "stalled", calls  # backend failed — handoff stays claimed; a human needs to look
         transcript = f"{transcript}\n\n----- {builder_seat} -----\n{_sanitize(builder_raw)}"
 
-        candidate = _compute_candidate(collab, root, seats=seats, builder_seat=builder_seat,
-                                        reviewer_seat=reviewer_seat, source_roots=source_roots,
-                                        source_base=source_base, test_path=test_path, guardrails=guardrails,
-                                        builder_output=builder_raw, verification_plan=verification_plan)
+        candidate = _compute_candidate(
+            collab,
+            root,
+            seats=seats,
+            builder_seat=builder_seat,
+            reviewer_seat=reviewer_seat,
+            source_roots=source_roots,
+            source_base=source_base,
+            test_path=test_path,
+            guardrails=guardrails,
+            builder_output=builder_raw,
+            verification_plan=verification_plan,
+        )
         cid = candidate.candidate_id
         _write_status(collab, stage="assess", candidate=cid[5:17], current_hid=root)
         # No progress: a repair packet that produced a byte-identical candidate — the builder did not change
         # the source. Pause rather than reassess the identical work forever (ADR-0003).
         if repaired and cid == last_candidate_id:
-            _escalate_pause(collab, root, home, budget, reason="no_progress", log=log, rid=rid,
-                            blockers=last_blockers)
+            _escalate_pause(
+                collab, root, home, budget, reason="no_progress", log=log, rid=rid, blockers=last_blockers
+            )
             return "no_progress", calls
 
         # Cache: an already-completed identical candidate is reused verbatim (zero new reviewer/lane calls).
         prep = ca.prepare(collab, root, candidate=candidate)
         assessment = prep["cached"]
         if assessment is None:
-            reviewer_transcript = (f"{transcript}\n\n----- for review -----\n"
-                                   "Review the work above and decide sign-off.")
+            reviewer_transcript = (
+                f"{transcript}\n\n----- for review -----\nReview the work above and decide sign-off."
+            )
             report, lane_ledger = _assess_candidate(
-                collab, root, candidate, seats=seats, closeout=closeout, builder_seat=builder_seat,
-                reviewer_seat=reviewer_seat, reviewer_transcript=reviewer_transcript, runner=runner,
-                budget=budget, log=log, rid=rid, source_base=source_base, source_roots=source_roots,
-                test_path=test_path, guardrails=guardrails, verification_plan=verification_plan)
-            calls += 1  # the reviewer dispatch is one seat turn (lane breaker/verifier calls are not "rounds")
-            assessment = ca.complete(collab, root, candidate, reviewer_report=report,
-                                     lane_ledger=_assessment_lane_ledger(lane_ledger),
-                                     budget_snapshot=budget.report())
+                collab,
+                root,
+                candidate,
+                seats=seats,
+                closeout=closeout,
+                builder_seat=builder_seat,
+                reviewer_seat=reviewer_seat,
+                reviewer_transcript=reviewer_transcript,
+                runner=runner,
+                budget=budget,
+                log=log,
+                rid=rid,
+                source_base=source_base,
+                source_roots=source_roots,
+                test_path=test_path,
+                guardrails=guardrails,
+                verification_plan=verification_plan,
+            )
+            calls += (
+                1  # the reviewer dispatch is one seat turn (lane breaker/verifier calls are not "rounds")
+            )
+            assessment = ca.complete(
+                collab,
+                root,
+                candidate,
+                reviewer_report=report,
+                lane_ledger=_assessment_lane_ledger(lane_ledger),
+                budget_snapshot=budget.report(),
+            )
 
         outcome = assessment.outcome
-        _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.assessment", role="autopilot",
-                   artifact=f"handoff:{root}",
-                   decision={"action": "assess", "reason_codes": [f"outcome:{outcome}", f"attempt:{attempt}",
-                                                                   f"cand:{cid[5:17]}"], "confidence": None})
+        _emit_safe(
+            _trace.emit,
+            log,
+            run_id=rid,
+            stage="autopilot.assessment",
+            role="autopilot",
+            artifact=f"handoff:{root}",
+            decision={
+                "action": "assess",
+                "reason_codes": [f"outcome:{outcome}", f"attempt:{attempt}", f"cand:{cid[5:17]}"],
+                "confidence": None,
+            },
+        )
 
         if outcome == ca.APPROVED:
             verdict = _dc_evaluate(collab, root, seats, reviewer_seat, builder_seat, cid)
             if verdict["satisfied"]:
                 hc.done(collab, root)  # the ONLY claimed->done transition ([C36]): approved + contract clean
-                _emit_safe(he.on_autonomous_done, log, rid, root, span_id=f"{root}:signoff",
-                           parent_span_id=None, reviewer=reviewer_seat, contract_hash=verdict["hash"])
-                _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.autonomous_done", role=reviewer_seat,
-                           artifact=f"handoff:{root}", span_id=f"{root}:signoff",
-                           decision={"action": "autonomous_done",
-                                     "reason_codes": [f"done:{root}", f"by:{reviewer_seat}",
-                                                      f"contract:{verdict['hash'][:12]}"], "confidence": None})
+                _emit_safe(
+                    he.on_autonomous_done,
+                    log,
+                    rid,
+                    root,
+                    span_id=f"{root}:signoff",
+                    parent_span_id=None,
+                    reviewer=reviewer_seat,
+                    contract_hash=verdict["hash"],
+                )
+                _emit_safe(
+                    _trace.emit,
+                    log,
+                    run_id=rid,
+                    stage="autopilot.autonomous_done",
+                    role=reviewer_seat,
+                    artifact=f"handoff:{root}",
+                    span_id=f"{root}:signoff",
+                    decision={
+                        "action": "autonomous_done",
+                        "reason_codes": [
+                            f"done:{root}",
+                            f"by:{reviewer_seat}",
+                            f"contract:{verdict['hash'][:12]}",
+                        ],
+                        "confidence": None,
+                    },
+                )
                 print(f"[autopilot] {root} APPROVED + contract satisfied -> done; exchange complete")
                 try:  # a human-readable narrative of the whole handoff — never let it break the closeout
                     import narrative as _narr
+
                     _narr.write(collab, root)
                 except Exception as e:  # summary is a nicety; the sign-off already stands regardless
                     print(f"[autopilot] narrative for {root} skipped: {e}", file=sys.stderr)
                 lease.release()  # done: drop the board so the loop can advance to the next handoff
                 return "closed", calls
-            # Approved by findings, but the §18.3 evidence contract refused (e.g. red tests, missing preflight,
-            # source drift). Never ship on an unsatisfied contract ([C36]) — pause for a human.
+            # The evidence contract refused (e.g. red tests, missing preflight, source drift).
+            # Never ship on an unsatisfied contract ([C36]); pause for a human.
             unmet = [c["name"] for c in verdict["conditions"] if c["status"] != "pass"]
             _write_status(collab, last_error=f"contract unsatisfied on {root}: {', '.join(unmet)}"[:200])
-            _escalate_pause(collab, root, home, budget, reason="contract_unsatisfied", log=log, rid=rid,
-                            detail=unmet)
+            _escalate_pause(
+                collab, root, home, budget, reason="contract_unsatisfied", log=log, rid=rid, detail=unmet
+            )
             return "contract_unsatisfied", calls
 
         if outcome == ca.REPAIR_REQUIRED:
@@ -1182,13 +1562,24 @@ def _drive_candidate(collab, root, *, seats, closeout, runner, home, log, rid, l
             last_blockers = blockers
             repaired = True
             _write_status(collab, stage="repair", budget=budget.report())
-            print(f"[autopilot] {root}: {len(blockers)} open blocker(s) -> repair packet to builder "
-                  f"(attempt {attempt}/{live_limits.max_work_attempts})")
+            print(
+                f"[autopilot] {root}: {len(blockers)} open blocker(s) -> repair packet to builder "
+                f"(attempt {attempt}/{live_limits.max_work_attempts})"
+            )
             continue  # loop -> another work attempt
 
         # infrastructure_blocked / verification_incomplete -> terminal pause + durable escalation record.
-        _escalate_pause(collab, root, home, budget, reason=outcome, log=log, rid=rid, cause=assessment.cause,
-                        blockers=_assessment_blockers(assessment))
+        _escalate_pause(
+            collab,
+            root,
+            home,
+            budget,
+            reason=outcome,
+            log=log,
+            rid=rid,
+            cause=assessment.cause,
+            blockers=_assessment_blockers(assessment),
+        )
         return outcome, calls
 
 
@@ -1214,8 +1605,15 @@ def _dc_evaluate(collab, hid, seats, reviewer_seat, builder_seat, candidate_id):
     """Evaluate the §18.3 autonomous done-transition contract for a candidate (lazy import — autopilot must
     not import done_contract at module top). The machine gate an APPROVED candidate must satisfy ([C36])."""
     import done_contract as _dc
-    return _dc.evaluate(collab, hid, seats=seats, reviewer_seat=reviewer_seat, builder_seat=builder_seat,
-                        candidate_id=candidate_id)
+
+    return _dc.evaluate(
+        collab,
+        hid,
+        seats=seats,
+        reviewer_seat=reviewer_seat,
+        builder_seat=builder_seat,
+        candidate_id=candidate_id,
+    )
 
 
 def _assessment_blockers(assessment) -> list:
@@ -1226,27 +1624,42 @@ def _assessment_blockers(assessment) -> list:
     for f in getattr(assessment, "unresolved_findings", ()):  # already only the blocking, open findings
         source = getattr(f, "source", "reviewer")
         lane = source.split("lane:", 1)[1] if source.startswith("lane:") else source
-        out.append({"id": f.fingerprint, "lane": lane,
-                    "description": (f.evidence or f.remediation or "").strip(),
-                    "regression_test": None, "fixed": False})
+        out.append(
+            {
+                "id": f.fingerprint,
+                "lane": lane,
+                "description": (f.evidence or f.remediation or "").strip(),
+                "regression_test": None,
+                "fixed": False,
+            }
+        )
     return out
 
 
-def _escalate_pause(collab, hid, home, budget, *, reason, log, rid, cause=None, detail=None,
-                    blockers=None) -> None:
+def _escalate_pause(
+    collab, hid, home, budget, *, reason, log, rid, cause=None, detail=None, blockers=None
+) -> None:
     """Write the durable pause record for a terminal candidate outcome (ADR-0003): an ``escalation`` artifact
     (the human-readable "call to you"), an ``autopilot.escalation`` telemetry event, a capped status carrying
     the budget report, and an outbox ping. Read-only for everyone but a human, who clears it once resolved.
 
-    ``blockers`` are the reproduced findings to embed (the drive loop passes the last repair's blockers so a
-    budget/no-progress escalation still names the defect); a falsy value falls back to the ledger's blockers."""
+    ``blockers`` are reproduced findings to embed. The drive loop passes the
+    last repair's blockers so a budget/no-progress escalation names the defect;
+    a falsy value falls back to the ledger's blockers.
+    """
     title = _handoff_title(collab, hid)
     label = f"{title} [{reason}]" if title else reason
     blockers = blockers if blockers else _assessment_blockers_from_ledger(collab, hid)
     run_uid = _status_run_uid(collab)
     try:
-        esc.write(collab, hid, blockers, attempts=int(budget.consumed().get("work_attempts", 0)),
-                  title=label, run_uid=run_uid)
+        esc.write(
+            collab,
+            hid,
+            blockers,
+            attempts=int(budget.consumed().get("work_attempts", 0)),
+            title=label,
+            run_uid=run_uid,
+        )
     except Exception as e:  # the escalation artifact is best-effort; the pause + telemetry still stand
         print(f"[autopilot] could not write escalation for {hid}: {e}", file=sys.stderr)
     codes = [f"reason:{reason}", f"hid:{hid}", f"work_attempts:{budget.consumed().get('work_attempts', 0)}"]
@@ -1254,12 +1667,25 @@ def _escalate_pause(collab, hid, home, budget, *, reason, log, rid, cause=None, 
         codes.append(f"cause:{cause['reason']}")
     if detail:
         codes += [f"unmet:{n}" for n in detail]
-    _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.escalation", role="autopilot",
-               artifact=f"handoff:{hid}",
-               decision={"action": "escalate", "reason_codes": codes, "confidence": None},
-               metrics={"budget": budget.report()})
-    _write_status(collab, phase="capped", pause_reason=reason, stage=None, current_hid=hid,
-                  last_error=f"{hid} paused ({reason}); awaiting human"[:200], budget=budget.report())
+    _emit_safe(
+        _trace.emit,
+        log,
+        run_id=rid,
+        stage="autopilot.escalation",
+        role="autopilot",
+        artifact=f"handoff:{hid}",
+        decision={"action": "escalate", "reason_codes": codes, "confidence": None},
+        metrics={"budget": budget.report()},
+    )
+    _write_status(
+        collab,
+        phase="capped",
+        pause_reason=reason,
+        stage=None,
+        current_hid=hid,
+        last_error=f"{hid} paused ({reason}); awaiting human"[:200],
+        budget=budget.report(),
+    )
     _pause_note(collab, home, int(budget.limits.max_work_attempts))
     print(f"[autopilot] {hid} ESCALATED ({reason}) — durable record written; human review needed")
 
@@ -1273,7 +1699,7 @@ def _assessment_blockers_from_ledger(collab, hid: str) -> list:
 def _status_run_uid(collab) -> str | None:
     try:
         return json.loads(_status_path(collab).read_text("utf-8")).get("run_uid")
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
 
@@ -1282,6 +1708,7 @@ def _confirmed_blockers(collab, hid: str) -> list:
     These are the verified defects the sign-off contract refused on — the thing to fix or escalate."""
     try:
         import lanes as _lanes  # lazy: lanes imports autopilot
+
         led = _lanes.read_ledger(collab, hid) or {}
     except Exception:  # a missing/torn ledger must never break the drive loop
         return []
@@ -1292,9 +1719,11 @@ def _fix_directive(blockers: list) -> str:
     """A builder-facing directive listing the CONFIRMED defects to fix — injected into the transcript so the
     one autonomous fix attempt is *targeted* (the builder is told exactly what the lanes broke, not left to
     guess from the reviewer's prose)."""
-    lines = ["----- AUTOPILOT: VERIFIED DEFECTS — FIX THESE NOW -----",
-             "The adversarial lanes CONFIRMED the defect(s) below in the code just shipped. Fix each at the "
-             "cited location and hand back for re-review. Do NOT re-request sign-off until they are fixed."]
+    lines = [
+        "----- AUTOPILOT: VERIFIED DEFECTS — FIX THESE NOW -----",
+        "The adversarial lanes CONFIRMED the defect(s) below in the code just shipped. Fix each at the "
+        "cited location and hand back for re-review. Do NOT re-request sign-off until they are fixed.",
+    ]
     for b in blockers:
         loc = str(b.get("description") or "").strip().replace("\n", " ")
         reg = b.get("regression_test")
@@ -1306,17 +1735,27 @@ def _record_sendback(collab, hid, blockers, *, attempt, round_no, log, rid) -> N
     """Log a SEND-BACK — the builder is handed the CONFIRMED defects and the exchange continues. Emits an
     ``autopilot.sendback`` telemetry event (surfaces in the dashboard activity feed) AND appends a durable
     human-readable line to ``<collab>/autopilot/sendbacks/<hid>.log`` — the audit trail of every bounce."""
-    _emit_safe(_trace.emit, log, run_id=rid, stage="autopilot.sendback", role="autopilot",
-               artifact=f"handoff:{hid}",
-               decision={"action": "sendback",
-                         "reason_codes": [f"sendback:{attempt}", f"defects:{len(blockers)}",
-                                          f"round:{round_no}"] + [f"lane:{b.get('lane')}" for b in blockers],
-                         "confidence": None})
+    _emit_safe(
+        _trace.emit,
+        log,
+        run_id=rid,
+        stage="autopilot.sendback",
+        role="autopilot",
+        artifact=f"handoff:{hid}",
+        decision={
+            "action": "sendback",
+            "reason_codes": [f"sendback:{attempt}", f"defects:{len(blockers)}", f"round:{round_no}"]
+            + [f"lane:{b.get('lane')}" for b in blockers],
+            "confidence": None,
+        },
+    )
     try:
         d = Path(collab) / "autopilot" / "sendbacks"
         d.mkdir(parents=True, exist_ok=True)
-        lines = [f"{_now_utc()}  SEND-BACK #{attempt} (round {round_no}) — "
-                 f"{len(blockers)} confirmed defect(s) returned to the builder:"]
+        lines = [
+            f"{_now_utc()}  SEND-BACK #{attempt} (round {round_no}) — "
+            f"{len(blockers)} confirmed defect(s) returned to the builder:"
+        ]
         for b in blockers:
             desc = str(b.get("description") or "").strip().replace("\n", " ")
             reg = b.get("regression_test")
@@ -1343,8 +1782,10 @@ def _pause_note(collab, home, max_rounds: int) -> None:
         h = Path(home) if home is not None else cc.resolve_collab_home()
         ob = h / "outbox"
         ob.mkdir(parents=True, exist_ok=True)
-        msg = (f"autopilot paused: reached the {max_rounds}-round cap for {Path(collab).name}. "
-               f"Human review needed before it continues.")
+        msg = (
+            f"autopilot paused: reached the {max_rounds}-round cap for {Path(collab).name}. "
+            f"Human review needed before it continues."
+        )
         cc.safe_write(ob / f"{time.time_ns()}-autopilot-{cc.slugify(Path(collab).name)}.md", msg + "\n")
     except (OSError, cc.CollabError) as e:
         print(f"[autopilot] could not write pause note: {e}", file=sys.stderr)
@@ -1355,12 +1796,20 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="autopilot", description="collab-kit bounded agent-agnostic driver")
     p.add_argument("--collab", required=True, help="collab path to drive")
     p.add_argument("--home", help="$COLLAB_HOME (for seats.json + outbox); defaults to resolve_collab_home()")
-    p.add_argument("--max-rounds", type=int, default=None, dest="max_rounds",
-                   help="DEPRECATED alias: overrides the work-attempt budget (Limits.max_work_attempts). "
-                        "Omit to use the calibrated balanced() budget (3 work attempts).")
-    p.add_argument("--watch", action="store_true",
-                   help="stay resident (daemon): after the queue goes idle, keep polling for new handoffs "
-                        "instead of exiting. Default is batch: run the exchange, then exit when it's idle.")
+    p.add_argument(
+        "--max-rounds",
+        type=int,
+        default=None,
+        dest="max_rounds",
+        help="DEPRECATED alias: overrides the work-attempt budget (Limits.max_work_attempts). "
+        "Omit to use the calibrated balanced() budget (3 work attempts).",
+    )
+    p.add_argument(
+        "--watch",
+        action="store_true",
+        help="stay resident (daemon): after the queue goes idle, keep polling for new handoffs "
+        "instead of exiting. Default is batch: run the exchange, then exit when it's idle.",
+    )
     p.add_argument("--interval", type=float, default=2.0)
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
     try:
@@ -1372,8 +1821,14 @@ def main(argv=None) -> int:
     if not seats:
         print("autopilot: no seats.json (or no seats) — nothing to drive", file=sys.stderr)
         return 1
-    run(args.collab, seats=seats, max_rounds=args.max_rounds, watch=args.watch,
-        interval=args.interval, home=home)
+    run(
+        args.collab,
+        seats=seats,
+        max_rounds=args.max_rounds,
+        watch=args.watch,
+        interval=args.interval,
+        home=home,
+    )
     return 0
 
 

@@ -21,7 +21,6 @@ sys.path.insert(0, str(_LIB))
 
 import collab_common as cc  # noqa: E402
 
-
 # --------------------------------------------------------------------------- #
 # Top-level workers (must be module-level for the 'spawn' start method on Windows)
 # --------------------------------------------------------------------------- #
@@ -165,33 +164,28 @@ class FencingTests(unittest.TestCase):
     def test_assert_current_raises_after_takeover(self):
         with tempfile.TemporaryDirectory() as d:
             lockdir = Path(d) / "lock.d"
-            with self.assertRaises(cc.LockBroken):
-                with cc.collab_lock(lockdir, ttl=100.0) as h:
-                    h.assert_current()  # ours: fine
-                    # Simulate a newer owner stamping a different token.
-                    cc.atomic_write(h.meta_path, json.dumps({"owner_token": "someone-else"}))
-                    h.assert_current()  # must raise now
+            with self.assertRaises(cc.LockBroken), cc.collab_lock(lockdir, ttl=100.0) as h:
+                h.assert_current()  # ours: fine
+                # Simulate a newer owner stamping a different token.
+                cc.atomic_write(h.meta_path, json.dumps({"owner_token": "someone-else"}))
+                h.assert_current()  # must raise now
 
     def test_release_does_not_delete_newer_owners_lock(self):
         with tempfile.TemporaryDirectory() as d:
             lockdir = Path(d) / "lock.d"
-            with self.assertRaises(cc.LockBroken):
-                with cc.collab_lock(lockdir, ttl=100.0) as h:
-                    cc.atomic_write(h.meta_path, json.dumps({"owner_token": "newer-owner"}))
+            with self.assertRaises(cc.LockBroken), cc.collab_lock(lockdir, ttl=100.0) as h:
+                cc.atomic_write(h.meta_path, json.dumps({"owner_token": "newer-owner"}))
             # Fenced release removed nothing: the "newer owner's" lock dir survives.
             self.assertTrue(lockdir.exists())
-            self.assertEqual(
-                json.loads((lockdir / "meta.json").read_text())["owner_token"], "newer-owner"
-            )
+            self.assertEqual(json.loads((lockdir / "meta.json").read_text())["owner_token"], "newer-owner")
 
     def test_acquire_timeout(self):
         with tempfile.TemporaryDirectory() as d:
             lockdir = Path(d) / "lock.d"
             lockdir.mkdir()  # fresh foreign lock, never released
             (lockdir / "meta.json").write_text(json.dumps({"owner_token": "held"}))
-            with self.assertRaises(cc.LockTimeout):
-                with cc.collab_lock(lockdir, ttl=1000.0, acquire_timeout=0.3):
-                    pass
+            with self.assertRaises(cc.LockTimeout), cc.collab_lock(lockdir, ttl=1000.0, acquire_timeout=0.3):
+                pass
 
     def test_recompetes_when_broken_in_mkdir_meta_window(self):
         # Gap 3: a breaker rips lockdir away between mkdir and the meta commit. atomic_write
@@ -208,9 +202,11 @@ class FencingTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             lockdir = Path(d) / "lock.d"
-            with mock.patch("collab_common.atomic_write", side_effect=flaky):
-                with cc.collab_lock(lockdir, ttl=30.0, acquire_timeout=5.0) as h:
-                    self.assertTrue(h.is_current())  # re-competed and truly acquired
+            with (
+                mock.patch("collab_common.atomic_write", side_effect=flaky),
+                cc.collab_lock(lockdir, ttl=30.0, acquire_timeout=5.0) as h,
+            ):
+                self.assertTrue(h.is_current())  # re-competed and truly acquired
             self.assertGreaterEqual(calls["n"], 2)  # first attempt failed, second succeeded
 
 
@@ -219,9 +215,11 @@ class AtomicWriteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "f.json"
             p.write_text("OLD")
-            with mock.patch("collab_common.os.replace", side_effect=OSError("boom")):
-                with self.assertRaises(OSError):
-                    cc.atomic_write(p, "NEW" * 10_000)
+            with (
+                mock.patch("collab_common.os.replace", side_effect=OSError("boom")),
+                self.assertRaises(OSError),
+            ):
+                cc.atomic_write(p, "NEW" * 10_000)
             self.assertEqual(p.read_text(), "OLD")  # original intact
             leftovers = [x for x in Path(d).iterdir() if ".tmp." in x.name]
             self.assertEqual(leftovers, [], "temp file leaked on failure")
@@ -229,9 +227,11 @@ class AtomicWriteTests(unittest.TestCase):
     def test_safe_write_retries_then_raises_collaberror(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "f"
-            with mock.patch("collab_common.atomic_write", side_effect=PermissionError("locked")):
-                with self.assertRaises(cc.CollabError):
-                    cc.safe_write(p, "x", retries=3, backoff=0.0)
+            with (
+                mock.patch("collab_common.atomic_write", side_effect=PermissionError("locked")),
+                self.assertRaises(cc.CollabError),
+            ):
+                cc.safe_write(p, "x", retries=3, backoff=0.0)
 
     def test_safe_write_succeeds_after_transient(self):
         calls = {"n": 0}
@@ -272,8 +272,8 @@ class ExclusiveCreateCommitTests(unittest.TestCase):
             cc.exclusive_create(p, "first")
             with self.assertRaises(FileExistsError):
                 cc.exclusive_create(p, "second")
-            self.assertEqual(p.read_text(), "first")      # unchanged
-            self.assertEqual(self._tmp_siblings(d), [])   # temp removed
+            self.assertEqual(p.read_text(), "first")  # unchanged
+            self.assertEqual(self._tmp_siblings(d), [])  # temp removed
 
     def test_3_partial_short_writes_loop_to_completion(self):
         real_write = os.write
@@ -286,26 +286,30 @@ class ExclusiveCreateCommitTests(unittest.TestCase):
             p = d / "id-001"
             with mock.patch("collab_common.os.write", side_effect=short):
                 cc.exclusive_create(p, "abcdef")
-            self.assertEqual(p.read_text(), "abcdef")     # all bytes written despite short writes
+            self.assertEqual(p.read_text(), "abcdef")  # all bytes written despite short writes
             self.assertEqual(self._tmp_siblings(d), [])
 
     def test_4_write_failure_before_publish(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             p = d / "id-001"
-            with mock.patch("collab_common.os.write", side_effect=OSError("disk full")):
-                with self.assertRaises(OSError):
-                    cc.exclusive_create(p, "data")
-            self.assertFalse(p.exists())                  # final never appeared
-            self.assertEqual(self._tmp_siblings(d), [])   # temp cleaned
+            with (
+                mock.patch("collab_common.os.write", side_effect=OSError("disk full")),
+                self.assertRaises(OSError),
+            ):
+                cc.exclusive_create(p, "data")
+            self.assertFalse(p.exists())  # final never appeared
+            self.assertEqual(self._tmp_siblings(d), [])  # temp cleaned
 
     def test_5_fsync_failure_before_publish(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             p = d / "id-001"
-            with mock.patch("collab_common.os.fsync", side_effect=OSError("no fsync")):
-                with self.assertRaises(OSError):
-                    cc.exclusive_create(p, "data")
+            with (
+                mock.patch("collab_common.os.fsync", side_effect=OSError("no fsync")),
+                self.assertRaises(OSError),
+            ):
+                cc.exclusive_create(p, "data")
             self.assertFalse(p.exists())
             self.assertEqual(self._tmp_siblings(d), [])
 
@@ -313,11 +317,13 @@ class ExclusiveCreateCommitTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             p = d / "id-001"
-            with mock.patch("collab_common.os.link", side_effect=OSError("no hardlink support")):
-                with self.assertRaises(cc.CollabError):
-                    cc.exclusive_create(p, "data")
-            self.assertFalse(p.exists())                  # final never appeared
-            self.assertEqual(self._tmp_siblings(d), [])   # temp cleaned
+            with (
+                mock.patch("collab_common.os.link", side_effect=OSError("no hardlink support")),
+                self.assertRaises(cc.CollabError),
+            ):
+                cc.exclusive_create(p, "data")
+            self.assertFalse(p.exists())  # final never appeared
+            self.assertEqual(self._tmp_siblings(d), [])  # temp cleaned
 
     def test_7_crash_after_link_before_unlink_leaves_complete_final(self):
         # Documented residual: a crash between the link and the temp unlink leaves a COMPLETE
@@ -328,7 +334,7 @@ class ExclusiveCreateCommitTests(unittest.TestCase):
             with mock.patch("collab_common._best_effort_unlink") as noop_unlink:
                 cc.exclusive_create(p, "committed")
             self.assertEqual(p.read_text(), "committed")  # final is complete
-            self.assertTrue(self._tmp_siblings(d))        # temp leaked (acceptable)
+            self.assertTrue(self._tmp_siblings(d))  # temp leaked (acceptable)
             noop_unlink.assert_called()
 
     def test_9_write_all_raises_on_no_progress(self):
@@ -336,9 +342,8 @@ class ExclusiveCreateCommitTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             fd = os.open(str(Path(d) / "f"), os.O_CREAT | os.O_WRONLY)
             try:
-                with mock.patch("collab_common.os.write", return_value=0):
-                    with self.assertRaises(cc.CollabError):
-                        cc._write_all(fd, b"nonempty")
+                with mock.patch("collab_common.os.write", return_value=0), self.assertRaises(cc.CollabError):
+                    cc._write_all(fd, b"nonempty")
             finally:
                 os.close(fd)
 
@@ -371,9 +376,8 @@ class SlugifyTests(unittest.TestCase):
 
     def test_rejects_empty(self):
         for raw in ("", "   ", "..", "///", "!!!"):
-            with self.subTest(raw=raw):
-                with self.assertRaises(ValueError):
-                    cc.slugify(raw)
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                cc.slugify(raw)
 
     def test_mangles_reserved_windows_names(self):
         for raw in ("CON", "nul", "COM1", "LPT9", "AuX"):
@@ -408,11 +412,10 @@ class PathResolutionTests(unittest.TestCase):
             self.assertEqual(cc.resolve_kit_root(start=root / "tools"), root.resolve())
 
     def test_resolve_kit_root_raises_when_absent(self):
-        with tempfile.TemporaryDirectory() as d:
-            with mock.patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("COLLAB_KIT_ROOT", None)
-                with self.assertRaises(cc.CollabError):
-                    cc.resolve_kit_root(start=Path(d))
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("COLLAB_KIT_ROOT", None)
+            with self.assertRaises(cc.CollabError):
+                cc.resolve_kit_root(start=Path(d))
 
     def test_resolve_kit_root_env_override_wins(self):
         # install.sh embeds COLLAB_KIT_ROOT; it must win over runtime signature-walk

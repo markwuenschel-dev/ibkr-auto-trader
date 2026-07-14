@@ -38,9 +38,8 @@ from pathlib import Path
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
-import collab_common as cc  # noqa: E402
 import autopilot as _ap  # noqa: E402  (no cycle: autopilot imports run_history only lazily, inside run())
-
+import collab_common as cc  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # paths
@@ -66,7 +65,7 @@ def _read_events(events_path) -> list[dict]:
     out: list[dict] = []
     try:
         text = Path(events_path).read_text("utf-8", errors="replace")
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return out
     for line in text.splitlines():
         line = line.strip()
@@ -86,7 +85,7 @@ def _read_status(collab) -> dict:
     try:
         doc = json.loads(_ap._status_path(collab).read_text("utf-8"))
         return doc if isinstance(doc, dict) else {}
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return {}
 
 
@@ -104,7 +103,7 @@ def _norm_seats(seats) -> dict:
 def _int(s) -> int:
     try:
         return int(str(s).strip())
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0
 
 
@@ -114,7 +113,7 @@ def _parse_ts(s) -> int | None:
         return None
     try:
         return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
-    except (ValueError, OverflowError):
+    except ValueError, OverflowError:
         return None
 
 
@@ -123,8 +122,18 @@ def _parse_ts(s) -> int | None:
 # --------------------------------------------------------------------------- #
 
 
-def build_summary(collab, run_uid, *, seats=None, started_ts=None, pid=None, max_rounds=None,
-                  watch=None, git_sha=None, events_path=None) -> dict:
+def build_summary(
+    collab,
+    run_uid,
+    *,
+    seats=None,
+    started_ts=None,
+    pid=None,
+    max_rounds=None,
+    watch=None,
+    git_sha=None,
+    events_path=None,
+) -> dict:
     """Aggregate a run's ``events.jsonl`` into the schema-B ``run.json`` roll-up.
 
     Robust to torn/partial JSON lines (skipped, never fatal). Identity/context fields (started_ts, pid,
@@ -174,7 +183,7 @@ def build_summary(collab, run_uid, *, seats=None, started_ts=None, pid=None, max
 
         art = ev.get("artifact")
         if isinstance(art, str) and art.startswith("handoff:"):
-            hid = art[len("handoff:"):]
+            hid = art[len("handoff:") :]
             if hid and hid not in handoffs:
                 handoffs.append(hid)
 
@@ -193,11 +202,11 @@ def build_summary(collab, run_uid, *, seats=None, started_ts=None, pid=None, max
                 if not isinstance(code, str):
                     continue
                 if code.startswith("lane:"):
-                    lane = code[len("lane:"):]
+                    lane = code[len("lane:") :]
                 elif code.startswith("confirmed:"):
-                    conf = _int(code[len("confirmed:"):])
+                    conf = _int(code[len("confirmed:") :])
                 elif code.startswith("refuted:"):
-                    ref = _int(code[len("refuted:"):])
+                    ref = _int(code[len("refuted:") :])
             if lane is not None:
                 d = by_lane.setdefault(lane, {"confirmed": 0, "refuted": 0})
                 d["confirmed"] += conf
@@ -207,23 +216,27 @@ def build_summary(collab, run_uid, *, seats=None, started_ts=None, pid=None, max
         elif stage == "autopilot.assessment":
             # ADR-0003: one candidate assessment. Tally outcomes for the run roll-up (approved/
             # repair_required/infrastructure_blocked/verification_incomplete).
-            for code in (decision.get("reason_codes") or []):
+            for code in decision.get("reason_codes") or []:
                 if isinstance(code, str) and code.startswith("outcome:"):
-                    oc = code[len("outcome:"):]
+                    oc = code[len("outcome:") :]
                     outcomes[oc] = outcomes.get(oc, 0) + 1
         elif stage == "autopilot.escalation":
             # A durable pause was written — the truthful terminal cause of this handoff's drive.
             escalations += 1
-            for code in (decision.get("reason_codes") or []):
+            for code in decision.get("reason_codes") or []:
                 if isinstance(code, str) and code.startswith("reason:"):
-                    terminal_reason = code[len("reason:"):]
-            unmet = [c[len("unmet:"):] for c in (decision.get("reason_codes") or [])
-                     if isinstance(c, str) and c.startswith("unmet:")]
+                    terminal_reason = code[len("reason:") :]
+            unmet = [
+                c[len("unmet:") :]
+                for c in (decision.get("reason_codes") or [])
+                if isinstance(c, str) and c.startswith("unmet:")
+            ]
             signoff = {"result": "escalated", "reason": terminal_reason, "unmet": unmet}
         elif stage == "autopilot.signoff_blocked":  # legacy pre-candidate event — kept for old archives
             codes = decision.get("reason_codes") or []
-            unmet = [c[len("unmet:"):] if isinstance(c, str) and c.startswith("unmet:") else c
-                     for c in codes]
+            unmet = [
+                c[len("unmet:") :] if isinstance(c, str) and c.startswith("unmet:") else c for c in codes
+            ]
             signoff = {"result": "blocked", "unmet": unmet}
         elif stage in ("autopilot.autonomous_done", "handoff.autonomous_done"):
             signoff = {"result": "signed", "unmet": []}
@@ -232,8 +245,9 @@ def build_summary(collab, run_uid, *, seats=None, started_ts=None, pid=None, max
     start_epoch = _parse_ts(started_ts)
     ended_ts = status.get("updated_ts") or status.get("ended_ts")
     end_epoch = _parse_ts(ended_ts)
-    duration_ms = int((end_epoch - start_epoch) * 1000) if (start_epoch is not None and
-                                                            end_epoch is not None) else None
+    duration_ms = (
+        int((end_epoch - start_epoch) * 1000) if (start_epoch is not None and end_epoch is not None) else None
+    )
 
     return {
         "run_uid": run_uid,
@@ -310,14 +324,13 @@ def archive_run(collab, run_uid) -> Path | None:
             for f in sorted(vdir.glob("*.ledger.json")):
                 try:
                     cc.safe_write(root / "verification" / f.name, f.read_text("utf-8", errors="replace"))
-                except (OSError, cc.CollabError):
+                except OSError, cc.CollabError:
                     continue  # one bad ledger must not abort the archive
     except OSError as e:
         print(f"[run_history] could not copy ledgers: {e}", file=sys.stderr)
     # run.json roll-up
     try:
-        summary = build_summary(collab, run_uid,
-                                events_path=str(events_dst) if events_dst.exists() else None)
+        summary = build_summary(collab, run_uid, events_path=str(events_dst) if events_dst.exists() else None)
         cc.safe_write(root / "run.json", json.dumps(summary, indent=2, sort_keys=False) + "\n")
     except Exception as e:  # broad: run.json is telemetry, never worth raising into the driver
         print(f"[run_history] could not write run.json: {e}", file=sys.stderr)
@@ -346,9 +359,10 @@ def prune(collab, keep: int = 25) -> None:
 def git_sha(collab) -> str | None:
     """HEAD sha of the collab repo (``git -C <collab> rev-parse HEAD``), or None on any failure."""
     try:
-        p = subprocess.run(["git", "-C", str(collab), "rev-parse", "HEAD"],
-                           capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
+        p = subprocess.run(
+            ["git", "-C", str(collab), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10
+        )
+    except OSError, subprocess.SubprocessError:
         return None
     if p.returncode != 0:
         return None

@@ -145,9 +145,7 @@ class StateStore:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                row = self._conn.execute(
-                    "SELECT realized FROM daily_pnl WHERE day=?", (day_str,)
-                ).fetchone()
+                row = self._conn.execute("SELECT realized FROM daily_pnl WHERE day=?", (day_str,)).fetchone()
                 with localcontext() as ctx:
                     ctx.prec = _PNL_PREC
                     total = (Decimal(row[0]) if row else Decimal("0")) + delta

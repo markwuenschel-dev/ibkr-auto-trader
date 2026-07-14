@@ -47,9 +47,17 @@ class TestBuildSummary:
         # breaker/verdict/rollup events, a signoff_blocked, and a deliberately TORN final line. Every
         # expected value below is hand-computed against exactly those lines.
         collab = str(tmp_path / "c")
-        summary = rh.build_summary(collab, "20260709T000017Z-4242", seats={"builder": "opus", "reviewer": "gpt"},
-                                   started_ts="2026-07-09T00:00:17Z", pid=4242, max_rounds=6,
-                                   watch=False, git_sha="deadbeef", events_path=str(_FIXTURE))
+        summary = rh.build_summary(
+            collab,
+            "20260709T000017Z-4242",
+            seats={"builder": "opus", "reviewer": "gpt"},
+            started_ts="2026-07-09T00:00:17Z",
+            pid=4242,
+            max_rounds=6,
+            watch=False,
+            git_sha="deadbeef",
+            events_path=str(_FIXTURE),
+        )
 
         # calls == rounds_total == count of round DONE events (latency_ms present); 'start' variants excluded,
         # and the torn final line (a 4th would-be round) is skipped — proving torn lines never inflate counts.
@@ -83,11 +91,26 @@ class TestBuildSummary:
         log = Path(collab) / "logs" / "events.jsonl"
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(
-            json.dumps({"stage": "autopilot.round", "role": "reviewer", "artifact": "handoff:001",
-                        "metrics": {"latency_ms": 12.0}}) + "\n" +
-            json.dumps({"stage": "autopilot.autonomous_done", "role": "reviewer",
-                        "artifact": "handoff:001", "decision": {"reason_codes": ["done:001"]}}) + "\n",
-            "utf-8")
+            json.dumps(
+                {
+                    "stage": "autopilot.round",
+                    "role": "reviewer",
+                    "artifact": "handoff:001",
+                    "metrics": {"latency_ms": 12.0},
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "stage": "autopilot.autonomous_done",
+                    "role": "reviewer",
+                    "artifact": "handoff:001",
+                    "decision": {"reason_codes": ["done:001"]},
+                }
+            )
+            + "\n",
+            "utf-8",
+        )
         summary = rh.build_summary(collab, "uid-1", events_path=str(log))
         assert summary["signoff"] == {"result": "signed", "unmet": []}
         assert summary["rounds_total"] == 1
@@ -207,11 +230,17 @@ class TestPathSafety:
 
     def test_run_detail_valid_id_returns_sections(self, tmp_path):
         collab = str(tmp_path / "c")
-        events = (json.dumps({"stage": "autopilot.round", "role": "builder",
-                              "metrics": {"latency_ms": 5.0}}) + "\n"
-                  + "{ torn line\n")  # torn line skipped by the detail reader too
-        _write_run(collab, "20260709T000000Z-1", {"run_uid": "20260709T000000Z-1", "rounds_total": 1,
-                                                   "lanes": {"confirmed": 2, "refuted": 0}}, events=events)
+        events = (
+            json.dumps({"stage": "autopilot.round", "role": "builder", "metrics": {"latency_ms": 5.0}})
+            + "\n"
+            + "{ torn line\n"
+        )  # torn line skipped by the detail reader too
+        _write_run(
+            collab,
+            "20260709T000000Z-1",
+            {"run_uid": "20260709T000000Z-1", "rounds_total": 1, "lanes": {"confirmed": 2, "refuted": 0}},
+            events=events,
+        )
         detail = dc.run_detail(collab, "20260709T000000Z-1")
         assert detail["summary"]["rounds_total"] == 1
         assert detail["lanes"] == {"confirmed": 2, "refuted": 0}
@@ -219,14 +248,34 @@ class TestPathSafety:
 
     def test_compare_runs_valid_ids_return_deltas(self, tmp_path):
         collab = str(tmp_path / "c")
-        _write_run(collab, "run-a", {"run_uid": "run-a", "rounds_total": 2, "calls": 2,
-                                     "seat_calls": {"builder": 1}, "phase_final": "capped",
-                                     "signoff": {"result": "blocked"}, "lanes": {"confirmed": 0, "refuted": 1}})
-        _write_run(collab, "run-b", {"run_uid": "run-b", "rounds_total": 5, "calls": 5,
-                                     "seat_calls": {"builder": 3}, "phase_final": "done",
-                                     "signoff": {"result": "signed"}, "lanes": {"confirmed": 2, "refuted": 1}})
+        _write_run(
+            collab,
+            "run-a",
+            {
+                "run_uid": "run-a",
+                "rounds_total": 2,
+                "calls": 2,
+                "seat_calls": {"builder": 1},
+                "phase_final": "capped",
+                "signoff": {"result": "blocked"},
+                "lanes": {"confirmed": 0, "refuted": 1},
+            },
+        )
+        _write_run(
+            collab,
+            "run-b",
+            {
+                "run_uid": "run-b",
+                "rounds_total": 5,
+                "calls": 5,
+                "seat_calls": {"builder": 3},
+                "phase_final": "done",
+                "signoff": {"result": "signed"},
+                "lanes": {"confirmed": 2, "refuted": 1},
+            },
+        )
         cmp = dc.compare_runs(collab, "run-a", "run-b")
-        assert cmp["deltas"]["rounds_total"] == 3          # b - a
+        assert cmp["deltas"]["rounds_total"] == 3  # b - a
         assert cmp["deltas"]["calls"] == 3
         assert cmp["deltas"]["seat_calls"]["builder"] == 2
         assert cmp["deltas"]["lanes"] == {"confirmed": 2, "refuted": 0}
@@ -246,14 +295,20 @@ class TestListRuns:
         _write_run(collab, "20260709T010000Z-2", {"run_uid": "20260709T010000Z-2", "rounds_total": 2})
         _write_run(collab, "20260708T230000Z-9", {"run_uid": "20260708T230000Z-9", "rounds_total": 9})
         runs = dc.list_runs(collab)
-        assert [r["run_uid"] for r in runs] == ["20260709T010000Z-2", "20260709T000000Z-1", "20260708T230000Z-9"]
+        assert [r["run_uid"] for r in runs] == [
+            "20260709T010000Z-2",
+            "20260709T000000Z-1",
+            "20260708T230000Z-9",
+        ]
         assert all(not r.get("current") for r in runs)  # no live run active
 
     def test_live_current_entry_synthesized_from_status(self, tmp_path):
         collab = str(tmp_path / "c")
         _write_run(collab, "20260709T000000Z-1", {"run_uid": "20260709T000000Z-1", "rounds_total": 1})
         # an active (non-terminal) status -> a synthesized current entry in front.
-        ap._write_status(collab, run_uid="live-99", phase="thinking", started_ts="2026-07-09T02:00:00Z", round=2)
+        ap._write_status(
+            collab, run_uid="live-99", phase="thinking", started_ts="2026-07-09T02:00:00Z", round=2
+        )
         runs = dc.list_runs(collab)
         assert runs[0]["current"] is True and runs[0]["run_uid"] == "live-99"
         assert runs[0]["rounds_total"] == 2
@@ -289,11 +344,12 @@ class TestDriverArchive:
         def runner(cmd, prompt, *, timeout, **kw):
             if "builder" in cmd[0]:
                 n["b"] += 1
-                return f"rev {n['b']}"          # distinct output per attempt -> genuine progress
-            return "keep going"                 # reviewer withholds -> repair to the work-attempt budget
+                return f"rev {n['b']}"  # distinct output per attempt -> genuine progress
+            return "keep going"  # reviewer withholds -> repair to the work-attempt budget
 
-        rounds = ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=2, watch=False,
-                        runner=runner, home=home)
+        rounds = ap.run(
+            collab, seats=_cli(["reviewer", "builder"]), max_rounds=2, watch=False, runner=runner, home=home
+        )
         assert rounds >= 2  # no sign-off -> loops to the work-attempt budget, then escalates
 
         # run_uid was minted + stamped into status.json.
@@ -324,12 +380,14 @@ class TestDriverArchive:
         def runner(cmd, prompt, *, timeout, **kw):
             if "builder" in cmd[0]:
                 n["b"] += 1
-                return f"rev {n['b']}"          # distinct output -> genuine progress, loops to the budget
-            return "not yet — keep going"        # reviewer withholds -> repair_required each attempt
+                return f"rev {n['b']}"  # distinct output -> genuine progress, loops to the budget
+            return "not yet — keep going"  # reviewer withholds -> repair_required each attempt
 
         ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=2, runner=runner, home=home)
         run_uid = dc.read_status(collab)["run_uid"]
-        run_doc = json.loads((Path(collab) / "autopilot" / "history" / run_uid / "run.json").read_text("utf-8"))
+        run_doc = json.loads(
+            (Path(collab) / "autopilot" / "history" / run_uid / "run.json").read_text("utf-8")
+        )
         assert run_doc["signoff"]["result"] == "escalated"
         assert run_doc["terminal_reason"] == "budget_exhausted"
         assert run_doc["escalations"] >= 1
@@ -386,8 +444,8 @@ class TestLiveMaxRounds:
             if "builder" in cmd[0]:
                 n["b"] += 1
                 dc.set_max_rounds(collab, 3)  # bump the live ceiling mid-run
-                return f"rev {n['b']}"         # distinct output per attempt -> genuine progress
-            return "keep going"                # reviewer withholds
+                return f"rev {n['b']}"  # distinct output per attempt -> genuine progress
+            return "keep going"  # reviewer withholds
 
         ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=1, runner=runner, home=home)
         assert self._work_attempts(collab) == 3  # loop honored the raised live cap beyond the launch max of 1
@@ -418,6 +476,7 @@ class TestLiveMaxRounds:
 class TestHistoryEndpoints:
     def _serve(self, collab, home):
         import dashboard_web as dw
+
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), dw._Handler)
         httpd.collab = str(collab)
         httpd.home = home
@@ -430,29 +489,48 @@ class TestHistoryEndpoints:
         # draining the request body). Every request here is a read or an idempotent write, so a retry is safe.
         last = None
         for _ in range(2):
-            req = urllib.request.Request(url, data=data, headers=headers or {},
-                                         method="POST" if data is not None else "GET")
+            req = urllib.request.Request(
+                url, data=data, headers=headers or {}, method="POST" if data is not None else "GET"
+            )
             try:
                 r = urllib.request.urlopen(req, timeout=5)
                 return r.getcode(), r.read()
             except urllib.error.HTTPError as e:
                 return e.code, e.read()
-            except (ConnectionError, urllib.error.URLError, OSError) as e:  # noqa: PERF203
+            except (ConnectionError, urllib.error.URLError, OSError) as e:
                 last = e
         raise AssertionError(f"request to {url} failed twice: {last!r}")
 
     def test_runs_run_compare_and_max_turns(self, tmp_path):
         collab = str(tmp_path / "c")
-        _write_run(collab, "20260709T000000Z-1",
-                   {"run_uid": "20260709T000000Z-1", "rounds_total": 2, "calls": 2,
-                    "phase_final": "capped", "lanes": {"confirmed": 0, "refuted": 1},
-                    "signoff": {"result": "blocked"}, "seat_calls": {"builder": 1}},
-                   events=json.dumps({"stage": "autopilot.round", "role": "builder",
-                                      "metrics": {"latency_ms": 5.0}}) + "\n")
-        _write_run(collab, "20260709T010000Z-2",
-                   {"run_uid": "20260709T010000Z-2", "rounds_total": 5, "calls": 5,
-                    "phase_final": "done", "lanes": {"confirmed": 2, "refuted": 0},
-                    "signoff": {"result": "signed"}, "seat_calls": {"builder": 3}})
+        _write_run(
+            collab,
+            "20260709T000000Z-1",
+            {
+                "run_uid": "20260709T000000Z-1",
+                "rounds_total": 2,
+                "calls": 2,
+                "phase_final": "capped",
+                "lanes": {"confirmed": 0, "refuted": 1},
+                "signoff": {"result": "blocked"},
+                "seat_calls": {"builder": 1},
+            },
+            events=json.dumps({"stage": "autopilot.round", "role": "builder", "metrics": {"latency_ms": 5.0}})
+            + "\n",
+        )
+        _write_run(
+            collab,
+            "20260709T010000Z-2",
+            {
+                "run_uid": "20260709T010000Z-2",
+                "rounds_total": 5,
+                "calls": 5,
+                "phase_final": "done",
+                "lanes": {"confirmed": 2, "refuted": 0},
+                "signoff": {"result": "signed"},
+                "seat_calls": {"builder": 3},
+            },
+        )
         httpd, port = self._serve(collab, str(tmp_path))
         try:
             base = f"http://127.0.0.1:{port}"
@@ -485,8 +563,12 @@ class TestHistoryEndpoints:
             assert json.loads(ap._control_path(collab).read_text("utf-8"))["max_rounds"] == 7
 
             # POST /api/max-turns without the token -> 403 (rejected before any write).
-            assert self._req(base + "/api/max-turns", data=b'{"n":9}',
-                             headers={"Content-Type": "application/json"})[0] == 403
+            assert (
+                self._req(
+                    base + "/api/max-turns", data=b'{"n":9}', headers={"Content-Type": "application/json"}
+                )[0]
+                == 403
+            )
             # out-of-range n -> 400.
             assert self._req(base + "/api/max-turns", data=b'{"n":99}', headers=tok)[0] == 400
             # the durable value is still 7 (the bad requests never wrote).

@@ -30,7 +30,7 @@ def _dec(raw: object) -> Decimal | None:
         return None
     try:
         value = Decimal(str(raw))
-    except (InvalidOperation, ValueError):
+    except InvalidOperation, ValueError:
         return None
     # ib_async reports an absent quote as NaN; a NaN Decimal is not a usable valuation.
     return None if value.is_nan() else value

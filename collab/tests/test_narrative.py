@@ -61,11 +61,18 @@ def _reply(collab, name, text):
 
 
 def _ev(hid, round_no, role, relpath, *, lat=1000.0):
-    return {"schema_version": "0.1", "ts": f"2026-01-01T00:0{round_no}:00Z", "run_id": "t",
-            "span_id": f"r{round_no}:{role}:done", "parent_span_id": f"r{round_no}:{role}",
-            "stage": "autopilot.round", "role": role, "artifact": f"handoff:{hid}",
-            "decision": {"action": "turn", "reason_codes": [f"reply:{relpath}"], "confidence": None},
-            "metrics": {"latency_ms": lat, "resp_bytes": 50}}
+    return {
+        "schema_version": "0.1",
+        "ts": f"2026-01-01T00:0{round_no}:00Z",
+        "run_id": "t",
+        "span_id": f"r{round_no}:{role}:done",
+        "parent_span_id": f"r{round_no}:{role}",
+        "stage": "autopilot.round",
+        "role": role,
+        "artifact": f"handoff:{hid}",
+        "decision": {"action": "turn", "reason_codes": [f"reply:{relpath}"], "confidence": None},
+        "metrics": {"latency_ms": lat, "resp_bytes": 50},
+    }
 
 
 def _write_events(collab, events):
@@ -91,22 +98,23 @@ class TestBuild:
         md = narrative.build(collab, hid)
         assert md.startswith("<!-- autopilot-narrative:001 -->")
         assert md.rstrip().endswith("<!-- /autopilot-narrative:001 -->")
-        assert "Build the thing → and wire it" in md              # title (unicode preserved)
-        assert "why it matters" in md                             # Summary prose surfaced
+        assert "Build the thing → and wire it" in md  # title (unicode preserved)
+        assert "why it matters" in md  # Summary prose surfaced
         assert "Guardrails: money, auth" in md
-        assert "Depends on: PT-1 domain models, PT-2 state store" in md   # list, not char-by-char
-        assert "src/thing.py" in md                               # deliverable lead
+        assert "Depends on: PT-1 domain models, PT-2 state store" in md  # list, not char-by-char
+        assert "src/thing.py" in md  # deliverable lead
         assert "Round 1 · builder" in md and "Round 2 · reviewer" in md
-        assert "(66.7s)" in md                                    # latency rendered
-        assert "I implemented the Thing protocol" in md           # real reply prose, not invented
+        assert "(66.7s)" in md  # latency rendered
+        assert "I implemented the Thing protocol" in md  # real reply prose, not invented
         assert "## The last turn" in md and "## Where it landed" in md
 
     def test_pending_reads_as_queued(self, tmp_path):
         collab = str(tmp_path / "c")
         hid = _handoff(collab)
         _two_turns(collab, hid)
-        assert "Queued" in narrative.build(collab, hid).splitlines()[3] or \
-               "In progress" in narrative.build(collab, hid)
+        assert "Queued" in narrative.build(collab, hid).splitlines()[3] or "In progress" in narrative.build(
+            collab, hid
+        )
 
     def test_done_by_hand_is_not_reported_as_autonomous(self, tmp_path):
         collab = str(tmp_path / "c")
@@ -121,10 +129,16 @@ class TestBuild:
     def test_autonomous_signoff_is_reported(self, tmp_path):
         collab = str(tmp_path / "c")
         hid = _handoff(collab)
-        done_ev = {"schema_version": "0.1", "ts": "2026-01-01T00:03:00Z", "run_id": "t",
-                   "span_id": "r2:reviewer:signoff", "stage": "autopilot.autonomous_done",
-                   "role": "reviewer", "artifact": f"handoff:{hid}",
-                   "decision": {"action": "autonomous_done", "reason_codes": [f"done:{hid}"]}}
+        done_ev = {
+            "schema_version": "0.1",
+            "ts": "2026-01-01T00:03:00Z",
+            "run_id": "t",
+            "span_id": "r2:reviewer:signoff",
+            "stage": "autopilot.autonomous_done",
+            "role": "reviewer",
+            "artifact": f"handoff:{hid}",
+            "decision": {"action": "autonomous_done", "reason_codes": [f"done:{hid}"]},
+        }
         _two_turns(collab, hid, extra=[done_ev])
         hc.claim(collab, hid)
         hc.done(collab, hid)
@@ -135,9 +149,16 @@ class TestBuild:
     def test_capped_run_reads_as_gate_held(self, tmp_path):
         collab = str(tmp_path / "c")
         hid = _handoff(collab)
-        cap_ev = {"schema_version": "0.1", "ts": "2026-01-01T00:03:00Z", "run_id": "t", "span_id": None,
-                  "stage": "autopilot.pause", "role": "autopilot", "artifact": None,
-                  "decision": {"action": "cap", "reason_codes": [f"root:{hid}", "outcome:capped"]}}
+        cap_ev = {
+            "schema_version": "0.1",
+            "ts": "2026-01-01T00:03:00Z",
+            "run_id": "t",
+            "span_id": None,
+            "stage": "autopilot.pause",
+            "role": "autopilot",
+            "artifact": None,
+            "decision": {"action": "cap", "reason_codes": [f"root:{hid}", "outcome:capped"]},
+        }
         _two_turns(collab, hid, extra=[cap_ev])
         md = narrative.build(collab, hid)
         assert "Ran the full round budget" in md and "gate held" in md
@@ -145,8 +166,11 @@ class TestBuild:
     def test_blocker_turn_is_flagged(self, tmp_path):
         collab = str(tmp_path / "c")
         hid = _handoff(collab)
-        _two_turns(collab, hid,
-                   reviewer_text="I have to stop here and flag a blocker — I can't do this as configured.")
+        _two_turns(
+            collab,
+            hid,
+            reviewer_text="I have to stop here and flag a blocker — I can't do this as configured.",
+        )
         md = narrative.build(collab, hid)
         assert "⚠ blocker" in md
         assert "Stalled on a blocker" in md
@@ -157,15 +181,20 @@ class TestBuild:
         md = narrative.build(collab, hid)
         assert "why it matters" in md
         assert "## Where it landed" in md
-        assert "## How it unfolded" not in md   # no turns -> section omitted, not faked
+        assert "## How it unfolded" not in md  # no turns -> section omitted, not faked
 
     def test_escalation_surfaces_in_narrative(self, tmp_path):
         import escalation
+
         collab = str(tmp_path / "c")
         hid = _handoff(collab)
         _two_turns(collab, hid)
-        escalation.write(collab, hid, [{"lane": "clock", "description": "tz bug at gateway.py:233",
-                                        "regression_test": "test_skew"}], attempts=1)
+        escalation.write(
+            collab,
+            hid,
+            [{"lane": "clock", "description": "tz bug at gateway.py:233", "regression_test": "test_skew"}],
+            attempts=1,
+        )
         md = narrative.build(collab, hid)
         assert "⚠ Escalated to you" in md
         assert "## ⚠ Needs your fix" in md
@@ -189,21 +218,30 @@ class TestRunSelection:
         ev = _ev(hid, 1, "builder", rel)
         ev["ts"] = "2026-01-01T00:00:00Z"  # OLD
         (d / "events.jsonl").write_text(json.dumps(ev) + "\n", encoding="utf-8")
-        (d / "run.json").write_text(json.dumps({"run_uid": uid, "started_ts": "2026-01-01T00:00:00Z"}),
-                                    encoding="utf-8")
+        (d / "run.json").write_text(
+            json.dumps({"run_uid": uid, "started_ts": "2026-01-01T00:00:00Z"}), encoding="utf-8"
+        )
 
     def _status(self, collab, started, run_uid):
         p = Path(collab) / "autopilot" / "status.json"
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"started_ts": started, "run_uid": run_uid,
-                                 "run_seats": {"builder": "gpt-5.6-terra"}}), encoding="utf-8")
+        p.write_text(
+            json.dumps(
+                {"started_ts": started, "run_uid": run_uid, "run_seats": {"builder": "gpt-5.6-terra"}}
+            ),
+            encoding="utf-8",
+        )
 
     def test_live_run_wins_over_prior_archived_run(self, tmp_path):
         collab = str(tmp_path / "c")
         hid = _handoff(collab)
         # a PRIOR archived run of 001 that ended in a blocker
-        self._archived_run(collab, hid, "20260101T000000Z-1",
-                           "I have to stop and flag a blocker — can't do this as configured.")
+        self._archived_run(
+            collab,
+            hid,
+            "20260101T000000Z-1",
+            "I have to stop and flag a blocker — can't do this as configured.",
+        )
         # a LIVE run (newer started_ts) whose builder actually did the work — its turn is in the live log
         self._status(collab, "2026-06-01T00:00:00Z", "20260601T000000Z-2")
         rel = _reply(collab, "live-builder.md", "Implemented the gateway and ran the tests: 78 passed.")
@@ -212,9 +250,9 @@ class TestRunSelection:
         _write_events(collab, [live_ev])
 
         md = narrative.build(collab, hid)
-        assert "Implemented the gateway" in md          # the LIVE run's turn
-        assert "flag a blocker" not in md               # NOT the prior archived run
-        assert "gpt-5.6-terra" in md                    # labeled with the live run's model
+        assert "Implemented the gateway" in md  # the LIVE run's turn
+        assert "flag a blocker" not in md  # NOT the prior archived run
+        assert "gpt-5.6-terra" in md  # labeled with the live run's model
 
     def test_falls_back_to_archived_when_no_live_run(self, tmp_path):
         collab = str(tmp_path / "c")
@@ -252,18 +290,20 @@ class TestWrite:
         _, path = hc._reconcile(collab, hid)
         before = Path(path).read_text("utf-8")
         narrative.build(collab, hid)
-        assert Path(path).read_text("utf-8") == before                 # handoff untouched
+        assert Path(path).read_text("utf-8") == before  # handoff untouched
         assert not (Path(collab) / "autopilot" / "summaries").exists()  # no summaries dir written
 
 
 class TestUnits:
     def test_conformance_parses_met_partial_missing(self):
-        text = ("Reviewed the diff against the ADR + DoD.\n"
-                "- [met] snapshot is frozen (ADR-0001 §3)\n"
-                "* [Partial] retry backoff only half-wired\n"
-                "-  [missing]  regression test for the skew path\n"
-                "not a conformance line at all\n"
-                "[[SIGNOFF]]")
+        text = (
+            "Reviewed the diff against the ADR + DoD.\n"
+            "- [met] snapshot is frozen (ADR-0001 §3)\n"
+            "* [Partial] retry backoff only half-wired\n"
+            "-  [missing]  regression test for the skew path\n"
+            "not a conformance line at all\n"
+            "[[SIGNOFF]]"
+        )
         out = narrative._conformance(text)
         assert [c["status"] for c in out] == ["met", "partial", "missing"]
         assert out[2]["item"] == "regression test for the skew path"
@@ -278,19 +318,42 @@ class TestUnits:
         assert narrative._clock(None) == ""
 
     def test_run_label_current_vs_previous(self):
-        assert narrative._run_label("20260709T001844Z-42", "2026-07-09T00:18:44Z", is_current=True) \
+        assert (
+            narrative._run_label("20260709T001844Z-42", "2026-07-09T00:18:44Z", is_current=True)
             == "Current run · 00:18"
-        assert narrative._run_label("20260709T001844Z-42", "2026-07-09T00:18:44Z", is_current=False) \
+        )
+        assert (
+            narrative._run_label("20260709T001844Z-42", "2026-07-09T00:18:44Z", is_current=False)
             == "Previous run · 00:18"
+        )
         assert narrative._run_label(None, None) == "the live run"
 
     def test_render_surfaces_conformance_and_dod(self):
-        d = {"hid": "001", "title": "t", "state": "done", "why": "", "guardrails": [], "depends_on": [],
-             "adr": None, "deliverables": [], "dod": ["frozen snapshot", "retry backoff"],
-             "contract": ["ADR-0001 §3 decision"], "conformance": [{"status": "met", "item": "snapshot frozen"},
-             {"status": "missing", "item": "skew regression"}], "run_label": "Current run · 00:18", "turns": [],
-             "last_turn": None, "signed_off": True, "closed_autonomously": True, "tests_passed": True,
-             "capped": False, "signoff_blocked": [], "escalated": False}
+        d = {
+            "hid": "001",
+            "title": "t",
+            "state": "done",
+            "why": "",
+            "guardrails": [],
+            "depends_on": [],
+            "adr": None,
+            "deliverables": [],
+            "dod": ["frozen snapshot", "retry backoff"],
+            "contract": ["ADR-0001 §3 decision"],
+            "conformance": [
+                {"status": "met", "item": "snapshot frozen"},
+                {"status": "missing", "item": "skew regression"},
+            ],
+            "run_label": "Current run · 00:18",
+            "turns": [],
+            "last_turn": None,
+            "signed_off": True,
+            "closed_autonomously": True,
+            "tests_passed": True,
+            "capped": False,
+            "signoff_blocked": [],
+            "escalated": False,
+        }
         md = narrative.render_markdown(d)
         assert "## The contract & definition of done" in md
         assert "ADR-0001 §3 decision" in md and "retry backoff" in md

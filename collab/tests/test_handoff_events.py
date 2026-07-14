@@ -70,8 +70,13 @@ def test_on_review_accept(tmp_path):
     log = _log(tmp_path)
     codes = ["amendments-landed", "implementation-authorized"]
     he.on_review(
-        log, RUN_ID, HID, span_id="h3", parent_span_id="h2",
-        verdict="approved", reason_codes=codes,
+        log,
+        RUN_ID,
+        HID,
+        span_id="h3",
+        parent_span_id="h2",
+        verdict="approved",
+        reason_codes=codes,
     )
     (rec,) = _read(log)
     assert rec["stage"] == "review"
@@ -87,8 +92,13 @@ def test_on_review_revise(tmp_path):
     log = _log(tmp_path)
     codes = ["lock-semantics-underspecified", "path-edge-cases"]
     he.on_review(
-        log, RUN_ID, HID, span_id="h3", parent_span_id="h2",
-        verdict="conditional_approval", reason_codes=codes,
+        log,
+        RUN_ID,
+        HID,
+        span_id="h3",
+        parent_span_id="h2",
+        verdict="conditional_approval",
+        reason_codes=codes,
     )
     (rec,) = _read(log)
     assert rec["decision"]["action"] == "revise"  # conditional -> revise
@@ -114,8 +124,13 @@ def test_on_revise(tmp_path):
     log = _log(tmp_path)
     codes = ["race-safe-rename-break", "path-table"]
     he.on_revise(
-        log, RUN_ID, HID, span_id="h4", parent_span_id="h3",
-        revision="rev2", reason_codes=codes,
+        log,
+        RUN_ID,
+        HID,
+        span_id="h4",
+        parent_span_id="h3",
+        revision="rev2",
+        reason_codes=codes,
     )
     (rec,) = _read(log)
     assert rec["stage"] == "handoff.revise"
@@ -161,16 +176,31 @@ def test_full_lifecycle_ordered_stages(tmp_path):
     he.on_create(log, RUN_ID, HID, span_id="s1", title="widget-core")
     he.on_claim(log, RUN_ID, HID, span_id="s2", parent_span_id="s1", by="reviewer")
     he.on_review(
-        log, RUN_ID, HID, span_id="s3", parent_span_id="s2",
-        verdict="conditional_approval", reason_codes=["needs-tests"],
+        log,
+        RUN_ID,
+        HID,
+        span_id="s3",
+        parent_span_id="s2",
+        verdict="conditional_approval",
+        reason_codes=["needs-tests"],
     )
     he.on_revise(
-        log, RUN_ID, HID, span_id="s4", parent_span_id="s3",
-        revision="rev2", reason_codes=["added-tests"],
+        log,
+        RUN_ID,
+        HID,
+        span_id="s4",
+        parent_span_id="s3",
+        revision="rev2",
+        reason_codes=["added-tests"],
     )
     he.on_review(
-        log, RUN_ID, HID, span_id="s5", parent_span_id="s4",
-        verdict="approved", reason_codes=["all-clear"],
+        log,
+        RUN_ID,
+        HID,
+        span_id="s5",
+        parent_span_id="s4",
+        verdict="approved",
+        reason_codes=["all-clear"],
     )
     he.on_done(log, RUN_ID, HID, span_id="s6", parent_span_id="s5")
 
@@ -184,12 +214,12 @@ def test_full_lifecycle_ordered_stages(tmp_path):
         "handoff.done",
     ]
     # Verdict edges produced the right derived actions.
-    assert recs[2]["decision"]["action"] == "revise"   # conditional
-    assert recs[4]["decision"]["action"] == "accept"   # approved
+    assert recs[2]["decision"]["action"] == "revise"  # conditional
+    assert recs[4]["decision"]["action"] == "accept"  # approved
     # Every event is about the same handoff and carries a schema_version.
     assert all(r["artifact"] == f"handoff:{HID}" for r in recs)
     assert all(r["schema_version"] for r in recs)
     # Span tree is a chain: each parent is the previous event's span.
     spans = [r["span_id"] for r in recs]
     parents = [r["parent_span_id"] for r in recs]
-    assert parents == [None] + spans[:-1]
+    assert parents == [None, *spans[:-1]]

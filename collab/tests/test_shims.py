@@ -18,6 +18,7 @@ KIT = Path(__file__).resolve().parent.parent
 HANDOFF = KIT / "tools" / "handoff"
 COLLAB_HANDOFF = KIT / "tools" / "collab-handoff"
 
+
 def _probe_bash():
     """True iff the bash on PATH can actually run our POSIX shim.
 
@@ -36,7 +37,10 @@ def _probe_bash():
 
 pytestmark = pytest.mark.skipif(
     not _probe_bash(),
-    reason="no compatible bash to run the POSIX shim (e.g. WSL bash on Windows PATH); shim verified under Git Bash",
+    reason=(
+        "no compatible bash to run the POSIX shim (e.g. WSL bash on Windows PATH); "
+        "shim verified under Git Bash"
+    ),
 )
 
 
@@ -53,7 +57,7 @@ def _run(shim, args, *, env_overrides=None, drop=()):
 def _symlink_or_skip(target: Path, link: Path):
     try:
         link.symlink_to(target)
-    except (OSError, NotImplementedError):
+    except OSError, NotImplementedError:
         pytest.skip("symlinks not creatable on this platform/privilege")
 
 
@@ -78,7 +82,9 @@ def test_symlinked_handoff_help_without_kit_root(tmp_path):
     # The readlink fallback works where symlinks are followable; on MSYS/Windows readlink may not
     # follow the link, in which case COLLAB_KIT_ROOT is the supported route (tested above).
     if r.returncode != 0 and "cannot locate collab-kit" in (r.stderr + r.stdout):
-        pytest.skip("platform readlink cannot follow this symlink; COLLAB_KIT_ROOT is the supported install route")
+        pytest.skip(
+            "platform readlink cannot follow this symlink; COLLAB_KIT_ROOT is the supported install route"
+        )
     assert r.returncode == 0, r.stderr
 
 
@@ -88,8 +94,11 @@ def test_symlinked_collab_handoff_roundtrip(tmp_path):
     _symlink_or_skip(COLLAB_HANDOFF, link)
     collab = tmp_path / "demo"
     # create then list a handoff through the symlinked wrapper, bound to the collab via HANDOFF_ROOT
-    r1 = _run(link, ["create", "--to", "r", "--title", "via symlink"],
-              env_overrides={"COLLAB_KIT_ROOT": str(KIT), "HANDOFF_ROOT": str(collab)})
+    r1 = _run(
+        link,
+        ["create", "--to", "r", "--title", "via symlink"],
+        env_overrides={"COLLAB_KIT_ROOT": str(KIT), "HANDOFF_ROOT": str(collab)},
+    )
     assert r1.returncode == 0, r1.stderr
     assert r1.stdout.strip().endswith("001")
     r2 = _run(link, ["list"], env_overrides={"COLLAB_KIT_ROOT": str(KIT), "HANDOFF_ROOT": str(collab)})

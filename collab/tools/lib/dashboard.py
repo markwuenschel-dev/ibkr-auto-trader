@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import collab_common as cc  # noqa: E402
+import collab_common as cc
 
 
 def main(argv=None) -> int:
@@ -39,8 +39,10 @@ def main(argv=None) -> int:
 
     if args.web:
         import dashboard_web
+
         return dashboard_web.serve(args.collab, home, port=args.port)
     import dashboard_tui
+
     return dashboard_tui.run_tui(args.collab, home, interval=args.interval)
 
 

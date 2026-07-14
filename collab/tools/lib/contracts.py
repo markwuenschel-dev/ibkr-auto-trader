@@ -136,7 +136,7 @@ def parse_handoff(path) -> dict:
         for i in range(1, len(lines)):
             if lines[i].strip() == _FENCE:
                 frontmatter = _parse_frontmatter("\n".join(lines[1:i]))
-                body = "\n".join(lines[i + 1:])
+                body = "\n".join(lines[i + 1 :])
                 break
 
     return {
@@ -170,15 +170,11 @@ def validate_handoff(obj: dict) -> list[str]:
 
     priority = fm.get("priority")
     if priority is not None and priority not in PRIORITY_VALUES:
-        errors.append(
-            f"invalid priority {priority!r}: must be one of {list(PRIORITY_VALUES)}"
-        )
+        errors.append(f"invalid priority {priority!r}: must be one of {list(PRIORITY_VALUES)}")
 
     status = fm.get("status")
     if status is not None and status not in STATUS_VALUES:
-        errors.append(
-            f"invalid status {status!r}: must be one of {list(STATUS_VALUES)}"
-        )
+        errors.append(f"invalid status {status!r}: must be one of {list(STATUS_VALUES)}")
 
     for name in REQUIRED_SECTIONS:
         if name not in sections or not sections.get(name, "").strip():
@@ -295,9 +291,7 @@ def handoff_loss(upstream_obj: dict, downstream_obj: dict) -> dict:
         keys = set(declared)
         down_ids = set(declared_constraints(downstream_obj))
         down_raw = downstream_obj.get("raw", "")
-        dropped = sorted(
-            cid for cid in keys if cid not in down_ids and f"[{cid}]" not in down_raw
-        )
+        dropped = sorted(cid for cid in keys if cid not in down_ids and f"[{cid}]" not in down_raw)
     else:
         mode = "scraped"
         keys = _scrape_constraints(upstream_obj)

@@ -311,9 +311,7 @@ def resolve_assessment_profiles(seats_document: Mapping[str, Any]) -> dict[str, 
     if not isinstance(profiles, Mapping):
         raise VerificationPlanError("seats configuration requires an 'assessment_profiles' object")
 
-    profile_revision = _text(
-        seats_document.get("assessment_profile_revision"), "assessment_profile_revision"
-    )
+    profile_revision = _text(seats_document.get("assessment_profile_revision"), "assessment_profile_revision")
     _validate_role_seats(seats, models)
     raw_profiles = {profile_id: profiles.get(profile_id) for profile_id in _PROFILE_IDS}
     for profile_id, raw in raw_profiles.items():
@@ -422,16 +420,12 @@ def resolve_verification_plan(
     profiles = resolve_assessment_profiles(seats_document)
     lane_config_revision = _text(lanes_config.get("revision"), "lane configuration revision")
     prompt_revision = _text(lanes_config.get("prompt_revision"), "lane configuration prompt_revision")
-    profile_revision = _text(
-        seats_document.get("assessment_profile_revision"), "assessment_profile_revision"
-    )
+    profile_revision = _text(seats_document.get("assessment_profile_revision"), "assessment_profile_revision")
     normalized = normalize_guardrails(guardrails)
     selected = set(normalized)
 
     baseline_specs = tuple(
-        spec
-        for spec in specs
-        if spec.always_baseline or bool(set(spec.baseline_guardrails) & selected)
+        spec for spec in specs if spec.always_baseline or bool(set(spec.baseline_guardrails) & selected)
     )
     if not baseline_specs:
         raise VerificationPlanError("baseline plan must contain at least the change-regression contract")
@@ -487,9 +481,7 @@ def _validate_role_seats(seats: Mapping[str, Any], models: Mapping[str, Any]) ->
         if cfg.get("role") != role:
             raise VerificationPlanError(f"logical role seat {role!r} must declare role={role!r}")
         if cfg.get("access") != expected_access:
-            raise VerificationPlanError(
-                f"logical role seat {role!r} must declare access={expected_access!r}"
-            )
+            raise VerificationPlanError(f"logical role seat {role!r} must declare access={expected_access!r}")
         try:
             out = adapters.compile_seat(role, dict(cfg), dict(models))
         except cc.CollabError as exc:
@@ -548,9 +540,7 @@ def _require_assessment_executor(label: str, compiled: Mapping[str, Any]) -> Non
         raise VerificationPlanError(f"assessment executor {label!r} model requires provider metadata")
 
 
-def _merge_executor(
-    prior: Mapping[str, str], raw: object, profile_id: str, role: str
-) -> dict[str, str]:
+def _merge_executor(prior: Mapping[str, str], raw: object, profile_id: str, role: str) -> dict[str, str]:
     if not isinstance(raw, Mapping):
         raise VerificationPlanError(f"assessment profile {profile_id!r}.{role} must be an object")
     unexpected = set(raw) - {"seat", "model"}
