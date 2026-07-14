@@ -1,0 +1,121 @@
+{
+  "accepted_residuals": [],
+  "blockers": [],
+  "builder_seat": "builder",
+  "generated_ts": "2026-07-10T19:54:59Z",
+  "guardrails": [
+    "money",
+    "auth",
+    "data-integrity",
+    "bounded-autonomy"
+  ],
+  "hid": "028",
+  "lanes": [
+    {
+      "breaker_artifact": "autopilot/replies/1783712892022970400-breaker-breaker-data-integrity-under-concurrent-autopilots.md",
+      "breaker_seat": "breaker",
+      "confirmed": [],
+      "lane": "data-integrity-under-concurrent-autopilots",
+      "ran": true,
+      "refuted": [
+        "src/ibkr_trader/ibkr/gateway.py `_BaseAccountGateway._reconcile` (lines 421-428, the cache-rewrite loops) -> the multi-statement rewrite is non-atomic (no BEGIN IMMEDIATE, unlike StateStore.add_realized_pnl). Trigger: shared store starts {AAPL:100, TSLA:5}, broker snapshot = {AAPL:120} (broker no longer holds TSLA); the autopilot process is killed/crashes after `upsert_position(\"AAPL\",120)` runs but before the `for sym in recon.cache` flatten reaches TSLA. Persisted cache is left {AAPL:120, TSLA:5} \u2014 a phantom TSLA holding matching neither the old nor the new broker truth. Reproduced: `cache after crash: {'AAPL': 120, 'TSLA': 5}`.",
+        "src/ibkr_trader/ibkr/gateway.py `_BaseAccountGateway._reconcile` (line 417 `all_positions()` read + lines 424-428 writes) -> the read-modify-write is not isolated against a concurrent writer to the same trader.db. Trigger: two autopilots share one StateStore; store = {AAPL:100}; gw-1's reconcile reads cache=100 against broker truth {AAPL:120}, then a concurrent writer (a second autopilot's reconcile, or the PT-2 execution fill path) calls `upsert_position(\"AAPL\",90)` between gw-1's read and its write; gw-1 then writes AAPL=120, silently clobbering the fresher 90. Persisted position = 120 while true holding = 90 \u2014 a lost update. Reproduced: `final cache: {'AAPL': 120}` after the concurrent 90 write."
+      ],
+      "verifier_artifact": "autopilot/replies/1783713298649460600-verifier-verify-data-integrity-under-concurrent-autopilots.md",
+      "verifier_seat": "verifier"
+    },
+    {
+      "breaker_artifact": "autopilot/replies/1783712827334321600-breaker-breaker-path-pointer-safety.md",
+      "breaker_seat": "breaker",
+      "confirmed": [],
+      "lane": "path-pointer-safety",
+      "ran": true,
+      "refuted": [
+        "src/ibkr_trader/ibkr/gateway.py:233 clock_skew_seconds (via _check_skew:439 / snapshot:356) -> naive broker_time (e.g. `broker_time=datetime(2026,7,9,14,30,35)`) with a tz-aware clock, or a naive injected Clock with tz-aware broker_time, raises an unhandled TypeError that crashes snapshot() and discards the built RiskContext, violating \"skew reports, never gates.\""
+      ],
+      "verifier_artifact": "autopilot/replies/1783712995377496100-verifier-verify-path-pointer-safety.md",
+      "verifier_seat": "verifier"
+    }
+  ],
+  "reviewer_preflight": {
+    "commands": {
+      "git_diff_name_only": {
+        "exit_code": 0,
+        "stdout_tail": "KICKOFF.md\ncollab/tools/adapters/openai-repo-seat.py\ncollab/tools/lib/autopilot.py\ncollab/tools/lib/dashboard_core.py\ncollab/tools/lib/dashboard_web.py\ndocs/design/collab-kit-architecture-autonomous.md\nhandoffs/done/028-pt-3-ibkr-account-gateway.md\npyproject.toml\nuv.lock\n"
+      },
+      "git_rev_parse": {
+        "exit_code": 0,
+        "stdout_tail": "C:/Users/Nalakram/Documents/GitHub/ibkr-auto-trader\n"
+      },
+      "git_status_short": {
+        "exit_code": 0,
+        "stdout_tail": " M KICKOFF.md\n M collab/tools/adapters/openai-repo-seat.py\n M collab/tools/lib/autopilot.py\n M collab/tools/lib/dashboard_core.py\n M collab/tools/lib/dashboard_web.py\n M docs/design/collab-kit-architecture-autonomous.md\n D handoffs/done/028-pt-3-ibkr-account-gateway.md\n M pyproject.toml\n M uv.lock\n?? ARCHITECTURE.md\n?? _telemetry-archive/\n?? _tmp_repro_reconcile.py\n?? _verify_reconcile_atomicity.py\n?? autopilot/\n?? collab/tests/test_narrative.py\n?? collab/tools/lib/narrative.py\n?? handoffs/claimed/\n"
+      },
+      "pwd": {
+        "exit_code": 0,
+        "stdout_tail": "C:\\Users\\Nalakram\\Documents\\GitHub\\ibkr-auto-trader"
+      },
+      "pytest_collect_only": {
+        "exit_code": 0,
+        "stdout_tail": "donly_by_default\ntests/test_ibkr_gateway.py::TestReadOnly::test_from_env_is_readonly_by_default\ntests/test_ibkr_gateway.py::TestReadOnly::test_connect_telemetry_reports_readonly\ntests/test_ibkr_gateway.py::TestTelemetryEnvelope::test_snapshot_event_has_money_and_count_no_pii\ntests/test_ibkr_gateway.py::TestClockSkew::test_skew_beyond_threshold_emits_event\ntests/test_ibkr_gateway.py::TestClockSkew::test_skew_within_threshold_is_quiet\ntests/test_ibkr_gateway.py::TestConfig::test_paper_defaults\ntests/test_ibkr_gateway.py::TestConfig::test_from_env_reads_overrides\ntests/test_ibkr_gateway.py::TestConfig::test_from_env_blank_account_is_none\ntests/test_ibkr_gateway.py::TestPortConformance::test_fake_satisfies_account_gateway_protocol\ntests/test_ibkr_gateway.py::test_real_paper_gateway_snapshot\ntests/test_state.py::TestPositions::test_upsert_and_read_signed_quantity\ntests/test_state.py::TestPositions::test_unknown_symbol_is_flat_zero\ntests/test_state.py::TestPositions::test_upsert_overwrites\ntests/test_state.py::TestPositions::test_all_positions\ntests/test_state.py::TestDailyPnl::test_accumulates_within_a_day\ntests/test_state.py::TestDailyPnl::test_days_are_isolated\ntests/test_state.py::TestDailyPnl::test_unrecorded_day_is_zero\ntests/test_state.py::TestDailyPnl::test_money_is_exact_not_float\ntests/test_state.py::TestDailyPnl::test_daily_pnl_survives_restart\ntests/test_state.py::TestIdempotency::test_record_is_true_first_then_false\ntests/test_state.py::TestIdempotency::test_distinct_keys_both_claim\ntests/test_state.py::TestIdempotency::test_has_order_key_is_read_only\ntests/test_state.py::TestIdempotency::test_keys_survive_restart\ntests/test_state.py::TestSchemaInit::test_init_is_idempotent\ntests/test_state.py::TestSchemaInit::test_default_path_env_override\ntests/test_state.py::TestConcurrencyAndPrecision::test_connection_is_usable_across_threads\ntests/test_state.py::TestConcurrencyAndPrecision::test_accumulation_is_exact_beyond_default_precision\n\n79 tests collected in 0.21s\n"
+      }
+    },
+    "inspected_files": [
+      "src/ibkr_trader/__init__.py",
+      "src/ibkr_trader/app.py",
+      "src/ibkr_trader/audit/__init__.py",
+      "src/ibkr_trader/config.py",
+      "src/ibkr_trader/domain/__init__.py",
+      "src/ibkr_trader/domain/models.py",
+      "src/ibkr_trader/execution/__init__.py",
+      "src/ibkr_trader/ibkr/__init__.py",
+      "src/ibkr_trader/ibkr/config.py",
+      "src/ibkr_trader/ibkr/fake_gateway.py",
+      "src/ibkr_trader/ibkr/gateway.py",
+      "src/ibkr_trader/ibkr/ibkr_gateway.py",
+      "src/ibkr_trader/pack.py",
+      "src/ibkr_trader/risk/__init__.py",
+      "src/ibkr_trader/state/__init__.py",
+      "src/ibkr_trader/state/store.py",
+      "src/ibkr_trader/strategy/__init__.py",
+      "src/ibkr_trader/telemetry.py",
+      "tests/test_bootstrap.py",
+      "tests/test_domain.py",
+      "tests/test_ibkr_gateway.py",
+      "tests/test_state.py"
+    ],
+    "repo_access": true,
+    "repo_root": "C:/Users/Nalakram/Documents/GitHub/ibkr-auto-trader",
+    "seat": "reviewer"
+  },
+  "reviewer_seat": "verifier",
+  "source_base": "C:\\Users\\Nalakram\\Documents\\GitHub\\ibkr-auto-trader",
+  "source_manifest": {
+    "src/ibkr_trader/__init__.py": "9343360d3e713afa5038d64f30233acc8401750970c36f13b628c3b1ab12758d",
+    "src/ibkr_trader/app.py": "8f1f9468a5c1b173aa664905119b09e2a3a640fb59fdce1d4e26544ab8180829",
+    "src/ibkr_trader/audit/__init__.py": "a4ba8df4294270a3d8980dd2efb7094ec4b937cbe05f1876ec7c47eb52689745",
+    "src/ibkr_trader/config.py": "301a5eb2cec517fd24a93a46ead005d6c265c2ea971b280def578d8ddf037fa5",
+    "src/ibkr_trader/domain/__init__.py": "d3a6231acdf72625d7fcf404496a54a852fa055011d947708a3e39d5ff8a2c2e",
+    "src/ibkr_trader/domain/models.py": "88fcfde28ed20fc0a8dd5da6f2c7774ebc049cb4b8be20daa15e31e4579e91f8",
+    "src/ibkr_trader/execution/__init__.py": "5b1d1803a2c6e66b2af040544b85831178ac9192d66791bc190a2416ef678e41",
+    "src/ibkr_trader/ibkr/__init__.py": "bd9be3dc2e78d09c28ca9bf7498f4b1484c33a187b87ba24b294cf600a617b47",
+    "src/ibkr_trader/ibkr/config.py": "5e97db6be7c26a9640280bbc9cce80c6815eef09606477a49b2890a24a4f3f70",
+    "src/ibkr_trader/ibkr/fake_gateway.py": "242848504d894ef86e447abddf081d9c69945cb9b03fbadef9fa29451b7c77a3",
+    "src/ibkr_trader/ibkr/gateway.py": "e0c1fc98dd500d8d838f61d7774318f970e9c7c39ce039ae8d952325e3650eaa",
+    "src/ibkr_trader/ibkr/ibkr_gateway.py": "be235f53542912a73f35cd680e44d815f51a4e03f78fbca603d46fb1431ffccf",
+    "src/ibkr_trader/pack.py": "aa27354d7c93e6ef0a1396605b1bcb3aab1c12a89cd47e5ca887286dd01482c8",
+    "src/ibkr_trader/risk/__init__.py": "b95bc33f661f6680c44f3e41f2f5438397089ab09d957d4641b02620dd1b31ae",
+    "src/ibkr_trader/state/__init__.py": "c1e17da0cf2228a51ca4c93cd45cb0656ed671c7743e93ad3146085792cf6092",
+    "src/ibkr_trader/state/store.py": "32d6d0c944c4ba742dbf84866a0a2f4130c417f320ef8dc86ec2a2f66af36d91",
+    "src/ibkr_trader/strategy/__init__.py": "b7b767f198763f0b7ff9da3c1962614925246233a29874ee81330897d86f865c",
+    "src/ibkr_trader/telemetry.py": "f56773f6372ccc89cbda6c1bb067996d51215eca35c80b750269b5b73b412e91",
+    "tests/test_bootstrap.py": "b6d82cdbdcbfb6ff30ea7a2182c2876391f4a8b21fe7c0781ab17b7d98d6da1b",
+    "tests/test_domain.py": "1cd6ae29c69bdc90d942aa23302a969c4d1d8c23315e1d94dd9c2d508ee6c83e",
+    "tests/test_ibkr_gateway.py": "11b8ca487940a158052dee76a9329f299c524002b90085cc99d27c219e0fa8a9",
+    "tests/test_state.py": "b548c45d008864ea7544cc5abd5528fda7b3c04075b37a1d5904326a22212b50"
+  },
+  "tests": {
+    "passed": true,
+    "run_id": "pytest-1783712532026676800"
+  }
+}

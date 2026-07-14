@@ -1,0 +1,33 @@
+{
+  "run_uid": "20260709T215800Z-18772",
+  "collab": "C:/Users/Nalakram/Documents/GitHub/ibkr-auto-trader",
+  "started_ts": "2026-07-09T21:58:00Z",
+  "ended_ts": "2026-07-09T21:58:00Z",
+  "pid": 18772,
+  "phase_final": "done",
+  "last_error": null,
+  "max_rounds": 6,
+  "rounds_total": 0,
+  "calls": 0,
+  "duration_ms": 0,
+  "git_sha": "07ce4d1aae1406f60fc9d8f201a0823146f9a2c1",
+  "watch": false,
+  "seats": {
+    "builder": "opus",
+    "reviewer": "grok-4.5",
+    "breaker": "grok-4.5",
+    "verifier": "gemini-3.5-flash"
+  },
+  "seat_calls": {},
+  "seat_latency_ms": {},
+  "lanes": {
+    "confirmed": 0,
+    "refuted": 0,
+    "by_lane": {}
+  },
+  "signoff": {
+    "result": "none",
+    "unmet": []
+  },
+  "handoffs_touched": []
+}
