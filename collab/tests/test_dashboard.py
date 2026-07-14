@@ -238,10 +238,27 @@ class TestSnapshotAndActions:
         with pytest.raises(hc.HandoffNotFound):
             dc.advance_handoff(collab, "999")
 
-    def test_no_reverse_transition_exists(self, tmp_path):
-        # Documents the design: the core is forward-only (claim/done/archive). A dashboard "re-queue"
-        # therefore cannot move claimed->pending in place; nudge() creates a NEW pending handoff instead.
-        assert set(hc._TRANSITIONS) == {"claim", "done", "archive"}
+    def test_orphan_reclaim_is_the_only_reverse_transition(self, tmp_path):
+        # The core was forward-only (claim/done/archive) and `nudge` existed because of it: a stuck
+        # handoff could not be re-queued in place, so nudge CLONED it to a new pending id and left the
+        # original claimed forever. That stranded every stuck slice in claimed/ permanently -- growing
+        # claimed/ without bound and wedging the board, because _next_root scans pending/ only.
+        #
+        # `reclaim` (claimed->pending) is the deliberate exception, and the ONLY backward edge. It is a
+        # bare primitive: `autopilot._reclaim_orphans` owns the policy and applies it solely to ORPHANS
+        # (no live lease, no open escalation), never to a parked or in-progress slice.
+        assert set(hc._TRANSITIONS) == {"claim", "done", "archive", "reclaim"}
+        backward = {
+            a
+            for a, (frm, to) in hc._TRANSITIONS.items()
+            if hc._STATE_ORDER[to] < hc._STATE_ORDER[frm]
+        }
+        assert backward == {"reclaim"}
+
+    def test_nudge_still_clones_rather_than_moving(self, tmp_path):
+        # nudge's own contract is unchanged: it creates a NEW pending handoff and does not touch the
+        # original. Reclaim did not replace it -- nudge re-queues work for a seat, reclaim un-strands a
+        # handoff whose driver died.
         collab = str(tmp_path / "c")
         hc.create(collab, to="reviewer", from_="builder", title="stuck", body="z")
         hc.claim(collab, "001")

@@ -44,7 +44,16 @@ import collab_common as cc
 
 STATES = ("pending", "claimed", "done", "archive")
 _STATE_ORDER = {s: i for i, s in enumerate(STATES)}  # higher = more advanced
-_TRANSITIONS = {"claim": ("pending", "claimed"), "done": ("claimed", "done"), "archive": ("done", "archive")}
+_TRANSITIONS = {
+    "claim": ("pending", "claimed"),
+    "done": ("claimed", "done"),
+    "archive": ("done", "archive"),
+    # The one BACKWARD edge, and the only way out of ``claimed`` other than ``done``. It exists solely to
+    # un-strand an ORPHAN: a handoff whose driver died mid-work, leaving it claimed with nobody working it
+    # and nothing selecting it (``_next_root`` scans ``pending`` only). See ``autopilot._reclaim_orphans``
+    # for the caller's safety conditions -- this primitive does NOT judge whether a reclaim is warranted.
+    "reclaim": ("claimed", "pending"),
+}
 
 _ID_PREFIX_RE = re.compile(r"^(\d+)")
 _MD_RE = re.compile(r"^(\d+)-(.*)\.md$")
@@ -323,11 +332,19 @@ def _transition(collab, hid, action) -> dict:
             raise HandoffNotFound(f"handoff {hid} not found")
         raise HandoffConflict(f"handoff {hid} is in {cur_state!r}, not {frm!r} (cannot {action})")
     dst = _state_dir(collab, to) / src.name
+    # The destination dir can legitimately be absent: a state dir disappears once its last handoff moves
+    # out (an empty dir is also untrackable by git, so a clone never has one). Without this, os.link
+    # raises FileNotFoundError for the MISSING PARENT and the handler below reports it as "lost the race"
+    # -- a real, blocking failure disguised as a benign concurrency outcome. Creating the dir does not
+    # weaken the CAS: the link below is still the single-winner operation.
+    with suppress(OSError):
+        dst.parent.mkdir(parents=True, exist_ok=True)
     # [C10] os.replace is NOT single-winner on Windows (MoveFileExW lets N racers all succeed).
     # A no-overwrite hard link IS a true CAS: exactly one process creates dst.
     try:
         os.link(src, dst)
     except FileNotFoundError:
+        # src vanished under us -- a genuine lost race (the dst dir is guaranteed to exist by now).
         raise HandoffConflict(f"handoff {hid} already moved (lost the {action} race)") from None
     except FileExistsError:
         # dst already exists. If it's the SAME file as src (a crashed-winner residual, or a
@@ -344,6 +361,21 @@ def _transition(collab, hid, action) -> dict:
 
 def claim(collab, hid) -> dict:
     return _transition(collab, hid, "claim")
+
+
+def reclaim(collab, hid) -> dict:
+    """Move an ORPHANED handoff ``claimed -> pending`` so it can be selected again.
+
+    Backward, unlike every other transition, which makes the crash-residual healing in :func:`_reconcile`
+    read oddly here and is worth stating: ``_reconcile`` treats the MOST-ADVANCED state as authoritative,
+    so a crash between the ``os.link`` and the ``os.unlink`` leaves the file in both dirs and heals to
+    ``claimed`` -- i.e. the reclaim is silently undone rather than half-applied. That is safe: the caller
+    re-runs the reclaim on the next start and it converges. Never data loss, only a retry.
+
+    This is a mechanical move with NO policy: it does not know whether the handoff is genuinely orphaned
+    or deliberately parked for a human. The caller owns that judgement (``autopilot._reclaim_orphans``).
+    """
+    return _transition(collab, hid, "reclaim")
 
 
 def done(collab, hid) -> dict:

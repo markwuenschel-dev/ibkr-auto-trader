@@ -800,10 +800,16 @@ def advance_handoff(collab, hid: str) -> dict:
 
 
 def nudge(collab, hid: str) -> dict:
-    """Re-queue a stuck handoff as a NEW pending handoff (there is no reverse claimed->pending in the
-    core — see :data:`handoff_core.STATES`, forward-only). Reads the stuck handoff's routing and
-    creates a fresh pending handoff re-addressed to the same seat, referencing the original. Stays
-    inside the reversible create-only envelope ([C36]). Returns the new ``{id, slug, path, state}``.
+    """Re-queue a stuck handoff as a NEW pending handoff. Reads the stuck handoff's routing and creates a
+    fresh pending handoff re-addressed to the same seat, referencing the original, and leaves the original
+    where it is. Stays inside the reversible create-only envelope ([C36]).
+
+    Cloning is this function's POINT, not a workaround for a missing edge: it re-asks a seat for work while
+    preserving the original thread. It is NOT orphan recovery — leaving the original claimed is precisely
+    what strands it, since ``_next_root`` scans ``pending`` only. A handoff whose driver died is un-stranded
+    by :func:`handoff_core.reclaim` via ``autopilot._reclaim_orphans``, which MOVES it back to ``pending``.
+
+    Returns the new ``{id, slug, path, state}``.
     """
     _state, path = hc._reconcile(collab, hid)
     if path is None:

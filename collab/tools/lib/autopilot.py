@@ -1012,6 +1012,71 @@ def _next_root(collab, seats: dict, exclude: set) -> str | None:
     return best
 
 
+def _reclaim_orphans(collab, *, log: str | None = None, rid: str | None = None) -> list:
+    """Un-strand handoffs left in ``claimed/`` by a driver that died. Returns the reclaimed ids.
+
+    ``claimed/`` means three different things and the board records no difference between them:
+
+      * IN PROGRESS  -- a live board lease is held; someone is working it right now.
+      * ORPHANED     -- the driver crashed / was killed / its terminal closed mid-work. Nobody is working
+                        it, and NOTHING will ever select it again: ``_next_root`` scans ``pending`` only,
+                        so the slice is stranded until a human files an operator request. This is the case
+                        that silently wedged the board and made a later Start look like a no-op "done".
+      * PARKED       -- the driver deliberately stopped and wrote an escalation: "awaiting human". Auto-
+                        driving this re-opens a budget epoch with NO human authorization and re-drives a
+                        known-blocked slice on every Start until the budget caps it.
+
+    Only the middle case is ours. The discriminators are the live lease and the escalation record.
+
+    Run at START, not at teardown: a ``finally`` never executes for a SIGKILL / closed terminal / power
+    cut, which is exactly how the runs this fixes actually die. Start always executes.
+
+    Best-effort ([C15]): a reclaim failure must never take the run down -- the slice simply stays stranded
+    exactly as it is today, and the next start retries.
+    """
+    try:
+        holder = hc.ActiveHandoffLease(collab, "reclaim-probe").holder()
+    except Exception:
+        return []  # cannot prove the board is free -> assume it is not, and touch nothing
+    if isinstance(holder, dict):
+        hb = holder.get("heartbeat_epoch")
+        if hb is not None and (time.time() - float(hb)) < hc._LEASE_TTL_S:
+            return []  # a live driver owns the board: its claimed handoff is IN PROGRESS, not orphaned
+    reclaimed = []
+    try:
+        claimed = hc.list_handoffs(collab, "claimed")
+    except Exception:
+        return []
+    for h in claimed:
+        hid = h["id"]
+        try:
+            if esc.read(collab, hid) is not None:
+                continue  # PARKED: a human was asked to decide. Not ours to restart.
+        except Exception:
+            continue  # cannot rule out an escalation -> fail closed, leave it parked
+        try:
+            hc.reclaim(collab, hid)
+        except Exception as e:
+            print(f"[autopilot] could not reclaim orphaned {hid}: {e}", file=sys.stderr)
+            continue
+        reclaimed.append(hid)
+        print(f"[autopilot] reclaimed orphaned {hid}: claimed/ -> pending/ (no live driver, no escalation)")
+        _emit_safe(
+            _trace.emit,
+            log,
+            run_id=rid,
+            stage="autopilot.reclaim",
+            role="autopilot",
+            artifact=f"handoff:{hid}",
+            decision={
+                "action": "reclaim",
+                "reason_codes": [f"hid:{hid}", "orphan:no-lease", "orphan:no-escalation"],
+                "confidence": None,
+            },
+        )
+    return reclaimed
+
+
 def _promote_next_draft(collab, *, log: str | None = None, rid: str | None = None) -> str | None:
     """A slice just shipped to ``done/`` — PULL the next staged one: move the lowest-id handoff from
     ``handoffs/draft/`` into ``handoffs/pending/``. Keeping exactly ONE slice queued makes the pipeline run
@@ -1134,6 +1199,9 @@ def run(
         timeout=None,
         ended_ts=None,
     )
+    # Un-strand anything a dead driver left in claimed/ BEFORE selecting work: _next_root scans pending/
+    # only, so an orphan is invisible to it and the run would idle to a false "done" with the board wedged.
+    _reclaim_orphans(collab, log=log, rid=rid)
     try:
         # Renew the board lease for the whole loop: without this it goes stale 90 s in (mid first agentic
         # call), the dashboard reports "no driver running" while we work, and Start will spawn a SECOND
