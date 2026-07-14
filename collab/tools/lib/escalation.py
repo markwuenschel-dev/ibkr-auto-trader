@@ -33,24 +33,60 @@ def _path(collab, hid: str) -> Path:
 
 
 def render(
-    hid: str, blockers: list, *, attempts: int, title: str | None = None, run_uid: str | None = None
+    hid: str,
+    blockers: list,
+    *,
+    attempts: int,
+    title: str | None = None,
+    run_uid: str | None = None,
+    reason: str | None = None,
+    cause: dict | None = None,
 ) -> str:
-    """The escalation markdown: what was confirmed, how many auto-fixes were tried, and how to clear it."""
+    """The escalation markdown: what was confirmed, how many auto-fixes were tried, and how to clear it.
+
+    ``reason``/``cause`` are what make this honest. A stop is not evidence of a defect: the lanes can
+    stop because a TOOL died (``infrastructure_blocked``) having proven nothing about the code. Rendering
+    every stop as "⚠ Verified defect — needs a terminal fix" told the operator to go hunt a bug that no
+    lane ever found, in code no lane ever finished checking. Say which of the two actually happened, and
+    when it was the tool, name the tool failure instead of blaming the change.
+    """
+    n = len(blockers or [])
     L = [_START.format(hid=hid)]
-    head = f"# ⚠ Verified defect — needs a terminal fix: {hid}"
+    if n:
+        head = f"# ⚠ Verified defect — needs a terminal fix: {hid}"
+    elif reason == "infrastructure_blocked":
+        head = f"# ⚠ Stopped by a TOOL failure — no defect was confirmed: {hid}"
+    elif reason == "verification_incomplete":
+        head = f"# ⚠ Verification did not finish — no defect was confirmed: {hid}"
+    else:
+        head = f"# ⚠ Stopped without confirming a defect: {hid}"
     if title:
         head += f" · {title}"
     L.append(head)
     L.append("")
-    n = len(blockers or [])
-    L.append(
-        f"The adversarial lanes CONFIRMED **{n} defect{'s' if n != 1 else ''}**, and **{attempts} "
-        f"autonomous fix attempt{'s' if attempts != 1 else ''}** did not clear them. The auto-fix loop "
-        f"stopped here rather than thrash — this needs a human/expert fix."
-    )
+    if n:
+        L.append(
+            f"The adversarial lanes CONFIRMED **{n} defect{'s' if n != 1 else ''}**, and **{attempts} "
+            f"autonomous fix attempt{'s' if attempts != 1 else ''}** did not clear them. The auto-fix loop "
+            f"stopped here rather than thrash — this needs a human/expert fix."
+        )
+    else:
+        L.append(
+            f"The adversarial lanes CONFIRMED **0 defects** — nothing about this change has been shown to "
+            f"be wrong. The run stopped after **{attempts} autonomous fix attempt"
+            f"{'s' if attempts != 1 else ''}**"
+            + (f" because: `{reason}`." if reason else ".")
+            + " This is a TOOLING/PROCESS stop, NOT a code defect: the evidence is missing, not damning."
+        )
     if run_uid:
         L.append("")
         L.append(f"_Run: {run_uid}._")
+    if not n and cause:
+        L.append("")
+        L.append("## What actually failed")
+        for k in ("lane", "seat", "error", "cmd"):
+            if cause.get(k):
+                L.append(f"- **{k}**: `{str(cause[k]).strip()}`")
     L.append("")
     L.append("## Confirmed defects")
     if blockers:
@@ -61,24 +97,42 @@ def render(
             if reg:
                 L.append(f"  - regression test: `{reg}`")
     else:
-        L.append("- (no structured findings were recorded in the ledger)")
+        L.append("- (none — no lane confirmed a finding)")
     L.append("")
     L.append("## How to clear it")
-    L.append(
-        "1. Fix the cited code. 2. Re-queue the handoff (or re-run the lanes). "
-        "3. Once the lanes are clean, delete this file (`escalation.clear`)."
-    )
+    if n:
+        L.append(
+            "1. Fix the cited code. 2. Re-queue the handoff (or re-run the lanes). "
+            "3. Once the lanes are clean, delete this file (`escalation.clear`)."
+        )
+    else:
+        L.append(
+            "1. Fix the tool/environment named above. 2. Re-run the verification — an `adopt` request "
+            "re-assesses the source already on disk and does NOT re-run the builder. 3. Once the lanes "
+            "complete, delete this file (`escalation.clear`)."
+        )
     L.append(_END.format(hid=hid))
     return "\n".join(L) + "\n"
 
 
 def write(
-    collab, hid: str, blockers: list, *, attempts: int, title: str | None = None, run_uid: str | None = None
+    collab,
+    hid: str,
+    blockers: list,
+    *,
+    attempts: int,
+    title: str | None = None,
+    run_uid: str | None = None,
+    reason: str | None = None,
+    cause: dict | None = None,
 ) -> Path:
     """Persist the escalation to ``autopilot/escalations/<hid>.md`` (atomic). Returns the path."""
     p = _path(collab, hid)
     p.parent.mkdir(parents=True, exist_ok=True)
-    cc.safe_write(p, render(hid, blockers, attempts=attempts, title=title, run_uid=run_uid))
+    cc.safe_write(
+        p,
+        render(hid, blockers, attempts=attempts, title=title, run_uid=run_uid, reason=reason, cause=cause),
+    )
     return p
 
 

@@ -74,6 +74,25 @@ class TestEscalationModule:
         assert "0 defects" in escalation.render("x", [], attempts=2)
         assert "2 autonomous fix attempts" in escalation.render("x", [], attempts=2)
 
+    def test_a_tool_failure_is_not_reported_as_a_verified_defect(self):
+        # The 030 case: the lanes never finished because a seat process was SIGHUP'd. Zero findings.
+        # Reporting that as "⚠ Verified defect — needs a terminal fix" sends a human to hunt a bug that
+        # does not exist, in code no lane ever finished checking.
+        cause = {"lane": "change-regression", "seat": "verifier", "error": "backend 'claude' exited 129"}
+        md = escalation.render(
+            "030", [], attempts=1, reason="infrastructure_blocked", cause=cause, run_uid="R9"
+        )
+        assert "Verified defect" not in md
+        assert "Stopped by a TOOL failure — no defect was confirmed: 030" in md
+        assert "NOT a code defect" in md
+        assert "backend 'claude' exited 129" in md and "change-regression" in md
+        assert "does NOT re-run the builder" in md  # the clearing path is adopt, not a rebuild
+
+    def test_a_confirmed_defect_still_reads_as_one(self):
+        md = escalation.render("028", [_BLOCKER], attempts=1, reason="budget_exhausted")
+        assert "⚠ Verified defect — needs a terminal fix: 028" in md
+        assert "CONFIRMED **1 defect**" in md and "NOT a code defect" not in md
+
 
 class TestDriverHelpers:
     def test_confirmed_blockers_reads_ledger(self, tmp_path):

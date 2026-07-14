@@ -1718,6 +1718,10 @@ def _escalate_pause(
             attempts=int(budget.consumed().get("work_attempts", 0)),
             title=label,
             run_uid=run_uid,
+            # WHY it stopped, and what broke if it was the tooling. Without these the escalation reads
+            # every stop as a confirmed defect and sends a human hunting a bug no lane ever found.
+            reason=reason,
+            cause=cause if isinstance(cause, dict) else None,
         )
     except Exception as e:  # the escalation artifact is best-effort; the pause + telemetry still stand
         print(f"[autopilot] could not write escalation for {hid}: {e}", file=sys.stderr)
