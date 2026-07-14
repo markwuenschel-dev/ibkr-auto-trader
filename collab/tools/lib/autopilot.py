@@ -525,10 +525,21 @@ def _cli_runner(cmd: list, prompt: str, *, timeout: float, unset_env=None) -> st
         capture.close()
         raise cc.CollabError(f"backend {name!r}: cannot open capture buffers: {e}") from e
     breach = None
+    # Windows: the driver is spawned DETACHED_PROCESS, so it owns NO console. Seats are console-subsystem
+    # binaries (python.exe / claude.exe), and Windows hands a console-less parent's console child a BRAND
+    # NEW console -- i.e. a terminal window pops up per seat, per round, on top of whatever you are doing.
+    # CREATE_NO_WINDOW suppresses that. stdout/stderr are already redirected to files, so nothing is lost.
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     with capture:
         try:
             proc = subprocess.Popen(
-                cmd, stdin=subprocess.PIPE, stdout=fout, stderr=ferr, shell=False, env=child_env
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=fout,
+                stderr=ferr,
+                shell=False,
+                env=child_env,
+                creationflags=creationflags,
             )
         except OSError as e:
             raise cc.CollabError(f"backend {name!r} could not be launched: {e}") from e
