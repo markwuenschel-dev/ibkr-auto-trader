@@ -1,0 +1,2 @@
+{"schema_version":"0.1","ts":"2026-07-11T22:20:39Z","run_id":"ibkr-auto-trader","span_id":null,"parent_span_id":null,"stage":"autopilot.idle","role":"autopilot","artifact":null,"artifact_version":null,"decision":{"action":"idle","reason_codes":[],"confidence":null}}
+{"schema_version":"0.1","ts":"2026-07-11T22:20:59Z","run_id":"ibkr-auto-trader","span_id":null,"parent_span_id":null,"stage":"autopilot.control","role":"autopilot","artifact":null,"artifact_version":null,"decision":{"action":"stop","reason_codes":[],"confidence":null}}

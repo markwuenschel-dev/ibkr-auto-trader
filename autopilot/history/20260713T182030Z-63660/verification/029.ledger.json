@@ -1,0 +1,131 @@
+{
+  "accepted_residuals": [],
+  "blockers": [
+    {
+      "description": "src/ibkr_trader/ibkr/gateway.py:435 and :438 (`_reconcile` \u2192 `self._store.upsert_position(sym, qty)` / `upsert_position(sym, 0)`) -> When `reconcile_positions` reports `diverged=True` with a store present, these 2-arg calls hit the PT-4a signature `upsert_position(instrument_id, symbol, quantity)` (3 required) \u2192 `TypeError: StateStore.upsert_position() missing 1 required positional argument: 'quantity'`. Compounding: gateway.py:427 feeds `all_positions()` (now conId-keyed, `dict[int,int]`) into `reconcile_positions`, which expects a symbol-keyed cache \u2014 so reconciliation diffs symbol keys against int keys and mis-reports every position as diverged before the crash.",
+      "fixed": false,
+      "id": "bounded-autonomy-1",
+      "lane": "bounded-autonomy",
+      "regression_test": null
+    }
+  ],
+  "builder_seat": "builder",
+  "generated_ts": "2026-07-11T22:49:36Z",
+  "guardrails": [
+    "data-integrity",
+    "money",
+    "safety"
+  ],
+  "hid": "029",
+  "lanes": [
+    {
+      "breaker_artifact": "autopilot/replies/1783810013351279400-breaker-breaker-bounded-autonomy.md",
+      "breaker_seat": "breaker",
+      "confirmed": [
+        "src/ibkr_trader/ibkr/gateway.py:435 and :438 (`_reconcile` \u2192 `self._store.upsert_position(sym, qty)` / `upsert_position(sym, 0)`) -> When `reconcile_positions` reports `diverged=True` with a store present, these 2-arg calls hit the PT-4a signature `upsert_position(instrument_id, symbol, quantity)` (3 required) \u2192 `TypeError: StateStore.upsert_position() missing 1 required positional argument: 'quantity'`. Compounding: gateway.py:427 feeds `all_positions()` (now conId-keyed, `dict[int,int]`) into `reconcile_positions`, which expects a symbol-keyed cache \u2014 so reconciliation diffs symbol keys against int keys and mis-reports every position as diverged before the crash."
+      ],
+      "lane": "bounded-autonomy",
+      "ran": true,
+      "refuted": [
+        "src/ibkr_trader/ibkr/gateway.py:180 (`_map_to_risk_context` \u2192 `return RiskContext(as_of=as_of, positions=signed_positions, **fields)`) -> Any account snapshot/summary mapping (e.g. an AccountSummary with positions like `{\"AAPL\": 10}`, as in `TestPureMapping`/`TestSnapshotMapping`) now hits the PT-4a mint guard: direct `RiskContext(...)` raises `TypeError: RiskContext cannot be constructed directly...`. Even bypassing the guard, `positions=` is no longer a constructor field (now a derived property; model has `extra=\"forbid\"` and requires `holdings`), so construction also fails validation. Every snapshot path crashes."
+      ],
+      "verifier_artifact": "autopilot/replies/1783810175337352000-verifier-verify-bounded-autonomy.md",
+      "verifier_seat": "verifier"
+    },
+    {
+      "breaker_artifact": "autopilot/replies/1783809908103338800-breaker-breaker-data-integrity-under-concurrent-autopilots.md",
+      "breaker_seat": "breaker",
+      "confirmed": [],
+      "lane": "data-integrity-under-concurrent-autopilots",
+      "ran": true,
+      "refuted": [
+        "src/ibkr_trader/state/store.py:43 (`self._conn.execute(\"PRAGMA journal_mode=WAL\")` in `StateStore.__init__`, race window widened by the migration `BEGIN IMMEDIATE` at store.py:78) -> Two or more autopilots construct `StateStore(same_db_path)` concurrently against a non-WAL database (fresh/nonexistent DB on cold start, or a legacy pre-PT-4a rollback-journal DB): one opener holds a write/exclusive lock (WAL-mode switch or the migration transaction) while another opener's `PRAGMA journal_mode=WAL` raises `sqlite3.OperationalError: database is locked` and crashes in `__init__` \u2014 reproduced at 2/4 concurrent openers on a legacy-schema DB and intermittently (~1/8) on a fresh DB; no `busy_timeout`/retry guards the journal-mode switch."
+      ],
+      "verifier_artifact": "autopilot/replies/1783810070018138100-verifier-verify-data-integrity-under-concurrent-autopilots.md",
+      "verifier_seat": "verifier"
+    }
+  ],
+  "reviewer_preflight": {
+    "commands": {
+      "git_diff_name_only": {
+        "exit_code": 0,
+        "stdout_tail": "CONTEXT.md\ncollab/tests/test_autopilot.py\ncollab/tests/test_dashboard.py\ncollab/tests/test_escalation.py\ncollab/tests/test_handoff_core.py\ncollab/tests/test_run_history.py\ncollab/tools/lib/autopilot.py\ncollab/tools/lib/dashboard_core.py\ncollab/tools/lib/dashboard_web.py\ncollab/tools/lib/handoff_core.py\ndocs/design/adr/0001-pt3-ibkr-account-gateway.md\ndocs/design/adr/0002-pt4-market-data-ingestion.md\ndocs/design/glossary.md\ndocs/design/trading-system-design.md\nsrc/ibkr_trader/domain/__init__.py\nsrc/ibkr_trader/domain/models.py\nsrc/ibkr_trader/state/store.py\ntests/test_domain.py\ntests/test_state.py\n"
+      },
+      "git_rev_parse": {
+        "exit_code": 0,
+        "stdout_tail": "C:/Users/Nalakram/Documents/GitHub/ibkr-auto-trader\n"
+      },
+      "git_status_short": {
+        "exit_code": 0,
+        "stdout_tail": " M CONTEXT.md\n M collab/tests/test_autopilot.py\n M collab/tests/test_dashboard.py\n M collab/tests/test_escalation.py\n M collab/tests/test_handoff_core.py\n M collab/tests/test_run_history.py\n M collab/tools/lib/autopilot.py\n M collab/tools/lib/dashboard_core.py\n M collab/tools/lib/dashboard_web.py\n M collab/tools/lib/handoff_core.py\n M docs/design/adr/0001-pt3-ibkr-account-gateway.md\n M docs/design/adr/0002-pt4-market-data-ingestion.md\n M docs/design/glossary.md\n M docs/design/trading-system-design.md\n M src/ibkr_trader/domain/__init__.py\n M src/ibkr_trader/domain/models.py\n M src/ibkr_trader/state/store.py\n M tests/test_domain.py\n M tests/test_state.py\n?? _telemetry-archive/\n?? autopilot/\n?? docs/design/adr/0003-pt5-rules-ledger.md\n?? docs/design/reports/\n?? handoffs/MAP-pt4-pt5.md\n?? handoffs/claimed/\n?? handoffs/draft/\n?? tests/test_domain_models.py\n"
+      },
+      "pwd": {
+        "exit_code": 0,
+        "stdout_tail": "C:\\Users\\Nalakram\\Documents\\GitHub\\ibkr-auto-trader"
+      },
+      "pytest_collect_only": {
+        "exit_code": 0,
+        "stdout_tail": "_gateway.py::TestResilience::test_disconnect_event_emits_and_recovers\ntests/test_ibkr_gateway.py::TestResilience::test_backoff_gives_up_and_raises_not_connected\ntests/test_ibkr_gateway.py::TestReadOnly::test_config_is_readonly_by_default\ntests/test_ibkr_gateway.py::TestReadOnly::test_from_env_is_readonly_by_default\ntests/test_ibkr_gateway.py::TestReadOnly::test_connect_telemetry_reports_readonly\ntests/test_ibkr_gateway.py::TestTelemetryEnvelope::test_snapshot_event_has_money_and_count_no_pii\ntests/test_ibkr_gateway.py::TestClockSkew::test_skew_beyond_threshold_emits_event\ntests/test_ibkr_gateway.py::TestClockSkew::test_skew_within_threshold_is_quiet\ntests/test_ibkr_gateway.py::TestClockSkew::test_naive_broker_time_does_not_gate_the_read\ntests/test_ibkr_gateway.py::TestClockSkew::test_naive_decision_clock_does_not_gate_the_read\ntests/test_ibkr_gateway.py::TestClockSkew::test_clock_skew_seconds_normalizes_mixed_awareness\ntests/test_ibkr_gateway.py::TestConfig::test_paper_defaults\ntests/test_ibkr_gateway.py::TestConfig::test_from_env_reads_overrides\ntests/test_ibkr_gateway.py::TestConfig::test_from_env_blank_account_is_none\ntests/test_ibkr_gateway.py::TestPortConformance::test_fake_satisfies_account_gateway_protocol\ntests/test_ibkr_gateway.py::test_real_paper_gateway_snapshot\ntests/test_state.py::TestPositions::test_round_trip_is_keyed_by_con_id_with_symbol_lookup\ntests/test_state.py::TestPositions::test_unknown_instrument_is_flat_zero\ntests/test_state.py::TestPositions::test_upsert_overwrites_by_con_id\ntests/test_state.py::TestPositions::test_old_symbol_schema_rows_are_preserved_without_inventing_con_id\ntests/test_state.py::TestDailyPnl::test_accumulates_exactly_and_survives_restart\ntests/test_state.py::TestDailyPnl::test_wide_precision_is_exact\ntests/test_state.py::TestIdempotencyAndConcurrency::test_claim_is_first_write_wins_and_survives_restart\ntests/test_state.py::TestIdempotencyAndConcurrency::test_connection_is_usable_across_threads\n\n78 tests collected in 0.24s\n"
+      }
+    },
+    "inspected_files": [
+      "src/ibkr_trader/__init__.py",
+      "src/ibkr_trader/app.py",
+      "src/ibkr_trader/audit/__init__.py",
+      "src/ibkr_trader/config.py",
+      "src/ibkr_trader/domain/__init__.py",
+      "src/ibkr_trader/domain/models.py",
+      "src/ibkr_trader/execution/__init__.py",
+      "src/ibkr_trader/ibkr/__init__.py",
+      "src/ibkr_trader/ibkr/config.py",
+      "src/ibkr_trader/ibkr/fake_gateway.py",
+      "src/ibkr_trader/ibkr/gateway.py",
+      "src/ibkr_trader/ibkr/ibkr_gateway.py",
+      "src/ibkr_trader/pack.py",
+      "src/ibkr_trader/risk/__init__.py",
+      "src/ibkr_trader/state/__init__.py",
+      "src/ibkr_trader/state/store.py",
+      "src/ibkr_trader/strategy/__init__.py",
+      "src/ibkr_trader/telemetry.py",
+      "tests/test_bootstrap.py",
+      "tests/test_domain.py",
+      "tests/test_domain_models.py",
+      "tests/test_ibkr_gateway.py",
+      "tests/test_state.py"
+    ],
+    "repo_access": true,
+    "repo_root": "C:/Users/Nalakram/Documents/GitHub/ibkr-auto-trader",
+    "seat": "reviewer"
+  },
+  "reviewer_seat": "verifier",
+  "source_base": "C:\\Users\\Nalakram\\Documents\\GitHub\\ibkr-auto-trader",
+  "source_manifest": {
+    "src/ibkr_trader/__init__.py": "9343360d3e713afa5038d64f30233acc8401750970c36f13b628c3b1ab12758d",
+    "src/ibkr_trader/app.py": "8f1f9468a5c1b173aa664905119b09e2a3a640fb59fdce1d4e26544ab8180829",
+    "src/ibkr_trader/audit/__init__.py": "a4ba8df4294270a3d8980dd2efb7094ec4b937cbe05f1876ec7c47eb52689745",
+    "src/ibkr_trader/config.py": "301a5eb2cec517fd24a93a46ead005d6c265c2ea971b280def578d8ddf037fa5",
+    "src/ibkr_trader/domain/__init__.py": "04093c4688074faf5041c1d5a4b640df85db0ff5528ef387e8af64120f447748",
+    "src/ibkr_trader/domain/models.py": "400b2d1c1f6939daaec17db5fed46bf3d8e6bf6c0b6bcb250513a5472c62e367",
+    "src/ibkr_trader/execution/__init__.py": "5b1d1803a2c6e66b2af040544b85831178ac9192d66791bc190a2416ef678e41",
+    "src/ibkr_trader/ibkr/__init__.py": "bd9be3dc2e78d09c28ca9bf7498f4b1484c33a187b87ba24b294cf600a617b47",
+    "src/ibkr_trader/ibkr/config.py": "5e97db6be7c26a9640280bbc9cce80c6815eef09606477a49b2890a24a4f3f70",
+    "src/ibkr_trader/ibkr/fake_gateway.py": "242848504d894ef86e447abddf081d9c69945cb9b03fbadef9fa29451b7c77a3",
+    "src/ibkr_trader/ibkr/gateway.py": "41092f31449b9326e2a89da1c31912bbb999f5ca10a073050481a98ce3c0fc6e",
+    "src/ibkr_trader/ibkr/ibkr_gateway.py": "be235f53542912a73f35cd680e44d815f51a4e03f78fbca603d46fb1431ffccf",
+    "src/ibkr_trader/pack.py": "aa27354d7c93e6ef0a1396605b1bcb3aab1c12a89cd47e5ca887286dd01482c8",
+    "src/ibkr_trader/risk/__init__.py": "b95bc33f661f6680c44f3e41f2f5438397089ab09d957d4641b02620dd1b31ae",
+    "src/ibkr_trader/state/__init__.py": "c1e17da0cf2228a51ca4c93cd45cb0656ed671c7743e93ad3146085792cf6092",
+    "src/ibkr_trader/state/store.py": "cb41583038eaacff8fd9e4a56eb4c69dcee1456b93aedce84328534a49f4883c",
+    "src/ibkr_trader/strategy/__init__.py": "b7b767f198763f0b7ff9da3c1962614925246233a29874ee81330897d86f865c",
+    "src/ibkr_trader/telemetry.py": "f56773f6372ccc89cbda6c1bb067996d51215eca35c80b750269b5b73b412e91",
+    "tests/test_bootstrap.py": "b6d82cdbdcbfb6ff30ea7a2182c2876391f4a8b21fe7c0781ab17b7d98d6da1b",
+    "tests/test_domain.py": "6adac97472cd90353d565b84837b1f0b1569bcf39afe895e9f7948913f99b648",
+    "tests/test_domain_models.py": "0d04e404c1f583106f93d660d83d69445000ce79aa47c39fc73a2cff0452ba66",
+    "tests/test_ibkr_gateway.py": "6a67b78fa8f9ed60a9b27a49aa17857db5dfa9aaccdc10e5be50bcc21d6986ca",
+    "tests/test_state.py": "9abc9a2c16fa2c884fa2a981fb94a6858463218a30f8497641df3d2d66556877"
+  },
+  "tests": {
+    "passed": false,
+    "run_id": "pytest-1783809570392535800"
+  }
+}
