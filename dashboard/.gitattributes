@@ -1,0 +1,4 @@
+# The dashboard's canonical line ending is LF (matches the git index and the
+# oxfmt `endOfLine: "lf"` policy in .oxfmtrc.json). Force an LF working tree on
+# every platform so `pnpm format:check` is stable even with core.autocrlf=true.
+* text=auto eol=lf

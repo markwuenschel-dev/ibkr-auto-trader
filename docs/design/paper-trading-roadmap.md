@@ -34,10 +34,11 @@ From `trading-system-design.md` §8. A full loop where:
 5. a **kill switch / PAUSE** halts all broker submission;
 6. **Telegram** surfaces drift, paper fills, daily summary, and errors.
 
-Structural safety (must hold throughout): a strategy can **never** mint an executable order (type seams —
-`ApprovedOrderIntent`/`ExecutableOrder` have no strategy-usable constructor); adapters accept **only**
-`ExecutableOrder`; **PAPER is the default** and LIVE is rejected unless enabled by reviewed config +
-approved workflow state.
+Structural safety (must hold throughout): strategy APIs emit only `StrategyIntent`; trusted execution
+must enforce the `no-direct-strategy-orders` release gate before broker submission. Mint seams are
+provenance / accidental-bypass controls, not a hard in-process security boundary; adapters accept
+**only** `ExecutableOrder` as their ordinary API contract. **PAPER is the default** and LIVE is rejected
+unless enabled by reviewed config + approved workflow state.
 
 ## The handoff roadmap — 16 slices (PT-0 … PT-15)
 
@@ -48,7 +49,7 @@ regression-hunt lanes run.
 | Slice | Scope | Guardrails | Depends on |
 |---|---|---|---|
 | **PT-0** | **Project bootstrap** — `git init`; `uv` + `pyproject.toml` (Python 3.14); package skeleton (`domain/ ibkr/ strategy/ risk/ execution/ state/ audit/ app.py tests/`); `structlog`; `pytest` + CI; `MODE=PAPER` default config plumbing | infra | — |
-| **PT-1** | **Domain models** — frozen pydantic: `RiskContext`, `StrategyIntent`, `RiskPlan`, `ApprovedOrderIntent`, `ExecutableOrder`, `Fill`/`Ack`; constructibility seams (executables mintable only inside Risk & Sizing / Execution Control) | data-integrity, money | PT-0 |
+| **PT-1** | **Domain models** — frozen pydantic: `RiskContext`, `StrategyIntent`, `RiskPlan`, `ApprovedOrderIntent`, `ExecutableOrder`, `Fill`/`Ack`; provenance seams for the trusted Risk & Sizing / Execution Control pipeline | data-integrity, money | PT-0 |
 | **PT-2** | **SQLite state store** — positions cache, daily realized P&L that survives restart, idempotency keys | data-integrity, money | PT-1 |
 | **PT-3** | **IBKR connection/session** — `ib_async` + asyncio; account snapshot (NLV, positions, buying power, margin) → `RiskContext` | money, auth | PT-1, PT-2 |
 | **PT-4** | **Market-data ingestion** — feeds `RiskContext.market_data`; causal-only timestamps (≤ decision clock) | data-integrity | PT-3 |
@@ -78,7 +79,8 @@ regression-hunt lanes run.
 
 - **Paper-first / paper-default**; LIVE rejected unless enabled by reviewed config + approved workflow.
 - **Kill switch / PAUSE** prevents any broker submission.
-- **Type seams**: a strategy can never construct an executable order; adapters accept only `ExecutableOrder`.
+- **Provenance/type seams**: strategy APIs emit `StrategyIntent`; trusted execution enforces the release
+  gate; adapters accept `ExecutableOrder` as their ordinary API contract.
 - **Every decision audited**, including rejections; **same Risk & Sizing** across backtest/paper/live (no
   train/serve skew); **causal data only**; **human veto is final**.
 - Money/safety-touching slices additionally trigger the adversarial regression-hunt lanes at review.

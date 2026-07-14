@@ -55,9 +55,33 @@ This project targets **Python 3.14+** and uses [uv](https://docs.astral.sh/uv/) 
 
 ```bash
 uv sync --all-groups
-uv run pytest -q
-uv run ruff check
+uv run --locked pytest -q -m "not integration"
+uv run --locked ruff check src tests scripts/verify.py
+uv run --locked pyright
 ```
+
+Ruff is scoped to the core code (`src`, `tests`, and the verifier itself) because that scope is clean;
+a whole-repo `ruff check .` also surfaces ~321 pre-existing findings in the collab workflow that are
+tracked as a separate cleanup, not a release gate.
+
+### One authoritative check
+
+`scripts/verify.py` is the source of truth for "is the checkout green?". Its unflagged invocation
+composes the intended checks for every supported subsystem — lockfile first, Python core (pytest,
+scoped Ruff, Pyright), the collab workflow suite, and the dashboard (vitest, Oxlint, Oxfmt, Next
+build) — and prints one fail-closed matrix:
+
+```bash
+uv run --locked python scripts/verify.py  # full matrix; fails if pnpm is unavailable
+uv run --locked python scripts/verify.py --python-only  # explicit partial result: skips dashboard
+uv run --locked python scripts/verify.py --no-build     # explicit partial result: skips Next build
+```
+
+`--python-only` and `--no-build` exit successfully only for their requested scope and report
+`PARTIAL PASS`; neither claims the checkout is green. The normal core test command always excludes
+the `integration` marker, even if `IBKR_INTEGRATION` is set. The verifier deliberately does **not**
+gate collab lint or dashboard Playwright e2e; those exclusions are printed in the summary rather
+than hidden.
 
 The normal test suite is fake-based and does not require an IBKR Gateway. The optional integration marker is reserved for an explicitly configured paper Gateway:
 

@@ -5,16 +5,16 @@ The §8 telemetry dashboard for the paper-trading loop. Reads the append-only
 
 ## Stack (latest at scaffold time, 2026-07-07)
 
-| Tool | Version | Note |
-|---|---|---|
-| Next.js | 16.2.10 | App Router, live API route (Vercel target) |
-| React / react-dom | 19.2.7 | |
-| TypeScript | 6.0.3 | |
-| Tailwind CSS | 4.3.2 | v4 CSS-first config (`app/globals.css` + `@tailwindcss/postcss`) |
-| Recharts | 3.9.2 | charts |
-| zod | 4.4.3 | validates the §8 envelope (`lib/telemetry.ts`) |
-| oxlint | 1.73.0 | `pnpm lint` |
-| oxfmt | 0.58.0 | `pnpm format` — **pre-1.0 / experimental** |
+| Tool              | Version | Note                                                             |
+| ----------------- | ------- | ---------------------------------------------------------------- |
+| Next.js           | 16.2.10 | App Router, live API route (Vercel target)                       |
+| React / react-dom | 19.2.7  |                                                                  |
+| TypeScript        | 6.0.3   |                                                                  |
+| Tailwind CSS      | 4.3.2   | v4 CSS-first config (`app/globals.css` + `@tailwindcss/postcss`) |
+| Recharts          | 3.9.2   | charts                                                           |
+| zod               | 4.4.3   | validates the §8 envelope (`lib/telemetry.ts`)                   |
+| oxlint            | 1.73.0  | `pnpm lint`                                                      |
+| oxfmt             | 0.58.0  | `pnpm format` — **pre-1.0 / experimental**                       |
 
 ## Run
 

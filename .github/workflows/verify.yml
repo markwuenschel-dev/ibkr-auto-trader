@@ -1,0 +1,45 @@
+name: verify
+
+# Enforces the authoritative local matrix (scripts/verify.py) in CI.
+# It runs the verifier exactly as-is: collab lint (the ~321-finding debt) and
+# broker/integration + Playwright e2e stay excluded, just like locally.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Sync Python deps (installs Python 3.14 per pyproject)
+        run: uv sync --all-groups
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: dashboard/pnpm-lock.yaml
+
+      - name: Install dashboard deps
+        run: pnpm --dir dashboard install --frozen-lockfile
+
+      - name: Run authoritative verification matrix
+        run: uv run --locked python scripts/verify.py

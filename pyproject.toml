@@ -15,7 +15,7 @@ dependencies = [
 analysis = ["pandas", "numpy"]   # PT-6 risk math / drift
 
 [dependency-groups]
-dev = ["pytest", "pytest-subtests", "ruff", "hypothesis"]  # hypothesis: property-based risk tests
+dev = ["pytest", "pytest-subtests", "ruff", "hypothesis", "pyright"]  # hypothesis: property-based risk tests; pyright: type-check gate
 
 [build-system]
 requires = ["hatchling"]
@@ -48,7 +48,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 "collab/tools/lib/dashboard_web.py" = ["E501"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "scripts"]
 pythonVersion = "3.14"
 typeCheckingMode = "standard"   # tighten to "strict" once the pipeline modules land (money-touching)
 venvPath = "."

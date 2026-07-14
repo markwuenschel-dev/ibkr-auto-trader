@@ -65,8 +65,12 @@ export default function Page() {
     <main className="mx-auto max-w-6xl p-8">
       <header className="flex items-baseline justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-[var(--text-primary)]">IBKR Trader — §8 Telemetry</h1>
-          <p className="mt-1 text-sm text-[var(--text-muted)]">Live trace of the paper-trading loop</p>
+          <h1 className="text-2xl font-semibold text-[var(--text-primary)]">
+            IBKR Trader — §8 Telemetry
+          </h1>
+          <p className="mt-1 text-sm text-[var(--text-muted)]">
+            Live trace of the paper-trading loop
+          </p>
         </div>
         <span className="text-xs text-[var(--text-muted)] tabular-nums">
           {feed.note ? feed.note : `${compact.format(feed.count)} events · updates every 5s`}
@@ -78,7 +82,11 @@ export default function Page() {
         <Kpi label="Events" value={feed.count} />
         <Kpi label="Runs" value={runs} />
         <Kpi label="Waived" value={waived} />
-        <Kpi label="Rejected" value={rejected} accent={rejected > 0 ? "var(--status-critical)" : undefined} />
+        <Kpi
+          label="Rejected"
+          value={rejected}
+          accent={rejected > 0 ? "var(--status-critical)" : undefined}
+        />
       </section>
 
       {/* Events by stage — single-series magnitude, one hue. No legend (the title names it). */}
@@ -124,8 +132,19 @@ export default function Page() {
                   }}
                   labelStyle={{ color: "var(--text-secondary)" }}
                 />
-                <Bar dataKey="n" fill="var(--series-1)" barSize={18} radius={[0, 4, 4, 0]} isAnimationActive={false}>
-                  <LabelList dataKey="n" position="right" fill="var(--text-secondary)" fontSize={11} />
+                <Bar
+                  dataKey="n"
+                  fill="var(--series-1)"
+                  barSize={18}
+                  radius={[0, 4, 4, 0]}
+                  isAnimationActive={false}
+                >
+                  <LabelList
+                    dataKey="n"
+                    position="right"
+                    fill="var(--text-secondary)"
+                    fontSize={11}
+                  />
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -176,7 +195,9 @@ function Kpi({ label, value, accent }: { label: string; value: number; accent?: 
         {label}
       </div>
       {/* Proportional figures (no tabular-nums) for a large standalone value. */}
-      <div className="mt-1 text-3xl font-semibold text-[var(--text-primary)]">{compact.format(value)}</div>
+      <div className="mt-1 text-3xl font-semibold text-[var(--text-primary)]">
+        {compact.format(value)}
+      </div>
     </div>
   );
 }
@@ -185,7 +206,10 @@ function Action({ action }: { action?: string | null }) {
   if (!action) return <span className="text-[var(--text-muted)]">—</span>;
   return (
     <span className="inline-flex items-center gap-2">
-      <span className="size-2 rounded-full" style={{ background: ACTION_COLOR[action] ?? "var(--text-muted)" }} />
+      <span
+        className="size-2 rounded-full"
+        style={{ background: ACTION_COLOR[action] ?? "var(--text-muted)" }}
+      />
       {action}
     </span>
   );
