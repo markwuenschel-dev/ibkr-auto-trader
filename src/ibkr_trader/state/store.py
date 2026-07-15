@@ -62,6 +62,10 @@ class StateStore:
                 "CREATE TABLE IF NOT EXISTS daily_pnl (day TEXT PRIMARY KEY, realized TEXT NOT NULL)"
             )
             self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS session_equity "
+                "(session_date TEXT PRIMARY KEY, equity TEXT NOT NULL)"
+            )
+            self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS order_keys (key TEXT PRIMARY KEY, recorded_at TEXT NOT NULL)"
             )
 
@@ -138,6 +142,45 @@ class StateStore:
                 "SELECT symbol FROM positions WHERE con_id=?", (int(instrument_id),)
             ).fetchone()
         return str(row[0]) if row else None
+
+    def set_session_start_equity(
+        self, session_date: date, equity: Decimal | int | str
+    ) -> Decimal:
+        """Capture E0 once, returning the durable first value for this session.
+
+        The immediate transaction makes the insert-if-absent operation safe across
+        separate store instances and process restarts.  In particular, a restart
+        cannot re-anchor an already established baseline.
+        """
+        equity_decimal = equity if isinstance(equity, Decimal) else Decimal(str(equity))
+        day_str = session_date.isoformat()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO session_equity(session_date, equity) VALUES(?, ?)",
+                    (day_str, str(equity_decimal)),
+                )
+                row = self._conn.execute(
+                    "SELECT equity FROM session_equity WHERE session_date=?", (day_str,)
+                ).fetchone()
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        # The row must exist unless the database itself failed; keep this explicit
+        # rather than fabricating a monetary baseline.
+        if row is None:
+            raise RuntimeError("session equity baseline was not persisted")
+        return Decimal(row[0])
+
+    def session_start_equity(self, session_date: date) -> Decimal | None:
+        """Read E0, returning ``None`` when no baseline has been captured."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT equity FROM session_equity WHERE session_date=?", (session_date.isoformat(),)
+            ).fetchone()
+        return Decimal(row[0]) if row else None
 
     def add_realized_pnl(self, amount: Decimal | int | str, *, day: date | None = None) -> Decimal:
         day_str = (day or datetime.now(UTC).date()).isoformat()

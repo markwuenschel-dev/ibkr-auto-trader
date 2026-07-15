@@ -74,6 +74,32 @@ class TestDailyPnl:
             )
 
 
+class TestSessionEquity:
+    def test_is_absent_until_captured_and_fails_closed(self, db_path):
+        day = date(2026, 7, 7)
+        with StateStore(db_path) as store:
+            assert store.session_start_equity(day) is None
+            # A risk consumer must not turn an absent baseline into a ratio.
+            baseline = store.session_start_equity(day)
+            assert baseline is None
+
+    def test_is_insert_if_absent_and_survives_restart(self, db_path):
+        day = date(2026, 7, 7)
+        with StateStore(db_path) as store:
+            assert store.set_session_start_equity(day, Decimal("10000.00")) == Decimal("10000.00")
+            assert store.set_session_start_equity(day, Decimal("1")) == Decimal("10000.00")
+        with StateStore(db_path) as store:
+            assert store.session_start_equity(day) == Decimal("10000.00")
+
+    def test_realized_pnl_and_baseline_accept_the_same_session_key(self, db_path):
+        day = date(2026, 7, 7)
+        with StateStore(db_path) as store:
+            store.set_session_start_equity(day, "2500")
+            store.add_realized_pnl("-25", day=day)
+            assert store.session_start_equity(day) is not None
+            assert store.realized_pnl(day) == Decimal("-25")
+
+
 class TestIdempotencyAndConcurrency:
     def test_claim_is_first_write_wins_and_survives_restart(self, db_path):
         with StateStore(db_path) as store:

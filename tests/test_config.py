@@ -17,7 +17,7 @@ _DECIMAL_LIMIT_FIELDS = (
 )
 
 
-def test_default_risk_policy_is_versioned_decimal_and_frozen():
+def test_default_risk_policy_is_versioned_decimal_and_frozen() -> None:
     policy = RiskPolicy()
 
     assert policy.version == "v1"
@@ -31,7 +31,7 @@ def test_default_risk_policy_is_versioned_decimal_and_frozen():
         policy.leverage_cap = Decimal("2")  # type: ignore[misc]
 
 
-def test_threshold_boundaries_are_decimal_and_drawdown_is_independent():
+def test_threshold_boundaries_use_decimal_and_drawdown_is_independent() -> None:
     policy = RiskPolicy()
     session_start_equity = Decimal("1000.00")
 
@@ -43,7 +43,7 @@ def test_threshold_boundaries_are_decimal_and_drawdown_is_independent():
     assert policy.session_drawdown_pct != policy.daily_realized_lockout_pct
 
 
-def test_settings_uses_a_fresh_default_risk_policy():
+def test_settings_uses_a_fresh_default_risk_policy() -> None:
     first = Settings()
     second = Settings()
 
