@@ -20,11 +20,14 @@ state/*.db-shm
 .env.local
 seats.json
 
-# collab-kit RUNTIME state (not source): autopilot control/replies/status, event logs, outbox.
+# collab-kit RUNTIME state (not source): the autopilot's mutable output — run history, ledgers,
+# summaries, leases, assessments, budgets, logs. Git tracks the autopilot *source* under collab/,
+# never what it emits. History is disk-backed (run_history "contract A") and dashboard_core reads
+# it from disk, so untracking it costs the dashboard nothing.
+# If these archives ever need to be durable audit evidence, they get an explicit external
+# destination — not an accidental one in the source tree.
+autopilot/
 # The handoff *specs* (handoffs/**/*.md) and design docs ARE tracked — they're the decision ledger.
-autopilot/replies/
-autopilot/control.json
-autopilot/status.json
 logs/
 outbox/
 handoffs/.idlock/
