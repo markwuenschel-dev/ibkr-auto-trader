@@ -49,3 +49,53 @@ def test_settings_uses_a_fresh_default_risk_policy() -> None:
 
     assert isinstance(first.risk, RiskPolicy)
     assert first.risk is not second.risk
+
+
+# --------------------------------------------------------------------------- #
+# float ingress — ADR-0003: limits convert float -> Decimal BEFORE they
+# participate in any money calculation; "no float in money arithmetic".
+# Decimal annotations alone did not enforce this: lax mode coerced a float via
+# str(), preserving binary imprecision inside a reviewed money limit.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("field", _DECIMAL_LIMIT_FIELDS)
+def test_a_float_limit_is_rejected_not_coerced(field: str) -> None:
+    with pytest.raises(ValidationError):
+        RiskPolicy(**{field: 0.1})  # type: ignore[arg-type]  # the float is the point
+
+
+def test_an_imprecise_float_cannot_enter_a_limit() -> None:
+    """The reproduction: 0.1 + 0.2 is not 0.3, and str()-coercion preserved that exactly."""
+    with pytest.raises(ValidationError):
+        RiskPolicy(session_drawdown_pct=0.1 + 0.2)  # type: ignore[arg-type]
+
+
+def test_control_2_fires_at_exactly_the_drawdown_boundary() -> None:
+    """A session exactly 30% down must trip a 30% limit.
+
+    With float ingress, session_drawdown_pct held Decimal("0.30000000000000004"); the boundary
+    landed just past -300.00 and the loss control did not fire.
+    """
+    policy = RiskPolicy(session_drawdown_pct=Decimal("0.30"))
+    realized, session_start_equity = Decimal("-300.00"), Decimal("1000.00")
+
+    assert realized <= -policy.session_drawdown_pct * session_start_equity
+
+
+def test_stop_loss_required_rejects_a_falsy_int() -> None:
+    """The mandatory-stop flag must not be silently disabled by 0."""
+    with pytest.raises(ValidationError):
+        RiskPolicy(stop_loss_required=0)  # type: ignore[arg-type]
+
+
+def test_stop_loss_required_rejects_a_truthy_int() -> None:
+    with pytest.raises(ValidationError):
+        RiskPolicy(stop_loss_required=1)  # type: ignore[arg-type]
+
+
+def test_decimal_limits_are_still_accepted() -> None:
+    policy = RiskPolicy(session_drawdown_pct=Decimal("0.30"), stop_loss_required=False)
+
+    assert policy.session_drawdown_pct == Decimal("0.30")
+    assert policy.stop_loss_required is False
