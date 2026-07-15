@@ -437,12 +437,16 @@ def _slice(collab, *, to="builder", from_="reviewer", guardrails=None):
 
 
 def _closeout(collab, tmp_path, *, ok=True):
+    """``verify_command`` is the repo's AUTHORITATIVE whole-checkout gate — the only evidence that can
+    close a handoff (done-contract condition 5). ``test_path`` alone is a PARTIAL result and cannot;
+    see collab/tests/test_verification.py."""
     return {
         "breaker": "grok",
         "verifier": "gemini",
         "source_base": collab,
         "source_roots": ["src/*.py"],
         "test_path": str(_tiny_test(tmp_path, ok=ok)),
+        "verify_command": [sys.executable, "-c", f"import sys; sys.exit({0 if ok else 1})"],
     }
 
 

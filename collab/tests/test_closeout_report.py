@@ -20,6 +20,7 @@ import gate_runner as gr  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
 import lanes  # noqa: E402
+import verification as _vfy  # noqa: E402
 
 
 def _preflight(base, seat="reviewer"):
@@ -56,7 +57,17 @@ def _setup(tmp_path, *, drift=False, tests_passed=True):
         "reviewer_seat": "reviewer",
         "source_base": str(base),
         "source_manifest": gr.source_manifest(["src/*.py"], base),
-        "tests": {"passed": tests_passed, "run_id": "t"},
+        # An authoritative verification record; ``tests_passed=False`` models the gate failing.
+        "tests": {
+            "kind": "authoritative", "authoritative": True, "passed": tests_passed,
+            "exit_code": 0 if tests_passed else 1, "checkout_stable": True,
+            "label": "GREEN — scripts/verify.py exit 0" if tests_passed
+                     else "FAIL — scripts/verify.py did not exit 0",
+            "command": ["uv", "run", "--locked", "python", "scripts/verify.py"],
+            **{f"{end}_{k}": _vfy._checkout_state(base)[k]
+               for end in ("start", "end") for k in ("sha", "status")},
+            "started_ts": "2026-07-15T11:19:18Z", "ended_ts": "2026-07-15T11:20:18Z", "run_id": "t",
+        },
         "reviewer_preflight": _preflight(base),
         "lanes": [],
         "blockers": [],

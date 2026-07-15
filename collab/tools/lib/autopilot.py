@@ -579,7 +579,10 @@ def load_closeout(home) -> dict | None:
     """The optional top-level ``"closeout"`` block from seats.json — the breaker/verifier seats + source +
     test config for the auto-lane closeout. ``None`` disables it (sign-off then needs a manually-built
     ledger). Keys: ``breaker``, ``verifier`` (seat names), ``source_base`` (default: kit root),
-    ``source_roots`` (globs), ``test_path`` (pytest target run before closeout)."""
+    ``source_roots`` (globs), ``test_path`` (pytest target -- a PARTIAL result that cannot close a
+    handoff on its own), ``verify_command`` (argv list: the repo's authoritative whole-checkout gate;
+    the only evidence ``done_contract`` condition 5 accepts. Defaults to ``scripts/verify.py`` when
+    the repo under review has one)."""
     try:
         doc = json.loads(_seats_file(home).read_text("utf-8"))
     except OSError, ValueError, cc.CollabError:
@@ -588,22 +591,31 @@ def load_closeout(home) -> dict | None:
     return c if isinstance(c, dict) else None
 
 
-def _run_test_suite(test_path, cwd) -> dict:
-    """Run the configured test suite as a real subprocess ([C38]-style boundary); return the ledger
-    ``tests`` record. No ``test_path`` -> unknown (which the contract treats as not-passed)."""
+def _run_test_suite(test_path, cwd, verify_command=None) -> dict:
+    """Capture verification evidence as a real subprocess ([C38]-style boundary); return the ledger
+    ``tests`` record.
+
+    Prefers the AUTHORITATIVE whole-checkout gate, in order: ``closeout.verify_command`` from
+    seats.json, else ``scripts/verify.py`` if the repo under review has one. Falls back to a
+    pytest-only run, recorded as an explicitly PARTIAL result -- ``done_contract`` condition 5
+    refuses to close on it, so a repo with no configured gate cannot autonomously close. Fail-closed
+    is the point: an unconfigured gate must not look like a passing one.
+
+    Before 2026-07-15 this ran pytest and nothing else, and the contract read its bare ``passed``
+    boolean as though it attested the checkout. It never did: lint and type failures were invisible
+    to the gate. ``verification.is_green`` is now the only reader allowed to conclude "this checkout
+    passed", and no pytest-only record can satisfy it.
+    """
+    import verification as _v  # lazy: keep module import cost off the driver's hot path
+
+    base = str(cwd) if cwd else None
+    if verify_command:
+        return _v.run_authoritative(base, verify_command)
+    if base and _v.verify_script_present(base):
+        return _v.run_authoritative(base)
     if not test_path:
-        return {"passed": None, "run_id": None}
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-m", "pytest", str(test_path), "-q"],
-            cwd=str(cwd) if cwd else None,
-            capture_output=True,
-            text=True,
-            timeout=1800,
-        )
-        return {"passed": proc.returncode == 0, "run_id": f"pytest-{time.time_ns()}"}
-    except (OSError, subprocess.SubprocessError) as e:
-        return {"passed": False, "run_id": f"pytest-error: {str(e)[:120]}"}
+        return _v.unverified("no verify_command, no scripts/verify.py, no test_path")
+    return _v.run_pytest_only(test_path, base, python=sys.executable)
 
 
 def _capture_preflight(base, test_path, reviewer_seat, manifest) -> dict:
@@ -656,7 +668,7 @@ def _autoclose_ledger(collab, hid, builder_seat, closeout, *, seats, runner, log
     base = closeout.get("source_base") or str(cc.resolve_kit_root())
     roots = closeout.get("source_roots") or ["**/*.py"]
     test_path = closeout.get("test_path")
-    tests = _run_test_suite(test_path, base)
+    tests = _run_test_suite(test_path, base, closeout.get("verify_command"))
     return _lanes.run_lanes(
         collab,
         hid,
@@ -942,8 +954,8 @@ def _assess_candidate(
             "unverified": [],
             "incomplete": {"reason": "budget", "which": e.which},
         }
-    tests = _run_test_suite(test_path, source_base)
     base = closeout or {}
+    tests = _run_test_suite(test_path, source_base, base.get("verify_command"))
 
     def _review():
         return _dispatch_seat(

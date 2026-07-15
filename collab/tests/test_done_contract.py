@@ -17,6 +17,7 @@ import done_contract as dcon  # noqa: E402
 import gate_runner as gr  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
+import verification as _vfy  # noqa: E402
 
 
 def _setup(tmp_path):
@@ -57,7 +58,18 @@ def _ledger(collab, hid="001", **over):
         "reviewer_seat": "reviewer",
         "source_base": str(base),
         "source_manifest": gr.source_manifest(["src/*.py"], base),
-        "tests": {"passed": True, "run_id": "t"},
+        # An AUTHORITATIVE green record whose SHA/status are read from the checkout under review:
+        # condition 5 refuses both a pytest-only result (the 2026-07-15 regression) and a receipt
+        # earned on a different checkout. Both are pinned in collab/tests/test_verification.py.
+        "tests": {
+            "kind": "authoritative", "authoritative": True, "exit_code": 0, "passed": True,
+            "checkout_stable": True, "label": "GREEN — scripts/verify.py exit 0",
+            "command": ["uv", "run", "--locked", "python", "scripts/verify.py"],
+            **{f"{end}_{k}": _vfy._checkout_state(base)[k]
+               for end in ("start", "end") for k in ("sha", "status")},
+            "started_ts": "2026-07-15T11:19:18Z", "ended_ts": "2026-07-15T11:20:18Z",
+            "run_id": "t",
+        },
         "reviewer_preflight": _preflight(base),
         "lanes": [],
         "blockers": [],

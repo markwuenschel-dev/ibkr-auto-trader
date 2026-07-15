@@ -166,6 +166,9 @@ class TestLoopPolicy:
             "source_base": collab,
             "source_roots": ["src/*.py"],
             "test_path": str(tiny),
+            # The authoritative whole-checkout gate: only an authoritative exit 0 can close a
+            # handoff (done-contract condition 5). See collab/tests/test_verification.py.
+            "verify_command": [sys.executable, "-c", "import sys; sys.exit(0)"],
         }
         (Path(home) / "seats.json").write_text(
             json.dumps({"version": 1, "closeout": closeout, "seats": _closeout_seats()}), encoding="utf-8"

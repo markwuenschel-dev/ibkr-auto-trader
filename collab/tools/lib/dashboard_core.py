@@ -41,6 +41,7 @@ import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
 import operator_requests as opreq  # noqa: E402
 import registry  # noqa: E402
+import verification as _verification  # noqa: E402
 import verification_plan as verification_plan  # noqa: E402
 
 _trace = ap._trace  # the by-path-loaded local trace module (stdlib-shadowing safe)
@@ -406,7 +407,12 @@ def _latest_lanes(collab, *, run_uid: str | None = None, hid: str | None = None)
         "hid": data.get("hid"),
         "run_uid": data.get("run_uid"),
         "lanes": lanes,
+        # A pytest-only record also carries passed=True. Rendering that as a green "tests ✓" chip is
+        # the same conflation the done-gate made: report the LABEL and the authoritative verdict, so a
+        # partial result cannot read as a full one on the panel.
         "tests_passed": bool((data.get("tests") or {}).get("passed")),
+        "verification_green": _verification.is_green(data.get("tests") or {}),
+        "verification_label": _verification.label_of(data.get("tests") or {}),
         "blockers": len(data.get("blockers") or []),
         "incomplete": bool(data.get("incomplete")),
         "plan_digest": data.get("verification_plan_digest"),

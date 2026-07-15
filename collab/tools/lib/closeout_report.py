@@ -23,6 +23,10 @@ import sys
 from contextlib import suppress
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import verification as _v  # noqa: E402
+
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
@@ -116,7 +120,19 @@ def collect(collab, hid: str) -> dict:
         },
         "source_base": led.get("source_base"),
         "source_manifest": {"file_count": len(manifest), "digest12": _manifest_digest(manifest)[:12]},
-        "tests": {"passed": tests.get("passed"), "run_id": tests.get("run_id")},
+        # Carry the LABEL, not a bare boolean: "passed: yes" for a pytest-only run is the exact
+        # conflation that let a lint/type-broken checkout read as verified (2026-07-15).
+        "tests": {
+            "passed": tests.get("passed"),
+            "run_id": tests.get("run_id"),
+            "green": _v.is_green(tests),
+            "label": _v.label_of(tests),
+            "exit_code": tests.get("exit_code"),
+            "command": tests.get("command"),
+            "start_sha": tests.get("start_sha"),
+            "end_sha": tests.get("end_sha"),
+            "checkout_stable": tests.get("checkout_stable"),
+        },
         "lanes": {
             "required": required,
             "ran": ran,
@@ -182,7 +198,14 @@ def render_markdown(summary: dict) -> str:
     )
     L.append("")
     L.append("## Tests & lanes")
-    L.append(f"- tests passed: {_yn(s['tests']['passed'])}  (run `{s['tests']['run_id'] or '—'}`)")
+    t = s["tests"]
+    L.append(f"- verification: **{t['label']}**")
+    L.append(f"- authoritatively green: {_yn(t['green'])}  (run `{t['run_id'] or '—'}`)")
+    if t.get("command"):
+        L.append(f"- command: `{' '.join(t['command'])}` → exit {t['exit_code']}")
+    if t.get("start_sha"):
+        moved = "" if t.get("checkout_stable") else "  ⚠ checkout MOVED mid-run"
+        L.append(f"- checkout: `{(t['start_sha'] or '')[:12]}` → `{(t['end_sha'] or '')[:12]}`{moved}")
     L.append(f"- lanes required: {s['lanes']['required'] or '—'}")
     L.append(f"- lanes ran: {s['lanes']['ran'] or '—'}")
     if s["lanes"]["missing"]:

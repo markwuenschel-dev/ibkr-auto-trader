@@ -40,6 +40,7 @@ import closeout_report as cr  # noqa: E402  (reuse the evidence facts; never re-
 import collab_common as cc  # noqa: E402
 import contracts  # noqa: E402
 import handoff_core as hc  # noqa: E402
+import verification as _verification  # noqa: E402
 
 EXIT_OK, EXIT_USAGE, EXIT_NOTFOUND = 0, 1, 4
 
@@ -449,6 +450,8 @@ def collect(collab, hid: str) -> dict:
         "signed_off": bool(evidence.get("autonomous_done_event")),
         "closed_autonomously": bool(evidence.get("closed_autonomously")),
         "tests_passed": (evidence.get("tests") or {}).get("passed"),
+        "verification_green": _verification.is_green(evidence.get("tests") or {}),
+        "verification_label": _verification.label_of(evidence.get("tests") or {}),
         "capped": capped,
         "signoff_blocked": blocked,
         "escalated": bool(esc),
@@ -569,8 +572,11 @@ def render_markdown(d: dict) -> str:
     L.append(f"- Final state: **{d['state'] or 'unknown'}**")
     so = "yes" if d["closed_autonomously"] else ("recorded" if d["signed_off"] else "no")
     L.append(f"- Signed off autonomously: **{so}**")
-    tp = d["tests_passed"]
-    L.append(f"- Tests: {'passed' if tp is True else ('failed' if tp is False else 'not recorded')}")
+    # Name what actually ran. "Tests: passed" for a pytest-only run reads as a verified checkout.
+    # A summary dict predating these keys renders UNVERIFIED rather than raising -- fail closed, and
+    # never silently fall back to the bare boolean this line exists to stop trusting.
+    L.append(f"- Verification: **{d.get('verification_label') or _verification.LABEL_UNVERIFIED}**")
+    L.append(f"- Authoritatively green: **{'yes' if d.get('verification_green') else 'no'}**")
     if d["signoff_blocked"]:
         L.append(f"- Sign-off blocked: {'; '.join(d['signoff_blocked'])[:200]}")
     if d.get("conformance"):

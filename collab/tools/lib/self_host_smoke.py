@@ -196,6 +196,11 @@ def run_smoke(*, inject: str = "clean", workspace=None, real: bool = False, coll
         "source_base": str(src_base),
         "source_roots": source_roots,
         "test_path": str(test_file),
+        # This synthetic slice's authoritative whole-checkout gate. done_contract condition 5 closes
+        # only on an authoritative exit 0 -- ``test_path`` alone is a PARTIAL result and cannot close
+        # a handoff (see collab/tests/test_verification.py). ``--inject test-failure`` makes this
+        # command exit non-zero, which is what must keep the handoff ``claimed``.
+        "verify_command": [sys.executable, "-m", "pytest", str(test_file), "-q"],
     }
     runner = _scripted_runner(inject)
     log = ap._log_default(collab_p)

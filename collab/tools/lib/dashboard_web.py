@@ -1019,7 +1019,10 @@ function renderLanes(s){
   // live run (scoped by run_uid), so "no lanes" genuinely means there is nothing to show.
   if(!L||!L.lanes||!L.lanes.length){ box.textContent=""; head.textContent=""; card.style.display="none"; return; }
   card.style.display=""; head.textContent="";
-  const tp=el("span","chip "+(L.tests_passed?"ok":"crit"),L.tests_passed?"tests ✓":"tests ✗"); head.appendChild(tp);
+  // Only an AUTHORITATIVE pass earns the green chip. A pytest-only run also reports passed=true;
+  // showing that as "tests ✓" is how a lint/type-broken checkout reads as verified.
+  const tp=el("span","chip "+(L.verification_green?"ok":"crit"),L.verification_label||(L.tests_passed?"tests ✓":"tests ✗"));
+  tp.title=L.verification_label||""; head.appendChild(tp);
   head.appendChild(el("span","chip "+((L.blockers||0)?"crit":""),(L.blockers||0)+" blocker"+((L.blockers||0)===1?"":"s")));
   box.textContent="";
   L.lanes.forEach(ln=>{
