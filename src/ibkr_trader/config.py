@@ -1,9 +1,8 @@
-"""config — the control plane's mode + reviewed risk policy. PAPER-first by construction.
+"""Control-plane configuration for the paper-first trading system.
 
-The single most important invariant in the system lives here: **PAPER is the default, and LIVE is
-rejected unless a reviewed config explicitly enables it** (trading-system-design.md §8 / PROTOCOL.md).
-`PAUSED` and `KILL_SWITCHED` block *all* broker submission. Nothing here talks to a broker; it only
-decides what mode we are in and supplies the account-level risk policy.
+The mode vocabulary and reviewed risk policy live here.  This module does not
+submit orders or talk to a broker; it supplies the inputs consumed by those
+components.
 """
 
 from __future__ import annotations
@@ -16,11 +15,12 @@ from ibkr_trader.domain.models import _Frozen
 
 
 class Mode(enum.StrEnum):
-    """Execution mode. The ModeController (PT-8) enforces transitions; this is the vocabulary."""
+    """Execution mode; transition policy belongs to ModeController."""
 
     PAPER = "PAPER"
     LIVE_SMALL_TEST = "LIVE_SMALL_TEST"
     LIVE = "LIVE"
+    REDUCE_ONLY = "REDUCE_ONLY"
     PAUSED = "PAUSED"
     KILL_SWITCHED = "KILL_SWITCHED"
 
@@ -39,23 +39,21 @@ def resolve_mode(requested: Mode | None, *, live_enabled: bool = False) -> Mode:
 
 
 def submission_allowed(mode: Mode) -> bool:
-    """Whether Execution Control may submit to an adapter in ``mode``."""
+    """Whether Execution Control may submit an order in ``mode``.
+
+    REDUCE_ONLY remains submit-capable: its restriction is enforced at the
+    approved-intent mint seam, while PAUSED and KILL_SWITCHED halt submission.
+    """
     return mode not in _HALTED_MODES
 
 
 class RiskPolicy(_Frozen):
-    """Reviewed, versioned Decimal limits consumed by Risk & Sizing.
-
-    ``version`` is load-bearing: plans and approval decisions bind it to detect
-    reviewed-policy staleness. Decimal defaults ensure that no binary float enters
-    a limit comparison or money calculation.
-    """
+    """A reviewed, versioned set of Decimal risk limits."""
 
     version: str = "v1"
     max_risk_per_trade: Decimal = Decimal("0.01")
     daily_realized_lockout_pct: Decimal = Decimal("0.03")
-    # TODO(pct_d): paper-calibrate. This deliberately wider tail-stop placeholder
-    # must not be coupled to the realized-loss opening lockout threshold.
+    # Deliberately wider than the realized-loss threshold until paper calibration.
     session_drawdown_pct: Decimal = Decimal("0.10")
     leverage_cap: Decimal = Decimal("1.5")
     stop_loss_required: bool = True
@@ -63,12 +61,13 @@ class RiskPolicy(_Frozen):
 
 @dataclass(frozen=True)
 class Settings:
-    """The resolved control-plane settings for a run."""
+    """Resolved control-plane settings for a run."""
 
     mode: Mode = Mode.PAPER
-    paper_only: bool = True  # master guard; must be flipped by reviewed config for live
+    paper_only: bool = True
     live_enabled: bool = False
     risk: RiskPolicy = field(default_factory=RiskPolicy)
 
     def effective_mode(self) -> Mode:
+        """Return the mode after applying the paper-only safety guard."""
         return resolve_mode(self.mode, live_enabled=self.live_enabled and not self.paper_only)

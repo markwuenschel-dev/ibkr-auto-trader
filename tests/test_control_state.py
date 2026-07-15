@@ -48,8 +48,8 @@ def test_control_state_forbids_mode_and_reservation_inputs():
     }
 
     with pytest.raises(ValidationError):
-        RiskControlState(**fields, mode="PAPER")
+        RiskControlState(**fields, mode="PAPER")  # type: ignore[call-arg]
     with pytest.raises(ValidationError):
-        RiskControlState(**fields, reservation="claimed")
+        RiskControlState(**fields, reservation="claimed")  # type: ignore[call-arg]
     with pytest.raises(ValidationError):
-        RiskControlState(**fields, idempotency_key="order-1")
+        RiskControlState(**fields, idempotency_key="order-1")  # type: ignore[call-arg]

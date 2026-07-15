@@ -9,13 +9,16 @@ holes are release-gate concerns, not claims this seam makes.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+if TYPE_CHECKING:
+    from ibkr_trader.risk.reduce_only import ReduceOnlyLatch
 
 # IBKR's stable contract identifier is the decision-universe set key.  This is
 # an alias rather than a symbol: display symbols are neither unique nor stable.
@@ -114,6 +117,14 @@ class RiskPlan(_Frozen):
     quantity: int
     stop_price: Decimal
     est_risk_amount: Decimal
+    planner_projection: Any = None
+    projection_is_authoritative: bool = False
+    context_digest: str = ""
+    decision_generation: Any = None
+    session_generation: Any = None
+    policy_version: str = ""
+    declined: bool = False
+    decline_reason: str | None = None
 
 
 class Ack(_Frozen):
@@ -246,6 +257,28 @@ class ApprovedOrderIntent(_MintGuarded):
     stop_price: Decimal
     approved_at: datetime
     ledger_ref: str
+
+    @classmethod
+    def _mint(
+        cls,
+        authority: MintAuthority,
+        *,
+        reduce_only_latch: ReduceOnlyLatch | None = None,
+        session_date: date | None = None,
+        current_qty: int | None = None,
+        **fields: Any,
+    ) -> ApprovedOrderIntent:
+        if reduce_only_latch is not None:
+            if session_date is None or current_qty is None:
+                raise ValueError("reduce-only mint requires session_date and current_qty")
+            quantity = fields["quantity"]
+            if not isinstance(quantity, int) or quantity <= 0:
+                raise ValueError("reduce-only mint quantity must be a positive int")
+            resulting_qty = (
+                current_qty + quantity if Side(fields["side"]) is Side.BUY else current_qty - quantity
+            )
+            reduce_only_latch.require_permitted(session_date, current_qty, resulting_qty)
+        return super()._mint(authority, **fields)
 
 
 class ExecutableOrder(_MintGuarded):
