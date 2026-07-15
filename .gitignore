@@ -33,7 +33,13 @@ handoffs/.idlock/
 _autopilot-backup-*/
 
 # harness state
-.claude/
+.claude/*
+# ...except the enforcement gates. These are not local preferences — they are the repo's guardrails
+# (see CLAUDE.md, "Incident 2026-07-15"). A gate that does not survive a clone is not a gate.
+!.claude/settings.json
+!.claude/hooks/
+.claude/hooks/*
+!.claude/hooks/*.py
 
 # local scratch architecture notes (not the tracked design docs under docs/)
 ARCHITECTURE.md
