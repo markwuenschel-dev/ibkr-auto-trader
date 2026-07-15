@@ -530,6 +530,62 @@ class TestNoStaleRunSurface:
         assert snap["last_run"]["run_uid"] == "20260714T000000Z-4242"
         assert snap["last_run"]["hid"] == hid
 
+    def test_epitaph_names_the_handoff_after_autopilot_clears_current_hid(self, tmp_path):
+        # THE REGRESSION THAT COST SIX DAYS (2026-07-15). The epitaph test above passes while the
+        # feature is structurally broken, because releasing the lease is NOT how a run actually ends:
+        # autopilot also writes current_hid=None (autopilot.py, the done/paused/idle/post-seat paths).
+        # current_hid is a LIVENESS field — "what a seat is working on RIGHT NOW" — so it is always
+        # None by the time an epitaph is wanted. Reading it to describe a finished run could never
+        # work, for any run. The durable answer is handoffs_touched in the archived run.json.
+        collab = str(tmp_path / "c")
+        hid = hc.create(collab, to="reviewer", from_="builder", title="x", body="y")["id"]
+        run_uid = "20260715T111143Z-40692"
+        lease = _live_run(collab, hid=hid, run_uid=run_uid)
+        lease.release()
+        ap._write_status(collab, phase="done", active_seat=None, current_hid=None)
+
+        run_dir = Path(collab) / "autopilot" / "history" / run_uid
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "run.json").write_text(
+            json.dumps({"run_uid": run_uid, "handoffs_touched": ["030", "031", hid]}),
+            encoding="utf-8",
+        )
+
+        snap = dc.snapshot(collab)
+        assert snap["last_run"]["hid"] == hid, "the epitaph must survive current_hid being cleared"
+        assert snap["last_run"]["handoffs_touched"] == ["030", "031", hid], (
+            "a run that touched several handoffs must show all of them, not just the last"
+        )
+
+    def test_epitaph_falls_back_to_the_hid_in_last_error(self, tmp_path):
+        # No archived run.json (driver crashed before archiving) and current_hid cleared. last_error
+        # conventionally leads with the hid ("035 not closed (stalled); awaiting human"), which is the
+        # only remaining source. dashboard_web.py already scraped this client-side; do it once, here.
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
+        lease = _live_run(collab, hid="035", run_uid="20260715T999999Z-1")
+        lease.release()
+        ap._write_status(
+            collab, phase="capped", current_hid=None, last_error="035 not closed (stalled); awaiting human"
+        )
+
+        snap = dc.snapshot(collab)
+        assert snap["last_run"]["hid"] == "035"
+        assert snap["last_run"]["handoffs_touched"] == []
+
+    def test_epitaph_survives_a_hostile_run_uid(self, tmp_path):
+        # _load_run_json raises ValueError on an id that escapes the history root. The poll must degrade
+        # to a hid-less epitaph, never crash the whole dashboard over one bad field.
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
+        lease = _live_run(collab, hid="001", run_uid="20260715T000000Z-7")
+        lease.release()
+        ap._write_status(collab, phase="done", current_hid=None, run_uid="../../etc", last_error=None)
+
+        snap = dc.snapshot(collab)  # must not raise
+        assert snap["last_run"]["hid"] is None
+        assert snap["last_run"]["handoffs_touched"] == []
+
     def test_lanes_from_another_run_are_not_shown(self, tmp_path):
         # _latest_lanes used to take the newest ledger ON DISK — any run, any handoff. A ledger stamped
         # with a different run_uid belongs to that run and must never populate this run's lane matrix.

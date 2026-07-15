@@ -469,6 +469,7 @@ _SUMMARY_KEYS = (
     "seats",
     "terminal_reason",
     "escalations",
+    "handoffs_touched",
 )
 
 
@@ -640,15 +641,55 @@ def _seat_model_deltas(a, b) -> dict:
     return {seat: _delta_cat(a.get(seat), b.get(seat)) for seat in sorted(set(a) | set(b))}
 
 
-def _last_run(status: dict | None) -> dict | None:
+def _epitaph_hid(status: dict, collab) -> tuple[str | None, list[str]]:
+    """Resolve WHICH handoff(s) the finished run worked on, for the epitaph.
+
+    ``status["current_hid"]`` cannot answer this. It is a LIVENESS field meaning "the handoff a seat
+    is working on right now", and autopilot deliberately clears it to None the moment work stops
+    (``autopilot.py`` writes ``current_hid=None`` on the done/paused/idle/post-seat paths). So by the
+    time an epitaph is wanted, it is *always* None — the epitaph could never name a handoff, for any
+    run, ever. Reading a liveness field to describe a corpse is a category error.
+
+    The durable answer is ``handoffs_touched`` in the archived ``run.json``, which survives the run.
+    Order: live field (a torn/racing read may still have it) -> durable history -> the hid prefix that
+    ``last_error`` conventionally carries ("035 not closed (stalled); awaiting human").
+    """
+    hid = status.get("current_hid")
+    touched: list[str] = []
+
+    run_uid = status.get("run_uid")
+    if collab is not None and run_uid:
+        try:
+            doc = _load_run_json(collab, run_uid)
+        except ValueError:
+            doc = {}  # bad/hostile run_uid: the poll must never crash over an epitaph
+        raw = doc.get("handoffs_touched")
+        if isinstance(raw, list):
+            touched = [str(h) for h in raw if h not in (None, "")]
+
+    if not hid and touched:
+        hid = touched[-1]
+    if not hid:
+        m = re.match(r"\s*(\d{1,9})\b", str(status.get("last_error") or ""))
+        if m:
+            hid = m.group(1)
+    return (str(hid) if hid else None), touched
+
+
+def _last_run(status: dict | None, collab=None) -> dict | None:
     """The epitaph for a run that is no longer live: just enough to say WHICH run ended and WHEN, for the
     "no run active — last: 030 · ended 20:04" line. Deliberately not the run's data — the live panels go
-    empty instead of rendering a corpse (see :func:`snapshot`)."""
+    empty instead of rendering a corpse (see :func:`snapshot`).
+
+    ``handoffs_touched`` is carried too: a run that worked 030, 031, 034 then stalled on 035 has one
+    ``hid`` but four handoffs the operator needs to see."""
     if not isinstance(status, dict):
         return None
+    hid, touched = _epitaph_hid(status, collab)
     return {
         "run_uid": status.get("run_uid"),
-        "hid": status.get("current_hid"),
+        "hid": hid,
+        "handoffs_touched": touched,
         "phase_final": status.get("phase"),
         "pause_reason": status.get("pause_reason"),
         "started_ts": status.get("started_ts"),
@@ -700,7 +741,7 @@ def snapshot(collab, home=None) -> dict:
         "live": live,
         "run_uid": run_uid,
         "status": status if live else None,
-        "last_run": None if live else _last_run(status),
+        "last_run": None if live else _last_run(status, collab),
         "events": evs[-60:],
         "stats": run_stats(evs),
         "lanes": _latest_lanes(collab, run_uid=run_uid, hid=(status or {}).get("current_hid"))
