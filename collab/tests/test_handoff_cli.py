@@ -15,6 +15,7 @@ sys.path.insert(0, str(_LIB))
 
 import handoff_cli as cli  # noqa: E402
 import handoff_core as hc  # noqa: E402
+import transitions as tr  # noqa: E402
 
 
 class TestCLI:
@@ -45,15 +46,35 @@ class TestCLI:
         assert cli.main(["list", d]) == 0
         assert cli.main(["claim", d, "001"]) == 0
         assert cli.main(["show", d, "001"]) == 0
-        assert cli.main(["done", d, "001"]) == 0
+        assert cli.main(["done", d, "001", "--reason", "closing by hand"]) == 0
         assert cli.main(["archive", d, "001"]) == 0
         assert hc.state_of(d, "001") == "archive"
+
+    def test_done_requires_a_reason_and_records_a_human_override(self, tmp_path):
+        """``handoff done`` checks no evidence, so it may not close anonymously.
+
+        It is a HUMAN OVERRIDE and must be recorded as one — never as autonomous verification. (Claiming
+        already captured an actor; closing captured nothing at all before 2026-07-15.)
+        """
+        d = str(tmp_path / "c")
+        cli.main(["create", d, "--to", "r", "--title", "x"])
+        cli.main(["claim", d, "001"])
+        # argparse rejects the missing --reason; main maps its SystemExit to a usage exit code ([C16]).
+        assert cli.main(["done", d, "001"]) == cli.EXIT_USAGE
+        assert hc.state_of(d, "001") == "claimed", "a reasonless close must not move the handoff"
+
+        assert cli.main(["done", d, "001", "--reason", "gate is wrong"]) == 0
+        rec = tr.read(d, "001")
+        assert rec["kind"] == tr.KIND_HUMAN
+        assert rec["reason"] == "gate is wrong"
+        assert rec["actor"]
+        assert tr.is_autonomous(rec) is False
 
     def test_telemetry_emitted_per_state_change(self, tmp_path):
         d = str(tmp_path / "c")
         cli.main(["create", d, "--to", "r", "--title", "x"])
         cli.main(["claim", d, "001"])
-        cli.main(["done", d, "001"])
+        cli.main(["done", d, "001", "--reason", "closing by hand"])
         events = [
             json.loads(x)
             for x in (Path(d) / "logs" / "events.jsonl").read_text("utf-8").splitlines()

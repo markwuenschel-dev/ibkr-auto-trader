@@ -63,10 +63,19 @@ class RiskPolicy(_Frozen):
 
     Strict REJECTS float ingress rather than normalising it: no rounding scale is specified anywhere
     in the ADR or this module, so quantising here would invent a limit the reviewer never approved.
-    A policy is reviewed input -- callers pass ``Decimal`` (or a string via ``Decimal(...)``); there
-    is no path where silently rounding someone's money limit is the safe reading.
+    A policy is reviewed input -- callers pass ``Decimal`` and nothing else; there is no path where
+    silently rounding someone's money limit is the safe reading.
 
-    Scoped to this class, not to ``_Frozen``: its other subclasses ingest broker payloads whose
+    What strict costs, measured rather than assumed: ``RiskPolicy(session_drawdown_pct="0.30")`` and
+    ``RiskPolicy(version=1)`` are now rejected too, because strict declines every implicit conversion,
+    not only ``float`` -> ``Decimal``. No caller in this repository passed either. ``model_validate``
+    (Python mode) rejects a ``float`` exactly as the constructor does -- which is the ingress that
+    would have mattered, since ``json.loads`` yields ``float``. ``model_validate_json`` still accepts a
+    JSON number, and that is correct: JSON has no Decimal type, and pydantic-core reads the literal
+    text into the Decimal, so no binary float round-trip occurs on that path. See
+    ``tests/test_config.py``.
+
+    Scoped to this class, not to ``_Frozen``: its eight other subclasses ingest broker payloads whose
     documented parsing is Decimal-from-string, and widening strictness to them is a separate change.
     """
 

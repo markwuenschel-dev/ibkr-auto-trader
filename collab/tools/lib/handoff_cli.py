@@ -10,7 +10,8 @@ Command surface (subcommand-first, mirroring ``gate run <artifact>``)::
 
     handoff create <collab> --to R --title "..." [--from F --priority P --body B]
     handoff list   <collab> [--state pending|claimed|done|archive]
-    handoff claim|show|done|archive|state  <collab> <id>
+    handoff claim|show|archive|state  <collab> <id>
+    handoff done   <collab> <id> --reason "..."   # HUMAN OVERRIDE — no evidence is checked
     handoff orphans <collab>
     handoff register <name> --root <path> [--reviewer R --repo URL]
     handoff status
@@ -38,6 +39,7 @@ import collab_common as cc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
 import registry  # noqa: E402
+import transitions as _transitions  # noqa: E402
 
 
 def _load_local(alias: str, filename: str):
@@ -141,12 +143,21 @@ def cmd_claim(args) -> int:
 
 
 def cmd_done(args) -> int:
+    """``handoff done`` is a HUMAN OVERRIDE and is recorded as one.
+
+    It checks no evidence — no ledger, no contract, no verification receipt — so it may not close
+    anonymously. ``--reason`` is required; the actor comes from ``$USER`` exactly as ``cmd_claim``
+    already records who claimed. (Before 2026-07-15 this path recorded neither: claiming captured an
+    actor, closing did not.) Autonomous closure is the driver's job and goes through
+    :mod:`done_contract`; there is deliberately no CLI flag that can claim it.
+    """
     collab = _collab_from(args)
-    hc.done(collab, args.id)
+    actor = os.environ.get("USER") or "cli"
+    hc.done(collab, args.id, kind=_transitions.KIND_HUMAN, actor=actor, reason=args.reason)
     _emit_safe(
         he.on_done, _log(collab), _run_id(collab), args.id, span_id=f"{args.id}:done", parent_span_id=None
     )  # [C15]
-    print(f"{args.id} -> done")
+    print(f"{args.id} -> done (HUMAN OVERRIDE by {actor}: {args.reason})")
     return EXIT_OK
 
 
@@ -271,6 +282,12 @@ def _build_parser() -> argparse.ArgumentParser:
         sp = sub.add_parser(name, help=f"{name} a handoff")
         with_collab(sp)
         sp.add_argument("id")
+        if name == "done":
+            sp.add_argument(
+                "--reason",
+                required=True,
+                help="why you are closing this by hand (HUMAN OVERRIDE — no evidence is checked)",
+            )
         sp.set_defaults(func=fn)
 
     orp = sub.add_parser("orphans", help="list reserved-but-orphaned ids")

@@ -23,6 +23,7 @@ import autopilot as ap  # noqa: E402
 import contracts  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import narrative  # noqa: E402
+import transitions as tr  # noqa: E402
 
 _HANDOFF = """---
 to: builder
@@ -123,10 +124,14 @@ class TestBuild:
         hid = _handoff(collab)
         _two_turns(collab, hid)
         hc.claim(collab, hid)
-        hc.done(collab, hid)  # moved to done WITHOUT an autonomous_done event
+        # A HUMAN OVERRIDE, recorded as one. This is what "done by hand" now IS: the kind is persisted
+        # on the transition rather than inferred from the absence of an autonomous_done event.
+        hc.done(collab, hid, kind=tr.KIND_HUMAN, actor="mark", reason="closing by hand")
         md = narrative.build(collab, hid)
         assert "Marked done" in md
         assert "Signed off autonomously: **no**" in md
+        assert "HUMAN OVERRIDE" in md
+        assert "AUTONOMOUS VERIFIED" not in md
 
     def test_autonomous_signoff_is_reported(self, tmp_path):
         collab = str(tmp_path / "c")
@@ -143,10 +148,11 @@ class TestBuild:
         }
         _two_turns(collab, hid, extra=[done_ev])
         hc.claim(collab, hid)
-        hc.done(collab, hid)
+        hc.done(collab, hid, kind=tr.KIND_AUTONOMOUS, actor="reviewer", receipt="h" * 64)
         md = narrative.build(collab, hid)
         assert "shipped autonomously" in md
         assert "Signed off autonomously: **yes**" in md
+        assert "AUTONOMOUS VERIFIED" in md
 
     def test_capped_run_reads_as_gate_held(self, tmp_path):
         collab = str(tmp_path / "c")

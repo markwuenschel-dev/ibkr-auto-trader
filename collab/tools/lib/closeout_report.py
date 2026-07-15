@@ -23,10 +23,6 @@ import sys
 from contextlib import suppress
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import verification as _v  # noqa: E402
-
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
@@ -36,6 +32,8 @@ import done_contract as dcon  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
 import registry  # noqa: E402
+import transitions as _transitions  # noqa: E402
+import verification as _v  # noqa: E402
 
 EXIT_OK, EXIT_USAGE, EXIT_NOTFOUND = 0, 1, 4
 
@@ -154,11 +152,19 @@ def collect(collab, hid: str) -> dict:
             "conditions": verdict["conditions"],
         },
         "autonomous_done_event": autonomous_done,
-        # Authoritative "was this a valid autonomous closeout": the audit event + terminal state. (A
-        # re-evaluated contract on an already-``done`` handoff fails condition 10 by design — the driver
-        # may only fire from ``claimed`` — so the event, carrying the hash satisfied at transition time,
-        # is the record, not a fresh evaluate().)
-        "closed_autonomously": bool(autonomous_done and state == "done"),
+        # WHO closed it and on what authority, read from the transition record that ``hc.done`` writes
+        # as part of the transition itself. (A re-evaluated contract on an already-``done`` handoff fails
+        # condition 10 by design — the driver may only fire from ``claimed`` — so the record, carrying the
+        # receipt satisfied at transition time, is the evidence, not a fresh evaluate().)
+        "transition": _transitions.summary(collab, hid),
+        # Authoritative "was this a valid autonomous closeout". Previously `autonomous_done_event and
+        # state == "done"`, where the event is emitted best-effort via _emit_safe AFTER the CAS: a
+        # dropped log line silently reported a genuine autonomous close as a human one, and nothing
+        # distinguished a human override from a verified close on the artifact at all. The transition
+        # record is written by the transition, so absence means "not autonomous" rather than "lost".
+        "closed_autonomously": bool(
+            _transitions.is_autonomous(_transitions.read(collab, hid)) and state == "done"
+        ),
     }
 
 
@@ -179,6 +185,19 @@ def render_markdown(summary: dict) -> str:
         L.append(f"*{s['title']}*")
     L.append("")
     L.append(f"- **Final state:** `{s['final_state']}`")
+    # Lead with HOW it closed. "Closed autonomously: no" is not the same statement as "a human
+    # overrode the gate, and here is who and why" — the second is the one a reader needs.
+    tr = s.get("transition") or {}
+    L.append(f"- **Closed by:** **{tr.get('label') or _transitions.LABEL_UNRECORDED}**")
+    if tr.get("human_override"):
+        L.append(f"  - actor: `{tr.get('actor') or '—'}` · at `{tr.get('ts') or '—'}`")
+        L.append(f"  - override reason: *{tr.get('reason') or '—'}*")
+        L.append("  - ⚠ no authoritative verification receipt backs this closure")
+    elif tr.get("autonomous"):
+        L.append(
+            f"  - reviewer: `{tr.get('actor') or '—'}` · at `{tr.get('ts') or '—'}` · "
+            f"receipt `{(tr.get('receipt') or '')[:12]}`"
+        )
     L.append(f"- **Closed autonomously:** **{_yn(s['closed_autonomously'])}**")
     L.append(f"- **Done-contract (re-evaluated now):** {_yn(dc['satisfied'])}  (hash `{dc['hash'][:12]}`)")
     L.append(f"- **Autonomous_done event:** {_yn(s['autonomous_done_event'])}")

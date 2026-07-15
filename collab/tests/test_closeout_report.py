@@ -20,7 +20,12 @@ import gate_runner as gr  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
 import lanes  # noqa: E402
+import transitions as tr  # noqa: E402
 import verification as _vfy  # noqa: E402
+
+# One definition of "the record shape condition 5 accepts" and "a real git checkout", shared with the
+# done-contract suite that owns them.
+from test_done_contract import git_checkout, green_record  # noqa: E402
 
 
 def _preflight(base, seat="reviewer"):
@@ -49,6 +54,7 @@ def _setup(tmp_path, *, drift=False, tests_passed=True):
     base = Path(collab)
     (base / "src").mkdir(parents=True, exist_ok=True)
     (base / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
+    git_checkout(base)  # condition 5 needs a real repo root + HEAD; None is no longer a match
     ledger = {
         "hid": "001",
         "generated_ts": ap._now_utc(),
@@ -58,15 +64,9 @@ def _setup(tmp_path, *, drift=False, tests_passed=True):
         "source_base": str(base),
         "source_manifest": gr.source_manifest(["src/*.py"], base),
         # An authoritative verification record; ``tests_passed=False`` models the gate failing.
-        "tests": {
-            "kind": "authoritative", "authoritative": True, "passed": tests_passed,
-            "exit_code": 0 if tests_passed else 1, "checkout_stable": True,
-            "label": "GREEN — scripts/verify.py exit 0" if tests_passed
-                     else "FAIL — scripts/verify.py did not exit 0",
-            "command": ["uv", "run", "--locked", "python", "scripts/verify.py"],
-            **{f"{end}_{k}": _vfy._checkout_state(base)[k]
-               for end in ("start", "end") for k in ("sha", "status")},
-            "started_ts": "2026-07-15T11:19:18Z", "ended_ts": "2026-07-15T11:20:18Z", "run_id": "t",
+        "tests": green_record(base) if tests_passed else {
+            **green_record(base), "passed": False, "exit_code": 1,
+            "label": _vfy.LABEL_AUTHORITATIVE_FAIL,
         },
         "reviewer_preflight": _preflight(base),
         "lanes": [],
@@ -103,7 +103,8 @@ class TestCollect:
 
     def test_detects_autonomous_done_event(self, tmp_path):
         collab = _setup(tmp_path)
-        hc.done(collab, "001")  # advance to done (as the driver would)
+        # advance to done exactly as the driver would: autonomous, carrying its contract-hash receipt
+        hc.done(collab, "001", kind=tr.KIND_AUTONOMOUS, actor="reviewer", receipt="h" * 64)
         he.on_autonomous_done(
             str(Path(collab) / "logs" / "events.jsonl"),
             "rid",

@@ -437,17 +437,50 @@ def _slice(collab, *, to="builder", from_="reviewer", guardrails=None):
 
 
 def _closeout(collab, tmp_path, *, ok=True):
-    """``verify_command`` is the repo's AUTHORITATIVE whole-checkout gate — the only evidence that can
-    close a handoff (done-contract condition 5). ``test_path`` alone is a PARTIAL result and cannot;
-    see collab/tests/test_verification.py."""
+    """Closeout config + a REAL authoritative gate discoverable under ``source_base``.
+
+    There is no ``verify_command`` any more: the gate is discovered (``scripts/verify.py``) and its argv
+    is fixed (``verification.AUTHORITATIVE_ARGV``), because an operator-configurable gate is not a gate.
+    ``load_closeout`` now raises if seats.json still carries the key. ``test_path`` alone is a PARTIAL
+    result and cannot close a handoff; see collab/tests/test_verification.py.
+
+    So the source under review has to be a genuine uv project + git checkout, exactly as the driver will
+    find in a real repo. ``ok=False`` makes the gate exit 1 — the red-checkout case.
+    """
+    _gate_repo(Path(collab), ok=ok)
     return {
         "breaker": "grok",
         "verifier": "gemini",
         "source_base": collab,
         "source_roots": ["src/*.py"],
         "test_path": str(_tiny_test(tmp_path, ok=ok)),
-        "verify_command": [sys.executable, "-c", f"import sys; sys.exit({0 if ok else 1})"],
     }
+
+
+def _gate_repo(base: Path, *, ok: bool) -> None:
+    """Make ``base`` a uv project + git checkout carrying an authoritative gate that exits 0/1.
+
+    Everything but ``.gitignore`` is ignored so ``git status`` stays empty: these tests keep writing into
+    the same directory they treat as the source under review (ledgers, handoffs, the verifier's .venv),
+    and condition 5 pins the receipt to the tree's status. Autonomous closure also needs a resolvable
+    repo root and a real HEAD — ``None == None`` no longer counts as a SHA match.
+    """
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "scripts").mkdir(parents=True, exist_ok=True)
+    (base / "scripts" / "verify.py").write_text(
+        f"import sys; sys.exit({0 if ok else 1})\n", encoding="utf-8"
+    )
+    (base / "pyproject.toml").write_text(
+        '[project]\nname = "t"\nversion = "0.0.0"\nrequires-python = ">=3.12"\n', encoding="utf-8"
+    )
+    (base / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
+    subprocess.run(["uv", "lock"], cwd=str(base), capture_output=True)
+    for argv in (
+        ["init", "-q"],
+        ["add", "-f", ".gitignore"],
+        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "t"],
+    ):
+        subprocess.run(["git", *argv], cwd=str(base), capture_output=True)
 
 
 def _home_with(home, closeout, seats):

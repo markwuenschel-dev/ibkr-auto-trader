@@ -22,6 +22,7 @@ sys.path.insert(0, str(_LIB))
 
 import contracts  # noqa: E402
 import handoff_core as hc  # noqa: E402
+import transitions as tr  # noqa: E402
 
 
 def _mk(title, collab):
@@ -72,7 +73,8 @@ class TestCreateAndLifecycle:
             hid = r["id"]
             assert hc.claim(d, hid)["to"] == "claimed"
             assert [h["state"] for h in hc.list_handoffs(d)] == ["claimed"]
-            assert hc.done(d, hid)["to"] == "done"
+            done = hc.done(d, hid, kind=tr.KIND_AUTONOMOUS, actor="reviewer", receipt="h" * 64)
+            assert done["to"] == "done"
             assert hc.archive(d, hid)["to"] == "archive"
             assert hc.list_handoffs(d, "archive")[0]["id"] == hid
 
@@ -246,7 +248,7 @@ class TestAdversarialFixes:
         with tempfile.TemporaryDirectory() as d:
             hc.create(d, to="reviewer", from_="builder", title="mirror")
             hc.claim(d, "001")
-            hc.done(d, "001")
+            hc.done(d, "001", kind=tr.KIND_AUTONOMOUS, actor="reviewer", receipt="h" * 64)
             assert hc.state_of(d, "001") == "done"  # authoritative, from the directory
             obj = contracts.parse_handoff(hc._find(d, "001")[1])
             assert obj["frontmatter"]["status"] == "pending"  # birth status, by contract

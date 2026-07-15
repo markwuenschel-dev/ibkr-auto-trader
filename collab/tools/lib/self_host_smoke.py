@@ -39,6 +39,7 @@ import done_contract as dcon  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
 import lanes  # noqa: E402
+import transitions as _transitions  # noqa: E402
 
 EXIT_OK, EXIT_USAGE = 0, 1
 
@@ -156,6 +157,51 @@ def _write_bundle(collab, hid: str, verdict: dict) -> Path:
     return d
 
 
+def _repo_root(start: Path) -> Path:
+    """The git toplevel above ``start`` — where ``scripts/verify.py`` lives. Falls back to ``start``."""
+    p = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], cwd=str(start), capture_output=True, text=True
+    )
+    top = (p.stdout or "").strip()
+    return Path(top) if p.returncode == 0 and top else start
+
+
+def _seed_disposable_repo(ws: Path, kit: Path, *, ok: bool) -> Path:
+    """Build the disposable slice as a REAL uv project inside a REAL git checkout, and return its root.
+
+    The gate is no longer configurable (``verification.run_authoritative`` runs one canonical argv:
+    ``uv run --locked python scripts/verify.py``), and autonomous closure now requires a resolvable git
+    root with a real commit — ``None == None`` is no longer a SHA match. So the harness cannot fake
+    either any more; it has to provide the genuine article. That is the point: the smoke proves the
+    whole chain, canonical-command check included, rather than a command it talked the gate into
+    accepting.
+
+    Cheap in practice: a zero-dependency ``uv lock`` resolves offline in ~2s and needs no network.
+    """
+    src = ws / "src"
+    (src / "scripts").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(kit / "tools" / "lib" / "closeout_report.py", src / "closeout_report.py")
+    # The synthetic slice's whole-checkout gate. ``--inject test-failure`` = this exits 1.
+    (src / "scripts" / "verify.py").write_text(
+        "import sys\n"
+        f"print('RESULT: {'PASS' if ok else 'FAIL'} (synthetic smoke gate)')\n"
+        f"sys.exit({0 if ok else 1})\n",
+        encoding="utf-8",
+    )
+    (src / "pyproject.toml").write_text(
+        '[project]\nname = "collab-smoke-slice"\nversion = "0.0.0"\nrequires-python = ">=3.12"\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["uv", "lock"], cwd=str(src), capture_output=True)  # commit a lock: --locked needs one
+    for argv in (
+        ["init", "-q"],
+        ["add", "-A"],
+        ["-c", "user.email=smoke@collab", "-c", "user.name=smoke", "commit", "-qm", "smoke slice"],
+    ):
+        subprocess.run(["git", *argv], cwd=str(src), capture_output=True)
+    return src
+
+
 def run_smoke(*, inject: str = "clean", workspace=None, real: bool = False, collab=None) -> dict:
     """Run one disposable autonomous-closeout scenario end-to-end and return an auditable result dict."""
     if inject not in SCENARIOS:
@@ -169,19 +215,17 @@ def run_smoke(*, inject: str = "clean", workspace=None, real: bool = False, coll
     home.mkdir(parents=True, exist_ok=True)
 
     # --- seed the slice under review + the test evidence target ---
-    if real:  # review the LIVE repo source + run the real suite (manual proof, not CI)
-        src_base = kit
-        source_roots = ["tools/lib/closeout_report.py"]
+    if real:  # review the LIVE repo source + run the real gate (manual proof, slow, not CI)
+        # The REPO root, not the kit root: the authoritative gate is `scripts/verify.py`, which lives at
+        # the repo root, and `verification.run_authoritative` will run nothing else.
+        src_base = _repo_root(kit)
+        source_roots = ["collab/tools/lib/closeout_report.py"]
         test_file = kit / "tests" / "test_closeout_report.py"
     else:  # disposable: the shipped feature's bytes are the source under review
-        src_base = ws / "src"
-        src_base.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(kit / "tools" / "lib" / "closeout_report.py", src_base / "closeout_report.py")
+        src_base = _seed_disposable_repo(ws, kit, ok=inject != "test-failure")
         source_roots = ["*.py"]
-        ok = inject != "test-failure"
         test_file = ws / "test_slice.py"
-        test_file.write_text(f"def test_slice():\n    assert {ok!s}\n", encoding="utf-8")
-        subprocess.run(["git", "init"], cwd=str(ws), capture_output=True)  # preflight git needs a repo
+        test_file.write_text("def test_slice():\n    assert True\n", encoding="utf-8")
 
     # --- create + claim the real handoff ---
     builder = "reviewer" if inject == "self-approval" else "builder"  # self-approval: from == reviewer
@@ -196,11 +240,11 @@ def run_smoke(*, inject: str = "clean", workspace=None, real: bool = False, coll
         "source_base": str(src_base),
         "source_roots": source_roots,
         "test_path": str(test_file),
-        # This synthetic slice's authoritative whole-checkout gate. done_contract condition 5 closes
-        # only on an authoritative exit 0 -- ``test_path`` alone is a PARTIAL result and cannot close
-        # a handoff (see collab/tests/test_verification.py). ``--inject test-failure`` makes this
-        # command exit non-zero, which is what must keep the handoff ``claimed``.
-        "verify_command": [sys.executable, "-m", "pytest", str(test_file), "-q"],
+        # NO ``verify_command``. The authoritative gate is not configurable: the driver discovers
+        # ``scripts/verify.py`` under source_base and runs the one canonical argv
+        # (``verification.AUTHORITATIVE_ARGV``). The disposable workspace is a real uv project + git
+        # checkout precisely so that command genuinely runs here -- ``--inject test-failure`` makes its
+        # verify.py exit non-zero, which is what must keep the handoff ``claimed``.
     }
     runner = _scripted_runner(inject)
     log = ap._log_default(collab_p)
@@ -215,7 +259,15 @@ def run_smoke(*, inject: str = "clean", workspace=None, real: bool = False, coll
         corrupt()
     verdict = dcon.evaluate(collab_p, hid, seats=seats, reviewer_seat="reviewer", builder_seat=builder)
     if verdict["satisfied"]:
-        hc.done(collab_p, hid)  # the transition is caused ONLY by a satisfied verdict
+        # The transition is caused ONLY by a satisfied verdict, and is recorded as autonomous with the
+        # contract hash as its receipt — the same call the driver makes.
+        hc.done(
+            collab_p,
+            hid,
+            kind=_transitions.KIND_AUTONOMOUS,
+            actor="reviewer",
+            receipt=verdict["hash"],
+        )
         ap._emit_safe(
             he.on_autonomous_done,
             log,

@@ -99,3 +99,77 @@ def test_decimal_limits_are_still_accepted() -> None:
 
     assert policy.session_drawdown_pct == Decimal("0.30")
     assert policy.stop_loss_required is False
+
+
+def test_defaults_still_construct_and_stay_decimal() -> None:
+    """Strict must not break the reviewed defaults — they are the values that ship."""
+    policy = RiskPolicy()
+
+    assert policy.session_drawdown_pct == Decimal("0.10")
+    assert all(isinstance(getattr(policy, f), Decimal) for f in _DECIMAL_LIMIT_FIELDS)
+    assert policy.stop_loss_required is True
+    assert Settings().risk.session_drawdown_pct == Decimal("0.10")
+
+
+# --------------------------------------------------------------------------- #
+# (de)serialization — what this repository ACTUALLY supports.
+#
+# No call site in src/ or tests/ constructs a RiskPolicy from JSON or dumps one:
+# `RiskPolicy(...)` appears only in config.py's own default and in tests, and a
+# search of src/+tests/ for model_validate/model_dump/parse_raw found nothing.
+# These pin the boundary anyway, because "there is no loader today" is a fact
+# about today, and the next person to add one needs the contract already nailed
+# down rather than discovered by a mis-set limit in production.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_dumped_policy_round_trips_exactly() -> None:
+    policy = RiskPolicy(session_drawdown_pct=Decimal("0.30"))
+
+    restored = RiskPolicy.model_validate_json(policy.model_dump_json())
+
+    assert restored == policy
+    assert restored.session_drawdown_pct == Decimal("0.30")
+
+
+def test_decimals_serialize_as_strings_not_json_floats() -> None:
+    """The dump must not go through a binary float — that would defeat the whole point."""
+    dumped = RiskPolicy(session_drawdown_pct=Decimal("0.30")).model_dump_json()
+
+    assert '"session_drawdown_pct":"0.30"' in dumped
+    assert '"stop_loss_required":true' in dumped
+    assert isinstance(RiskPolicy().model_dump()["session_drawdown_pct"], Decimal)
+
+
+def test_python_mode_validation_rejects_a_float_like_the_constructor_does() -> None:
+    """A dict from a stdlib loader is the realistic ingress shape, and strict refuses it.
+
+    ``json.loads`` yields Python ``float``s, so ``RiskPolicy(**json.loads(...))`` was the path by which
+    an imprecise limit could have entered. It is now rejected rather than coerced.
+    """
+    with pytest.raises(ValidationError):
+        RiskPolicy.model_validate({"session_drawdown_pct": 0.1 + 0.2})
+
+    assert RiskPolicy.model_validate(
+        {"session_drawdown_pct": Decimal("0.30")}
+    ).session_drawdown_pct == Decimal("0.30")
+
+
+def test_json_numbers_are_parsed_from_text_and_never_via_a_binary_float() -> None:
+    """Strict does NOT reject a JSON number — and does not need to.
+
+    JSON has no Decimal type, so pydantic's strict JSON mode still accepts a number here. That is safe,
+    and worth pinning so nobody "fixes" it: pydantic-core reads the literal TEXT into the Decimal, so
+    ``0.3`` yields ``Decimal("0.3")`` exactly — a float round-trip (which is what produced
+    ``0.30000000000000004``) never happens on this path. What you wrote is what you get.
+    """
+    for literal in ("0.3", "0.30", "0.1", "0.30000000000000004"):
+        parsed = RiskPolicy.model_validate_json(
+            f'{{"session_drawdown_pct": {literal}}}'
+        ).session_drawdown_pct
+        assert parsed == Decimal(literal), f"{literal} must survive as its own exact value"
+
+    # the flag stays strict on the JSON path too: an int is not a bool
+    with pytest.raises(ValidationError):
+        RiskPolicy.model_validate_json('{"stop_loss_required": 0}')
+    assert RiskPolicy.model_validate_json('{"stop_loss_required": true}').stop_loss_required is True

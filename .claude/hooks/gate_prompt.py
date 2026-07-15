@@ -13,6 +13,7 @@ stdlib only, per the repo's zero-third-party-Python tenet (collab-kit-architectu
 
 import json
 import sys
+from contextlib import suppress
 
 GATES = """\
 === GATES FOR THIS REPO (refusal conditions, not preferences) ===
@@ -67,10 +68,8 @@ G6  THE DELIVERABLE IS THE THING, NOT A DESCRIPTION OF THE THING. A diagnosis is
 
 
 def main() -> int:
-    try:
+    with suppress(Exception):  # Inject the gates regardless of payload shape.
         json.loads(sys.stdin.read())
-    except Exception:
-        pass  # Inject the gates regardless of payload shape.
 
     print(
         json.dumps(

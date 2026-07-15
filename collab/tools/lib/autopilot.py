@@ -55,6 +55,8 @@ import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
 import operator_requests as opreq  # noqa: E402
 import run_budget as rb  # noqa: E402
+import transitions as _transitions  # noqa: E402
+from verification import AUTHORITATIVE_ARGV as _AUTHORITATIVE_ARGV  # noqa: E402
 
 
 def _load_local(alias: str, filename: str):
@@ -580,26 +582,47 @@ def load_closeout(home) -> dict | None:
     test config for the auto-lane closeout. ``None`` disables it (sign-off then needs a manually-built
     ledger). Keys: ``breaker``, ``verifier`` (seat names), ``source_base`` (default: kit root),
     ``source_roots`` (globs), ``test_path`` (pytest target -- a PARTIAL result that cannot close a
-    handoff on its own), ``verify_command`` (argv list: the repo's authoritative whole-checkout gate;
-    the only evidence ``done_contract`` condition 5 accepts. Defaults to ``scripts/verify.py`` when
-    the repo under review has one)."""
+    handoff on its own).
+
+    ``verify_command`` is REJECTED, loudly, at load. It used to declare "the repo's authoritative
+    whole-checkout gate", which meant seats.json could name any command and have its exit code stamped
+    authoritative -- the 2026-07-15 fail-open. The authoritative gate is now discovered
+    (``scripts/verify.py``) and its argv is fixed (``verification.AUTHORITATIVE_ARGV``). Raising beats
+    ignoring: a silently-dropped key leaves an operator believing their gate is configured and running
+    when it is neither."""
     try:
         doc = json.loads(_seats_file(home).read_text("utf-8"))
     except OSError, ValueError, cc.CollabError:
         return None
     c = doc.get("closeout") if isinstance(doc, dict) else None
-    return c if isinstance(c, dict) else None
+    if not isinstance(c, dict):
+        return None
+    if "verify_command" in c:
+        raise cc.CollabError(
+            "closeout.verify_command is no longer honoured and must be removed from seats.json: the "
+            "authoritative gate is not operator-configurable. Any command exiting 0 was previously "
+            "stamped 'GREEN — scripts/verify.py exit 0'. The gate is discovered (scripts/verify.py) "
+            f"and its argv is fixed: {' '.join(_AUTHORITATIVE_ARGV)}"
+        )
+    return c
 
 
-def _run_test_suite(test_path, cwd, verify_command=None) -> dict:
+def _run_test_suite(test_path, cwd) -> dict:
     """Capture verification evidence as a real subprocess ([C38]-style boundary); return the ledger
     ``tests`` record.
 
-    Prefers the AUTHORITATIVE whole-checkout gate, in order: ``closeout.verify_command`` from
-    seats.json, else ``scripts/verify.py`` if the repo under review has one. Falls back to a
-    pytest-only run, recorded as an explicitly PARTIAL result -- ``done_contract`` condition 5
-    refuses to close on it, so a repo with no configured gate cannot autonomously close. Fail-closed
-    is the point: an unconfigured gate must not look like a passing one.
+    The AUTHORITATIVE gate is DISCOVERED, never configured: if the tree under review has
+    ``scripts/verify.py``, run the one canonical argv (``verification.AUTHORITATIVE_ARGV``). Otherwise
+    fall back to a pytest-only run, recorded as an explicitly PARTIAL result -- ``done_contract``
+    condition 5 refuses to close on it, so a repo with no discoverable gate cannot autonomously close.
+    Fail-closed is the point: an unconfigured gate must not look like a passing one.
+
+    ``closeout.verify_command`` USED to override this and was handed straight to ``subprocess`` with its
+    exit code stamped ``authoritative`` — so any operator-configured command that exited 0 (a wrapper, a
+    narrowed pytest, ``python -c "print('RESULT: PASS')"``) closed handoffs wearing the label
+    "GREEN — scripts/verify.py exit 0". The key is now rejected outright (see :func:`load_closeout`)
+    rather than honoured, because a gate whose identity is configurable by the thing it gates is not a
+    gate. ``verification.run_authoritative`` re-validates the argv regardless.
 
     Before 2026-07-15 this ran pytest and nothing else, and the contract read its bare ``passed``
     boolean as though it attested the checkout. It never did: lint and type failures were invisible
@@ -609,12 +632,10 @@ def _run_test_suite(test_path, cwd, verify_command=None) -> dict:
     import verification as _v  # lazy: keep module import cost off the driver's hot path
 
     base = str(cwd) if cwd else None
-    if verify_command:
-        return _v.run_authoritative(base, verify_command)
     if base and _v.verify_script_present(base):
         return _v.run_authoritative(base)
     if not test_path:
-        return _v.unverified("no verify_command, no scripts/verify.py, no test_path")
+        return _v.unverified("no scripts/verify.py under review, and no test_path")
     return _v.run_pytest_only(test_path, base, python=sys.executable)
 
 
@@ -668,7 +689,7 @@ def _autoclose_ledger(collab, hid, builder_seat, closeout, *, seats, runner, log
     base = closeout.get("source_base") or str(cc.resolve_kit_root())
     roots = closeout.get("source_roots") or ["**/*.py"]
     test_path = closeout.get("test_path")
-    tests = _run_test_suite(test_path, base, closeout.get("verify_command"))
+    tests = _run_test_suite(test_path, base)
     return _lanes.run_lanes(
         collab,
         hid,
@@ -955,7 +976,7 @@ def _assess_candidate(
             "incomplete": {"reason": "budget", "which": e.which},
         }
     base = closeout or {}
-    tests = _run_test_suite(test_path, source_base, base.get("verify_command"))
+    tests = _run_test_suite(test_path, source_base)
 
     def _review():
         return _dispatch_seat(
@@ -1657,7 +1678,18 @@ def _drive_candidate(
         if outcome == ca.APPROVED:
             verdict = _dc_evaluate(collab, root, seats, reviewer_seat, builder_seat, cid)
             if verdict["satisfied"]:
-                hc.done(collab, root)  # the ONLY claimed->done transition ([C36]): approved + contract clean
+                # The ONLY AUTONOMOUS claimed->done transition ([C36]): approved + contract clean. Human
+                # override paths exist (dashboard_core.advance_handoff, handoff_cli.cmd_done) and reach
+                # the same CAS; they are distinguished by the persisted transition KIND, never by which
+                # function was called. The contract hash is the receipt: it names the exact evidence.
+                hc.done(
+                    collab,
+                    root,
+                    kind=_transitions.KIND_AUTONOMOUS,
+                    actor=reviewer_seat,
+                    receipt=verdict["hash"],
+                    candidate_id=cid,
+                )
                 _emit_safe(
                     he.on_autonomous_done,
                     log,
