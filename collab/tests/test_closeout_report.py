@@ -69,7 +69,10 @@ def _setup(tmp_path, *, drift=False, tests_passed=True):
             "label": _vfy.LABEL_AUTHORITATIVE_FAIL,
         },
         "reviewer_preflight": _preflight(base),
-        "lanes": [],
+        # A v2 ledger owns its RESOLVED plan; condition 3 refuses a close without one (ADR-0005).
+        "verification_plan": {"passes": [{"id": "baseline"}]},
+        "verification_plan_digest": "plan:test-digest",
+        "lanes": [{"pass": "baseline", "ran": True, "confirmed": [], "refuted": []}],
         "blockers": [],
         "accepted_residuals": [],
     }

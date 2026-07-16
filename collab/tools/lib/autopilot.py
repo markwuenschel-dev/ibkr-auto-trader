@@ -332,23 +332,44 @@ def load_models(home) -> dict:
 def _resolve_assurance_plan(home, guardrails):
     """Resolve the v2 assurance policy once, before candidate identity and dispatch.
 
-    Legacy test fixtures and existing local catalogs without ``assessment_profiles`` deliberately
-    retain the old runner until their operator migrates from ``seats.example.json``.  A catalog that
-    opts into profiles, however, is fail-closed: malformed profiles never silently downgrade to the
-    legacy generic fan-out.
+    Autonomous closeout REQUIRES a valid v2 catalog (ADR-0005): ``version: 2``, per-seat
+    ``role``/``access`` declarations, ``assessment_profile_revision``, and both assessment profiles.
+    There is NO legacy fallback. A v1/missing catalog raises here — before any builder dispatch — and
+    the caller escalates ``infrastructure_blocked``.
+
+    Returning ``None`` for an unmigrated catalog is what previously let the whole risk-tiered
+    machinery sit inert while runs took the generic fan-out: a text-only adapter occupied an
+    assessment seat (``_require_assessment_executor`` never ran) and candidates closed with no
+    resolved plan in the ledger. Silence was indistinguishable from safety, so it fails loudly now.
+
+    ``lanes.run_lanes`` remains available for direct/manual use; it just cannot reach autonomous done.
     """
+    path = _seats_file(home)
+    _migrate = "migrate from seats.example.json (see SEATS.md)"
     try:
-        raw = _seats_file(home).read_text("utf-8")
-    except FileNotFoundError:
-        return None
+        raw = path.read_text("utf-8")
+    except FileNotFoundError as exc:
+        raise cc.CollabError(
+            f"autonomous closeout requires a v2 assurance catalog at {path}; none exists — {_migrate}"
+        ) from exc
     except OSError as exc:
         raise cc.CollabError(f"cannot read assurance seats configuration: {exc}") from exc
     try:
         doc = json.loads(raw)
     except ValueError as exc:
         raise cc.CollabError(f"cannot parse assurance seats configuration: {exc}") from exc
-    if not isinstance(doc, dict) or "assessment_profiles" not in doc:
-        return None
+    if not isinstance(doc, dict):
+        raise cc.CollabError(f"assurance seats configuration at {path} must be a JSON object — {_migrate}")
+    if doc.get("version") != 2:
+        raise cc.CollabError(
+            f"autonomous closeout requires a v2 assurance catalog: {path} declares "
+            f"version={doc.get('version')!r}, expected 2 — {_migrate}"
+        )
+    if "assessment_profiles" not in doc:
+        raise cc.CollabError(
+            f"autonomous closeout requires 'assessment_profiles' (baseline + high-risk-diverse) "
+            f"in {path} — {_migrate}"
+        )
     try:
         import verification_plan as vp
 
@@ -679,11 +700,17 @@ def _capture_preflight(base, test_path, reviewer_seat, manifest) -> dict:
     }
 
 
-def _autoclose_ledger(collab, hid, builder_seat, closeout, *, seats, runner, log, reviewer_seat=None):
+def _autoclose_ledger(
+    collab, hid, builder_seat, closeout, *, seats, runner, log, reviewer_seat=None, verification_plan=None
+):
     """Build the verification ledger for a sign-off attempt: run the test suite, then the adversarial lanes
     (breaker -> independent verifier) for the handoff's risk class. Reuses :func:`lanes.run_lanes`, which
     captures the reviewer repo-preflight (condition 11) and writes
-    ``<collab>/autopilot/verification/<hid>.ledger.json`` that the done-contract then reads."""
+    ``<collab>/autopilot/verification/<hid>.ledger.json`` that the done-contract then reads.
+
+    ``verification_plan`` binds the resolved v2 assurance plan into the ledger. Without it the ledger is
+    legacy-shaped and done-contract condition 3 refuses the close (ADR-0005), so any caller that wants a
+    reachable autonomous done must resolve a plan first."""
     import lanes as _lanes  # lazy: lanes imports autopilot; autopilot must not import lanes at module top
 
     base = closeout.get("source_base") or str(cc.resolve_kit_root())
@@ -704,6 +731,7 @@ def _autoclose_ledger(collab, hid, builder_seat, closeout, *, seats, runner, log
         tests=tests,
         runner=runner,
         log=log,
+        verification_plan=verification_plan,
     )
 
 

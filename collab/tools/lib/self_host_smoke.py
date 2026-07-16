@@ -74,25 +74,47 @@ def _seats() -> dict:
     }
 
 
+def _resolve_plan() -> object:
+    """Resolve the real v2 assurance plan from the CHECKED-IN example catalog (ADR-0004/ADR-0005).
+
+    Autonomous done now requires a bound plan in the ledger, so this harness must resolve one exactly
+    as the driver does — otherwise ``clean`` could never reach done and the smoke would prove nothing.
+    """
+    import verification_plan as vp
+
+    kit = cc.resolve_kit_root()
+    lanes_doc = json.loads((Path(kit) / "telemetry" / "lanes.json").read_text("utf-8"))
+    seats_doc = json.loads((Path(kit) / "seats.example.json").read_text("utf-8"))
+    return vp.resolve_verification_plan(lanes_doc, seats_doc, guardrails=GUARDRAILS)
+
+
 def _scripted_runner(inject: str):
-    """A deterministic fake agent (no network), routed by the seat's cmd[0]. The breaker/verifier drive the
-    lanes; ``confirmed-finding`` makes the breaker report a defect the verifier CONFIRMS."""
+    """A deterministic fake agent (no network). The reviewer/builder are routed by the seat's cmd[0];
+    the resolved v2 lane pairs are routed by MODEL, since both executors are the same claude CLI.
+    ``confirmed-finding`` makes the breaker report a defect the verifier CONFIRMS."""
+
+    # The example catalog's baseline pair is opus-4.8 -> sonnet-5; its high-risk pair (data-integrity
+    # is a high-risk guardrail) is gpt-5.6-luna -> grok-4.5. Breakers/verifiers speak the bounded batch
+    # protocol (ADR-0004 D3): 'FINDING: F<n> | path | trigger | impact' and one verdict per finding id.
+    _BREAKERS = ("opus-4.8", "gpt-5.6-luna")
+    _VERIFIERS = ("sonnet-5", "grok-4.5")
 
     def run(cmd, prompt, *, timeout, **kw):
         who = cmd[0]
+        argv = " ".join(cmd)
         if "reviewer" in who:
             return "Reviewed against source; inspected closeout_report.py.\n[[SIGNOFF]]"
-        if "grok" in who or "breaker" in who:
+        if any(model in argv for model in _BREAKERS) or "breaker" in who:
             return (
-                "FINDING: closeout_report.collect -> a crafted ledger yields a wrong verdict"
+                "FINDING: F1 | closeout_report.collect | a crafted ledger | yields a wrong verdict"
                 if inject == "confirmed-finding"
                 else "NO-FINDING"
             )
-        if "gemini" in who or "verifier" in who:
+        if any(model in argv for model in _VERIFIERS) or "verifier" in who:
             return (
-                "VERDICT: CONFIRMED closeout_report.collect crafted-ledger trigger reproduces"
+                "VERDICT: CONFIRMED F1 | crafted-ledger trigger reproduces"
                 if inject == "confirmed-finding"
-                else "VERDICT: REFUTED"
+                else "VERDICT: REFUTED F1"
             )
         return "ok"
 
@@ -252,7 +274,15 @@ def run_smoke(*, inject: str = "clean", workspace=None, real: bool = False, coll
     # --- the genuine closeout decision (the same primitives the driver's run_round uses) ---
     if inject != "missing-ledger":
         ap._autoclose_ledger(
-            collab_p, hid, builder, closeout, seats=seats, runner=runner, log=log, reviewer_seat="reviewer"
+            collab_p,
+            hid,
+            builder,
+            closeout,
+            seats=seats,
+            runner=runner,
+            log=log,
+            reviewer_seat="reviewer",
+            verification_plan=_resolve_plan(),  # ADR-0005: no bound plan -> condition 3 refuses the close
         )
     corrupt = _corruptor(inject, collab_p, hid, src_base)
     if corrupt:

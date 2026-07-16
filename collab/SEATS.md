@@ -2,6 +2,17 @@
 
 Copy [seats.example.json](./seats.example.json) to your local seats.json, set only local paths and credentials, then restart the driver. The config has exactly four logical roles:
 
+> **A v2 catalog is required for autonomous closeout (ADR-0005).** The driver refuses to dispatch any
+> seat unless your local seats.json declares `version: 2`, per-seat `role`/`access`, an
+> `assessment_profile_revision`, and both assessment profiles. A v1 or missing catalog is not a
+> silent downgrade to the old generic fan-out any more — it is an `infrastructure_blocked` pause
+> raised *before* the first model call, naming the migration.
+>
+> This is deliberate. While the fallback existed the entire risk-tiered machinery sat inert: nothing
+> validated seats, so a **text-only adapter could occupy the verifier seat**, and candidates closed
+> with no resolved plan bound into their ledger. "Unmigrated" was indistinguishable from "configured".
+> `lanes.run_lanes` is still available for direct/manual use; it just cannot reach autonomous done.
+
 | Seat | Access | What it may do |
 |---|---|---|
 | builder | write | edit source and run allow-listed checks |
@@ -33,6 +44,8 @@ The resolver creates one immutable plan per candidate:
 - A breaker returns at most three findings in the form FINDING: F<n> | path | trigger | impact. One verifier call must return exactly one verdict per finding id. Malformed or missing output is verification_incomplete.
 
 The candidate id includes the resolved plan, prompt revision, reviewer profile, selected profiles, and policy fingerprints. The immutable ledger records the plan digest and actual reviewer seat. The dashboard lane panel shows pass/profile badges without creating any extra role card.
+
+Done-contract condition 3 (`lanes-ran`) requires the resolved plan to be **present and bound** in the ledger, not merely that its passes ran. A legacy ledger carries no plan, so required passes would fall back to whatever the *current* config happens to say — which for a candidate with no guardrails is zero required passes, i.e. the condition passing vacuously. Evidence must be attributable to the plan that produced it.
 
 ## Budget and safety
 

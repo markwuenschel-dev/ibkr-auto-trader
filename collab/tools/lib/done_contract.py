@@ -175,17 +175,25 @@ def evaluate(
         f"ledger(reviewer={l_reviewer!r},builder={l_builder!r})",
     )
 
-    # 3 — every pass in the immutable resolved plan ran.  A v2 ledger owns
-    # its plan, so a later config edit cannot change what this candidate had to
-    # prove.  Incomplete/tool-error evidence cannot be treated as a clean pass.
+    # 3 — a RESOLVED v2 plan is present AND every pass in it ran.  A v2 ledger owns its plan, so a
+    # later config edit cannot change what this candidate had to prove.  Incomplete/tool-error
+    # evidence cannot be treated as a clean pass.
+    #
+    # The plan's PRESENCE is load-bearing, not decoration (ADR-0005). A legacy ledger carries no
+    # ``verification_plan``, so ``ledger_required_passes`` falls back to mutable current config —
+    # which is how a candidate assessed by the generic fan-out (no seat validation, a text-only
+    # adapter admissible as a verifier) could still satisfy this condition. ``lanes.run_lanes``
+    # remains available for direct/manual use; it just cannot reach autonomous done.
+    plan = ledger.get("verification_plan")
+    plan_ok = isinstance(plan, dict) and bool(ledger.get("verification_plan_digest"))
     required = set(lanes.ledger_required_passes(ledger, cfg))
     ran = lanes.ledger_ran_passes(ledger)
     complete = not bool(ledger.get("incomplete")) and not bool(ledger.get("tool_error"))
     _c(
         3,
         "lanes-ran",
-        required <= ran and complete,
-        f"required={sorted(required)} ran={sorted(ran)} complete={complete}",
+        plan_ok and required <= ran and complete,
+        f"resolved_plan={plan_ok} required={sorted(required)} ran={sorted(ran)} complete={complete}",
     )
 
     # 4 — every confirmed blocker fixed
