@@ -147,10 +147,18 @@ class _Handler(BaseHTTPRequestHandler):
             if self.path == "/api/stop":
                 return self._json(200, dc.set_stop(collab, True, by="dashboard-web"))
             if self.path == "/api/approve":
+                # A HUMAN OVERRIDE, and the API says so. It checks no evidence, so the operator must
+                # name themselves and say why; the route will not invent either on their behalf.
                 hid = str(body.get("hid") or "").strip()
                 if not _HID_RE.fullmatch(hid):
                     return self._json(400, {"error": "bad hid"})
-                return self._json(200, dc.advance_handoff(collab, hid))
+                actor = str(body.get("actor") or "").strip()
+                reason = str(body.get("reason") or "").strip()
+                if not actor:
+                    return self._json(400, {"error": "actor is required for a human override"})
+                if not reason:
+                    return self._json(400, {"error": "reason is required for a human override"})
+                return self._json(200, dc.advance_handoff(collab, hid, actor=actor, reason=reason))
             if self.path == "/api/nudge":
                 hid = str(body.get("hid") or "").strip()
                 if not _HID_RE.fullmatch(hid):
@@ -689,7 +697,16 @@ function startRun(){ const n=parseInt(($("maxturns")||{}).value,10);
   const mr=(Number.isInteger(n)&&n>=1&&n<=50)?n:null;
   if(confirm("Start the autopilot driver against this collab now"+(mr?(" (max rounds "+mr+")"):"")+"?")) ctl("start",mr?{max_rounds:mr}:{}); }
 function doStop(){ if(confirm("Stop the autopilot loop (graceful, reversible)?")) ctl("stop"); }
-function approve(hid){ if(confirm("Approve (advance) "+hid+" to done?")) ctl("approve",{hid}); }
+// A human override, named as one. The old copy said "Approve (advance) ... to done?", which reads like
+// countersigning a verified result; this path checks no evidence at all. Both fields are required by
+// /api/approve, so collect them here rather than let the request 400.
+function approve(hid){
+  const reason=prompt("HUMAN OVERRIDE — "+hid+" will be closed WITHOUT authoritative verification.\n\nWhy are you overriding the gate?");
+  if(!reason||!reason.trim()) return;
+  const actor=prompt("Your name — recorded as the actor on this override:");
+  if(!actor||!actor.trim()) return;
+  ctl("approve",{hid,actor:actor.trim(),reason:reason.trim()});
+}
 function nudge(hid){ if(confirm("Re-queue "+hid+" as a NEW pending handoff?")) ctl("nudge",{hid}); }
 function reopen(hid){ if(confirm("Re-open "+hid+" — send it back to pending so the driver re-runs it (send-back loop retries the defects)?")) ctl("reopen",{hid}); }
 
@@ -917,14 +934,28 @@ function renderHero(s){
     sub.textContent="Start launches a watching driver that claims and runs it. (Re-run sends a stuck handoff back to this queue.)";
   } else if(ph==="capped"){
     const err=st.last_error||""; const hm=err.match(/^(\d{1,9})/); const hid=hm?hm[1]:(st.current_hid||"");
-    const doneIds=new Set(((s.board||{}).done||[]).concat((s.board||{}).archive||[]).map(h=>h.id));
-    if(hid && doneIds.has(hid)){ color="var(--ok)"; eb.textContent="last run"; ti.textContent="Resolved — "+hid+" shipped";
-      sub.textContent="The capped handoff was approved or finished out of band. Loop idle; start a run to continue."; }
+    const doneRows=((s.board||{}).done||[]).concat((s.board||{}).archive||[]);
+    const doneIds=new Set(doneRows.map(h=>h.id));
+    if(hid && doneIds.has(hid)){
+      // "Resolved — shipped" in green was shown for ANY handoff sitting in done/, including one a human
+      // overrode after the gate refused it. That is the capped case, so an override is the LIKELY way it
+      // got here — the one place the green chip must not be reflexive. Split on the recorded kind.
+      const row=doneRows.find(h=>String(h.id)===String(hid))||{};
+      if(row.closed_autonomously){
+        color="var(--ok)"; eb.textContent="last run"; ti.textContent="Resolved — "+hid+" shipped";
+        sub.textContent="Closed on an authoritative verification receipt. Loop idle; start a run to continue.";
+      } else {
+        color="var(--violet)"; eb.textContent="last run · human override";
+        ti.textContent="Closed by hand — "+hid+" was NOT verified";
+        sub.textContent=(row.closed_label||"HUMAN OVERRIDE — closed by a person; NOT authoritatively verified")
+          +(row.closed_actor?(" · by "+row.closed_actor):"")+(row.closed_reason?(" · “"+row.closed_reason+"”"):"");
+      }
+    }
     else{ color="var(--violet)"; eb.textContent="round budget reached · "+(st.round||0)+" / "+(st.max_rounds||0);
       ti.textContent="The gate held. Your call.";
       const blk=(s.lanes||{}).blockers||0; const laneLine=latestLaneLine(s);
       sub.textContent=(hid?("Handoff "+hid+" was not signed off. "):"")+(blk?(blk+" adversarial finding"+(blk===1?"":"s")+" unresolved. "):"")+"Nothing shipped autonomously — exactly as designed."+(laneLine?(" Last lane: "+laneLine+"."):"");
-      if(hid){ const b1=el("button","primary","Approve "+hid+" → done"); b1.onclick=()=>approve(hid); cta.appendChild(b1);
+      if(hid){ const b1=el("button","primary","Human override "+hid+" → done"); b1.onclick=()=>approve(hid); cta.appendChild(b1);
         const b2=el("button","warn ghost","↻ Re-run "+hid); b2.onclick=()=>reopen(hid); cta.appendChild(b2); } }
   } else if(ph==="paused"){ color="var(--warn)"; eb.textContent="held"; ti.textContent="Paused";
     sub.textContent="The loop is frozen and fully reversible. Resume when you're ready.";
@@ -1019,7 +1050,10 @@ function renderLanes(s){
   // live run (scoped by run_uid), so "no lanes" genuinely means there is nothing to show.
   if(!L||!L.lanes||!L.lanes.length){ box.textContent=""; head.textContent=""; card.style.display="none"; return; }
   card.style.display=""; head.textContent="";
-  const tp=el("span","chip "+(L.tests_passed?"ok":"crit"),L.tests_passed?"tests ✓":"tests ✗"); head.appendChild(tp);
+  // Only an AUTHORITATIVE pass earns the green chip. A pytest-only run also reports passed=true;
+  // showing that as "tests ✓" is how a lint/type-broken checkout reads as verified.
+  const tp=el("span","chip "+(L.verification_green?"ok":"crit"),L.verification_label||(L.tests_passed?"tests ✓":"tests ✗"));
+  tp.title=L.verification_label||""; head.appendChild(tp);
   head.appendChild(el("span","chip "+((L.blockers||0)?"crit":""),(L.blockers||0)+" blocker"+((L.blockers||0)===1?"":"s")));
   box.textContent="";
   L.lanes.forEach(ln=>{

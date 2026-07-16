@@ -1,8 +1,12 @@
 name: verify
 
-# Enforces the authoritative local matrix (scripts/verify.py) in CI.
-# It runs the verifier exactly as-is: collab lint (the ~321-finding debt) and
-# broker/integration + Playwright e2e stay excluded, just like locally.
+# Enforces the authoritative matrix (scripts/verify.py) in CI.
+# It runs the verifier exactly as-is and nothing else, so CI scope == local scope.
+# Ruff now gates the WHOLE repo, collab/ included: the "~321-finding debt" this comment
+# used to cite as the reason for excluding it was measured on 2026-07-15 and found to be
+# 5 findings, 4 of them autofixable. The verifier declares its remaining scope gaps in
+# STANDING_OMISSIONS and refuses to print "full local matrix is green" while any exist.
+# Still never invoked here: broker/integration tests, Playwright e2e.
 on:
   pull_request:
   push:

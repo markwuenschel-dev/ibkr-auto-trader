@@ -41,6 +41,8 @@ import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
 import operator_requests as opreq  # noqa: E402
 import registry  # noqa: E402
+import transitions as _transitions  # noqa: E402
+import verification as _verification  # noqa: E402
 import verification_plan as verification_plan  # noqa: E402
 
 _trace = ap._trace  # the by-path-loaded local trace module (stdlib-shadowing safe)
@@ -236,12 +238,19 @@ def run_stats(events: list[dict], *, series_n: int = 40) -> dict:
 
 
 def _row(collab, h: dict) -> dict:
-    """One board row: id/slug/state plus routing (to/from) and age in seconds."""
+    """One board row: id/slug/state plus routing (to/from), age in seconds, and — for a closed
+    handoff — HOW it closed.
+
+    A row in ``done`` says nothing about authority on its own: the file is byte-identical whether the
+    contract closed it or a human clicked through. ``closed_by``/``closed_label`` carry the persisted
+    transition kind so the panel can render a human override as an override.
+    """
     to, frm = ap._to_from(Path(h["path"]))
     try:
         age = round(time.time() - os.path.getmtime(h["path"]), 1)
     except OSError:
         age = None
+    tr = _transitions.read(collab, h["id"]) if h["state"] in ("done", "archive") else None
     return {
         "id": h["id"],
         "slug": h["slug"],
@@ -249,6 +258,11 @@ def _row(collab, h: dict) -> dict:
         "to": to or None,
         "from": frm or None,
         "age_s": age,
+        "closed_by": (tr or {}).get("kind"),
+        "closed_label": _transitions.label_of(tr) if h["state"] in ("done", "archive") else None,
+        "closed_actor": (tr or {}).get("actor"),
+        "closed_reason": (tr or {}).get("reason"),
+        "closed_autonomously": _transitions.is_autonomous(tr),
     }
 
 
@@ -406,7 +420,12 @@ def _latest_lanes(collab, *, run_uid: str | None = None, hid: str | None = None)
         "hid": data.get("hid"),
         "run_uid": data.get("run_uid"),
         "lanes": lanes,
+        # A pytest-only record also carries passed=True. Rendering that as a green "tests ✓" chip is
+        # the same conflation the done-gate made: report the LABEL and the authoritative verdict, so a
+        # partial result cannot read as a full one on the panel.
         "tests_passed": bool((data.get("tests") or {}).get("passed")),
+        "verification_green": _verification.is_green(data.get("tests") or {}),
+        "verification_label": _verification.label_of(data.get("tests") or {}),
         "blockers": len(data.get("blockers") or []),
         "incomplete": bool(data.get("incomplete")),
         "plan_digest": data.get("verification_plan_digest"),
@@ -802,15 +821,20 @@ def narrative_view(collab, hid: str) -> dict:
     return {"id": hid, "state": hc.state_of(collab, hid), "markdown": md}
 
 
-def advance_handoff(collab, hid: str) -> dict:
-    """Human sign-off: advance a handoff to ``done`` and log it.
+def advance_handoff(collab, hid: str, *, actor: str, reason: str) -> dict:
+    """HUMAN OVERRIDE: a person advances a handoff to ``done`` on their own authority.
 
     ``pending`` -> claim then done; ``claimed`` -> done. ``done``/``archive`` are a no-op.
-    Raises :class:`handoff_core.HandoffNotFound` for an unknown id. The transition uses the same
-    atomic core the CLI uses; the ``handoff.done`` event is emitted so this human action lands in the
-    audit stream exactly like ``handoff done`` would ([C15]). This is the HUMAN OVERRIDE path (§18); the
-    driver also reaches ``done/`` autonomously, but only through a satisfied evidence contract
-    (:mod:`done_contract`) — never by self-approval.
+    Raises :class:`handoff_core.HandoffNotFound` for an unknown id.
+
+    This path checks NO evidence — no ledger, no verdict, no verification receipt — and it deliberately
+    stays that way: an operator must be able to close what the machinery cannot. ``actor`` and ``reason``
+    are therefore mandatory, and the transition is persisted as
+    :data:`transitions.KIND_HUMAN`. It is never labelled verified by any surface.
+
+    Note it also auto-claims a ``pending`` handoff, so this can close work that was never built. That is
+    the operator's prerogative and precisely why the override must be legible in the record rather than
+    inferred from a best-effort log line (2026-07-15 audit).
     """
     state = hc.state_of(collab, hid)
     if state is None:
@@ -819,7 +843,7 @@ def advance_handoff(collab, hid: str) -> dict:
         return {"id": hid, "state": state, "changed": False}
     if state == "pending":
         hc.claim(collab, hid)
-    hc.done(collab, hid)
+    hc.done(collab, hid, kind=_transitions.KIND_HUMAN, actor=actor, reason=reason)
     log, rid = ap._log_default(collab), ap._run_id(collab)
     ap._emit_safe(he.on_done, log, rid, hid, span_id=f"{hid}:done", parent_span_id=None)
     ap._emit_safe(
@@ -829,7 +853,11 @@ def advance_handoff(collab, hid: str) -> dict:
         stage="autopilot.control",
         role="human",
         artifact=f"handoff:{hid}",
-        decision={"action": "approve", "reason_codes": ["dashboard:advance"], "confidence": None},
+        decision={
+            "action": "human_override",
+            "reason_codes": ["dashboard:advance", f"by:{actor}", f"reason:{reason[:80]}"],
+            "confidence": None,
+        },
     )
     try:  # attach the human-readable narrative to the handoff too (a human approval is still a closeout)
         import narrative

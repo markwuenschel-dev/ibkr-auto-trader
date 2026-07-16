@@ -21,7 +21,6 @@ def _args(**overrides: bool) -> argparse.Namespace:
         "python_only": False,
         "no_build": False,
         "fail_fast": False,
-        "include_collab_lint": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -91,3 +90,48 @@ def test_narrowed_main_reports_partial_pass(monkeypatch, capsys) -> None:
 
     assert verify.main(["--python-only"]) == 0
     assert "RESULT: PARTIAL PASS" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# scope honesty: "full local matrix is green" is a claim about COVERAGE
+# --------------------------------------------------------------------------- #
+
+
+def test_ruff_gates_the_whole_repo_including_collab() -> None:
+    """Ruff was `check src tests scripts/verify.py`, leaving 62 first-party collab/ files ungated
+    while the run still printed "full local matrix is green". Whole-repo now, and GATING."""
+    plan = verify.build_plan(_args(), resolve=_resolve_with())
+    ruff = next(step for step in plan.steps if step.label == "core:ruff")
+
+    assert ruff.argv == ("uv.exe", "run", "--locked", "ruff", "check", ".")
+    assert ruff.gate is True, "the whole-repo lint must be a required gate, not a debt tracker"
+    assert not any("collab:lint" in step.label for step in plan.steps), "no non-gating lint step"
+
+
+def test_the_full_matrix_claim_is_withheld_while_first_party_code_is_ungated(monkeypatch, capsys) -> None:
+    """The rule: "full matrix" and "first-party code intentionally ungated" may not both be true.
+
+    pyright still does not cover collab/ (372 findings), so that omission is DECLARED and the sentence
+    is withheld. This is the honest half of the trade — the Ruff gap was closed instead.
+    """
+    monkeypatch.setattr(verify, "_resolve", _resolve_with())
+    monkeypatch.setattr(verify, "run", lambda step: (True, 0.0))
+
+    assert verify.STANDING_OMISSIONS, "precondition: something first-party is still ungated"
+    assert verify.main([]) == 0
+
+    out = capsys.readouterr().out
+    assert "RESULT: PASS" in out
+    assert "full local matrix is green" not in out, "must not claim coverage it does not have"
+    assert "NOT a full-matrix claim" in out
+    assert "collab/ type-checking" in out, "the gap must be named, not merely omitted"
+
+
+def test_the_full_matrix_sentence_returns_only_when_nothing_is_ungated(monkeypatch, capsys) -> None:
+    """Emptying STANDING_OMISSIONS is the only way to earn the sentence back."""
+    monkeypatch.setattr(verify, "_resolve", _resolve_with())
+    monkeypatch.setattr(verify, "run", lambda step: (True, 0.0))
+    monkeypatch.setattr(verify, "STANDING_OMISSIONS", ())
+
+    assert verify.main([]) == 0
+    assert "RESULT: PASS (full local matrix is green)" in capsys.readouterr().out

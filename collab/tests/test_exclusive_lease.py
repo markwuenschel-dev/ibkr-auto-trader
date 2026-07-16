@@ -22,6 +22,7 @@ import autopilot as ap  # noqa: E402
 import collab_common as cc  # noqa: E402
 import escalation as esc  # noqa: E402
 import handoff_core as hc  # noqa: E402
+import transitions as tr  # noqa: E402
 
 
 class _Clock:
@@ -241,7 +242,7 @@ class TestOrphanReclaim:
         hid = self._claimed(collab)
         done_hid = hc.create(collab, to="builder", from_="reviewer", title="d", body="y")["id"]
         hc.claim(collab, done_hid)
-        hc.done(collab, done_hid)
+        hc.done(collab, done_hid, kind=tr.KIND_AUTONOMOUS, actor="reviewer", receipt="h" * 64)
         assert ap._reclaim_orphans(collab) == [hid]
         assert ap._reclaim_orphans(collab) == []  # nothing left to reclaim
         assert hc._reconcile(collab, done_hid)[0] == "done"
@@ -272,7 +273,7 @@ class TestTransitionIntoAMissingStateDir:
         done = Path(collab) / "handoffs" / "done"
         if done.exists():
             done.rmdir()
-        hc.done(collab, hid)
+        hc.done(collab, hid, kind=tr.KIND_AUTONOMOUS, actor="reviewer", receipt="h" * 64)
         assert hc._reconcile(collab, hid)[0] == "done"
 
     def test_a_genuine_lost_race_still_reports_as_one(self, tmp_path):

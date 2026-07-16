@@ -23,6 +23,10 @@ import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
 import run_budget as rb  # noqa: E402
 
+# The gate fixture lives with the driver tests: one definition of "a source tree with a real
+# authoritative gate", so both suites exercise the same discovered-and-canonical path.
+from test_autopilot import _gate_repo  # noqa: E402
+
 _BLOCKER = {
     "id": "b1",
     "lane": "clock",
@@ -160,6 +164,9 @@ class TestLoopPolicy:
         Path(p).write_text(txt, "utf-8")
         tiny = tmp_path / "test_tiny.py"
         tiny.write_text("def test_x():\n    assert True\n", encoding="utf-8")
+        # The authoritative whole-checkout gate is DISCOVERED under source_base and its argv is fixed —
+        # no verify_command, which load_closeout now rejects outright. See test_verification.py.
+        _gate_repo(Path(collab), ok=True)
         closeout = {
             "breaker": "grok",
             "verifier": "gemini",

@@ -34,6 +34,7 @@ import contracts  # noqa: E402
 import gate_runner as gr  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import run_budget as rb  # noqa: E402
+import verification as _verification  # noqa: E402
 import verification_plan as vp  # noqa: E402
 
 # Machine-parseable verdict markers (agent stdout is DATA — only these drive control state, [C38]).
@@ -564,7 +565,7 @@ def _run_resolved_plan(
         "reviewer_seat": reviewer_seat,
         "source_base": str(source_base) if source_base else None,
         "source_manifest": manifest,
-        "tests": tests or {"passed": None, "run_id": None},
+        "tests": tests or _verification.unverified("no verification run"),
         "reviewer_preflight": preflight,
         "verification_plan": verification_plan.identity_data(),
         "verification_plan_digest": verification_plan.identity_digest,
@@ -932,7 +933,7 @@ def run_lanes(
         "reviewer_seat": reviewer_seat or verifier_seat,
         "source_base": str(source_base) if source_base else None,
         "source_manifest": manifest,
-        "tests": tests or {"passed": None, "run_id": None},
+        "tests": tests or _verification.unverified("no verification run"),
         "reviewer_preflight": preflight,
         "lanes": results,
         "blockers": blockers,

@@ -333,9 +333,20 @@ _notice_at = [0.0]  # module-level clock for the transient notice (avoids thread
 
 
 def _do_approve(collab, hid: str) -> str:
+    """HUMAN OVERRIDE from the TUI. No evidence is checked, so it is recorded as an override.
+
+    The TUI is a single-keystroke surface with no prompt loop, so it cannot collect a typed reason; it
+    states the one that is actually true — a keypress here, by whoever is at the terminal — rather than
+    inventing a justification. ``handoff done --reason`` and the web dashboard take a real one.
+    """
     try:
-        r = dc.advance_handoff(collab, hid)
-        return f"approved {hid} → {r['state']}" if r.get("changed") else f"{hid} already {r['state']}"
+        r = dc.advance_handoff(
+            collab,
+            hid,
+            actor=os.environ.get("USER") or "tui",
+            reason="human override from the dashboard TUI (no evidence checked)",
+        )
+        return f"HUMAN OVERRIDE {hid} → {r['state']}" if r.get("changed") else f"{hid} already {r['state']}"
     except hc.HandoffNotFound:
         return f"{hid} not found"
     except cc.CollabError as e:

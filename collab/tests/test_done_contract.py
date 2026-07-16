@@ -6,6 +6,7 @@ never transitioning anything. These tests pin each of the ten conditions indepen
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,12 +18,57 @@ import done_contract as dcon  # noqa: E402
 import gate_runner as gr  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
+import verification as _vfy  # noqa: E402
+
+
+def git_checkout(base) -> None:
+    """Make ``base`` a real git checkout with a STABLE ``git status``.
+
+    Condition 5 now requires a resolvable repo root and a non-null HEAD (``None == None`` stopped
+    counting as a SHA match), and it pins the receipt to the tree's status. These tests keep writing
+    into the same directory they treat as the source under review — the ledger itself lands there — so
+    ignoring everything but ``.gitignore`` keeps the porcelain status empty and the receipt pinned no
+    matter what a test writes next. Idempotent: re-running init/commit on an existing repo is a no-op.
+    """
+    base = Path(base)
+    base.mkdir(parents=True, exist_ok=True)
+    (base / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
+    for argv in (
+        ["init", "-q"],
+        ["add", "-f", ".gitignore"],
+        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "t"],
+    ):
+        subprocess.run(["git", *argv], cwd=str(base), capture_output=True)
+
+
+def green_record(base) -> dict:
+    """The ONLY record shape condition 5 accepts: canonical argv, exit 0, bound to ``base``'s checkout."""
+    st = _vfy._checkout_state(base)
+    return {
+        "kind": _vfy.KIND_AUTHORITATIVE,
+        "authoritative": True,
+        "canonical_command": True,
+        "exit_code": 0,
+        "passed": True,
+        "checkout_stable": True,
+        "label": _vfy.LABEL_GREEN,
+        "command": list(_vfy.AUTHORITATIVE_ARGV),
+        "repo_root": st["root"],
+        "start_sha": st["sha"],
+        "end_sha": st["sha"],
+        "start_status": st["status"],
+        "end_status": st["status"],
+        "started_ts": "2026-07-15T11:19:18Z",
+        "ended_ts": "2026-07-15T11:20:18Z",
+        "run_id": "t",
+    }
 
 
 def _setup(tmp_path):
     collab = str(tmp_path / "c")
     hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
     hc.claim(collab, "001")  # -> claimed (condition 10 wants pending|claimed)
+    git_checkout(collab)
     return collab
 
 
@@ -49,6 +95,7 @@ def _ledger(collab, hid="001", **over):
     base = Path(collab)
     (base / "src").mkdir(parents=True, exist_ok=True)
     (base / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
+    git_checkout(base)
     led = {
         "hid": hid,
         "generated_ts": ap._now_utc(),
@@ -57,7 +104,11 @@ def _ledger(collab, hid="001", **over):
         "reviewer_seat": "reviewer",
         "source_base": str(base),
         "source_manifest": gr.source_manifest(["src/*.py"], base),
-        "tests": {"passed": True, "run_id": "t"},
+        # An AUTHORITATIVE green record: canonical argv, exit 0, bound to the checkout under review.
+        # Condition 5 refuses a pytest-only result (the 2026-07-15 regression), a non-canonical command,
+        # a receipt from another checkout, and a tree with no git identity at all. Each is pinned in
+        # collab/tests/test_verification.py.
+        "tests": green_record(base),
         "reviewer_preflight": _preflight(base),
         "lanes": [],
         "blockers": [],

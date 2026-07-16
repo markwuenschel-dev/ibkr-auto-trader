@@ -23,6 +23,7 @@ import collab_common as cc  # noqa: E402
 import dashboard_core as dc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
+import transitions as tr  # noqa: E402
 
 
 def _cli(seat_names):
@@ -225,18 +226,21 @@ class TestSnapshotAndActions:
     def test_advance_handoff_advances_and_logs(self, tmp_path):
         collab = str(tmp_path / "c")
         hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
-        r = dc.advance_handoff(collab, "001")
+        r = dc.advance_handoff(collab, "001", actor="mark", reason="by hand")
         assert r == {"id": "001", "state": "done", "changed": True}
         assert hc.state_of(collab, "001") == "done"
         assert "handoff.done" in _stages(collab)  # the human sign-off is audited
+        # ...and it is recorded as an OVERRIDE, not as a verified close
+        assert tr.read(collab, "001")["kind"] == tr.KIND_HUMAN
+        assert tr.is_autonomous(tr.read(collab, "001")) is False
         # idempotent: approving a done handoff is a no-op, not a crash
-        assert dc.advance_handoff(collab, "001")["changed"] is False
+        assert dc.advance_handoff(collab, "001", actor="mark", reason="by hand")["changed"] is False
 
     def test_advance_missing_handoff_raises(self, tmp_path):
         collab = str(tmp_path / "c")
         hc.create(collab, to="reviewer", from_="builder", title="x", body="y")  # ensure layout exists
         with pytest.raises(hc.HandoffNotFound):
-            dc.advance_handoff(collab, "999")
+            dc.advance_handoff(collab, "999", actor="mark", reason="by hand")
 
     def test_orphan_reclaim_is_the_only_reverse_transition(self, tmp_path):
         # The core was forward-only (claim/done/archive) and `nudge` existed because of it: a stuck
@@ -809,7 +813,7 @@ class TestReopenAndStart:
         collab = str(tmp_path / "c")
         hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
         hc.claim(collab, "001")
-        hc.done(collab, "001")
+        hc.done(collab, "001", kind=tr.KIND_AUTONOMOUS, actor="reviewer", receipt="h" * 64)
         with pytest.raises(hc.HandoffConflict):
             dc.reopen_handoff(collab, "001")  # nothing to retry on a closed handoff
 

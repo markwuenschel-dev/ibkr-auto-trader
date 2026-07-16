@@ -11,6 +11,8 @@ import enum
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from pydantic import ConfigDict
+
 from ibkr_trader.domain.models import _Frozen
 
 
@@ -48,7 +50,36 @@ def submission_allowed(mode: Mode) -> bool:
 
 
 class RiskPolicy(_Frozen):
-    """A reviewed, versioned set of Decimal risk limits."""
+    """A reviewed, versioned set of Decimal risk limits.
+
+    ``strict=True`` is load-bearing, not hygiene. ADR-0003 requires these limits to "convert from
+    ``float`` to ``Decimal`` *before* they participate in any money calculation" (§Decision 5) and
+    "no ``float`` in money arithmetic" (§Testing). Decimal *annotations* do not enforce that: pydantic's
+    default lax mode coerces an inbound ``float`` via ``str()``, so a value carrying binary
+    imprecision is preserved exactly rather than rejected --
+    ``RiskPolicy(session_drawdown_pct=0.1 + 0.2)`` yielded ``Decimal("0.30000000000000004")``, and a
+    session exactly 30% down then failed to trip Control 2. Lax mode likewise accepted
+    ``stop_loss_required=0``, silently disabling the mandatory-stop flag.
+
+    Strict REJECTS float ingress rather than normalising it: no rounding scale is specified anywhere
+    in the ADR or this module, so quantising here would invent a limit the reviewer never approved.
+    A policy is reviewed input -- callers pass ``Decimal`` and nothing else; there is no path where
+    silently rounding someone's money limit is the safe reading.
+
+    What strict costs, measured rather than assumed: ``RiskPolicy(session_drawdown_pct="0.30")`` and
+    ``RiskPolicy(version=1)`` are now rejected too, because strict declines every implicit conversion,
+    not only ``float`` -> ``Decimal``. No caller in this repository passed either. ``model_validate``
+    (Python mode) rejects a ``float`` exactly as the constructor does -- which is the ingress that
+    would have mattered, since ``json.loads`` yields ``float``. ``model_validate_json`` still accepts a
+    JSON number, and that is correct: JSON has no Decimal type, and pydantic-core reads the literal
+    text into the Decimal, so no binary float round-trip occurs on that path. See
+    ``tests/test_config.py``.
+
+    Scoped to this class, not to ``_Frozen``: its eight other subclasses ingest broker payloads whose
+    documented parsing is Decimal-from-string, and widening strictness to them is a separate change.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     version: str = "v1"
     max_risk_per_trade: Decimal = Decimal("0.01")

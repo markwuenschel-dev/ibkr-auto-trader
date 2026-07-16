@@ -192,14 +192,27 @@ def evaluate(
     unfixed = [b.get("id") for b in blockers if not b.get("fixed")]
     _c(4, "blockers-fixed", not unfixed, f"unfixed={unfixed}")
 
-    # 5 — every blocker has a regression AND the recorded test run passed
-    tests_passed = (ledger.get("tests") or {}).get("passed") is True
+    # 5 — every blocker has a regression AND the checkout is AUTHORITATIVELY green.
+    #
+    # ``tests.passed is True`` used to be the whole test here. That boolean can come from a
+    # pytest-only run, which says nothing about lint or types, and the contract read it as though it
+    # attested the checkout (2026-07-15). ``verification.is_green`` is the only reader permitted to
+    # conclude "this checkout passed": it demands scripts/verify.py, exit 0, over a checkout that did
+    # not move mid-run. A pytest-only record cannot satisfy it by construction.
+    # A green receipt from an EARLIER checkout would otherwise replay forever, closing work it never
+    # examined; matches_checkout pins it to the tree on disk now.
+    import verification as _v
+
+    verification = ledger.get("tests") or {}
+    green = _v.is_green(verification)
+    fresh, fresh_detail = _v.matches_checkout(verification, ledger.get("source_base") or ".")
     missing_reg = [b.get("id") for b in blockers if not b.get("regression_test")]
     _c(
         5,
         "blocker-regressions",
-        not missing_reg and tests_passed,
-        f"tests_passed={tests_passed} missing_regressions={missing_reg}",
+        not missing_reg and green and fresh,
+        f"verification={_v.label_of(verification)} green={green} "
+        f"checkout={fresh_detail} missing_regressions={missing_reg}",
     )
 
     # 6 — accepted residuals explicit

@@ -41,6 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import collab_common as cc
+import transitions as _transitions
 
 STATES = ("pending", "claimed", "done", "archive")
 _STATE_ORDER = {s: i for i, s in enumerate(STATES)}  # higher = more advanced
@@ -378,8 +379,30 @@ def reclaim(collab, hid) -> dict:
     return _transition(collab, hid, "reclaim")
 
 
-def done(collab, hid) -> dict:
-    return _transition(collab, hid, "done")
+def done(collab, hid, *, kind, actor, reason=None, receipt=None, candidate_id=None) -> dict:
+    """Close a handoff, ON THE RECORD. ``kind`` is mandatory: no caller may close anonymously.
+
+    ``kind=transitions.KIND_AUTONOMOUS`` requires a ``receipt`` (the done-contract hash); ``KIND_HUMAN``
+    requires an explicit ``reason``. See :mod:`transitions`.
+
+    **Why the signature changed (2026-07-15 audit).** ``done(collab, hid)`` took no provenance and wrote
+    none, and the directory-is-the-state design ([C10], see module docstring) means the closed file is
+    byte-identical either way. Three of four production callers reached ``done/`` with no contract at all
+    -- ``dashboard_core.advance_handoff`` (a 2-field HTTP POST that also auto-claims, so it could close
+    work never built) and ``handoff_cli.cmd_done``. Provenance survived only as a best-effort trace line,
+    so a dropped emit made a human click read as an autonomous close. Requiring ``kind`` here, at the CAS
+    every path funnels through, is what makes that unrepresentable rather than merely discouraged.
+
+    Validation runs BEFORE the transition, so an unlabelled close never moves a file. The record is
+    written AFTER the CAS commits: a crash in between leaves a ``done`` handoff whose provenance reads
+    ``UNRECORDED``, which is never treated as verified.
+    """
+    _transitions.validate(kind=kind, actor=actor, reason=reason, receipt=receipt)
+    out = _transition(collab, hid, "done")
+    _transitions.write(
+        collab, hid, kind=kind, actor=actor, reason=reason, receipt=receipt, candidate_id=candidate_id
+    )
+    return out
 
 
 def archive(collab, hid) -> dict:
