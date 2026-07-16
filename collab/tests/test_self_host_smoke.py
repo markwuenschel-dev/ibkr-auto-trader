@@ -47,8 +47,15 @@ class TestCleanRun:
         assert man and "closeout_report.py" in man
 
     def test_runs_required_lanes(self, clean):
+        # v2 batches contracts into breaker->verifier PAIRS (ADR-0004 D2) instead of fanning out one lane
+        # per contract: the same five baseline contracts now ride one pair, and `data-integrity` (a
+        # high-risk guardrail) adds exactly one composite pair.
         led = lanes.read_ledger(clean["collab"], clean["handoff_id"])
-        assert len(led["lanes"]) == 5 and all(x["ran"] for x in led["lanes"])
+        assert [x["pass"] for x in led["lanes"]] == ["baseline", "high-risk-diverse"]
+        assert all(x["ran"] for x in led["lanes"])
+        assert len(led["lanes"][0]["contracts"]) == 5  # the five contracts the legacy fan-out ran
+        assert led["lanes"][1]["composite"] is True
+        assert led["verification_plan_digest"].startswith("plan:")  # the plan is BOUND to this evidence
 
     def test_records_test_evidence(self, clean):
         assert lanes.read_ledger(clean["collab"], clean["handoff_id"])["tests"]["passed"] is True

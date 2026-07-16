@@ -20,6 +20,7 @@ sys.path.insert(0, str(_LIB))
 
 import autopilot as ap  # noqa: E402
 import collab_common as cc  # noqa: E402
+import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
 import dashboard_core as dc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
@@ -61,6 +62,7 @@ class TestEmission:
         # ADR-0001: a turn is not a handoff, so there is no per-turn handoff.create edge anymore. Drive one
         # exchange step through run() and assert the round span + the reused claim edge land in telemetry.
         home = str(tmp_path)
+        conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
         hc.create(collab, to="reviewer", from_="builder", title="please review", body="review this")
         ap.run(
@@ -88,6 +90,7 @@ class TestEmission:
         assert turn.get("artifact") == "handoff:001"
 
     def test_backend_failure_emits_fail_event_and_leaves_claimed(self, tmp_path):
+        conftest.write_v2_seats(tmp_path)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
         hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
 
@@ -103,6 +106,7 @@ class TestEmission:
 
     def test_telemetry_failure_never_breaks_a_round(self, tmp_path, monkeypatch):
         # [C15]: a committed state change must survive a telemetry outage. Break the emitter entirely.
+        conftest.write_v2_seats(tmp_path)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
         hc.create(collab, to="reviewer", from_="builder", title="x", body="y")
         monkeypatch.setattr(ap._trace, "emit", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no log")))
@@ -156,6 +160,7 @@ class TestStatusAndControl:
         # [C36]: a pause file must make run() IDLE (claim nothing) rather than progress. A paused loop
         # waits for a human, so we prove "it reached the idle sleep with zero work done" by making the
         # first sleep raise (same technique as test_watch_polls_on_idle) — never actually waiting.
+        conftest.write_v2_seats(tmp_path)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
         hc.create(collab, to="reviewer", from_="builder", title="x", body="review")
         seats = _cli(["reviewer", "builder"])
@@ -164,15 +169,20 @@ class TestStatusAndControl:
         class _Slept(Exception):
             pass
 
+        def runner(cmd, *a, **k):
+            # The always-on v2 baseline pair (ADR-0004 D2) must report cleanly, or the candidate
+            # escalates verification_incomplete before the loop ever reaches the round cap.
+            return "NO-FINDING" if "claude" in cmd[0] else "ok"
+
         monkeypatch.setattr(ap.time, "sleep", lambda _s: (_ for _ in ()).throw(_Slept()))
         with pytest.raises(_Slept):
-            ap.run(collab, seats=seats, max_rounds=3, runner=lambda *a, **k: "ok", home=str(tmp_path))
+            ap.run(collab, seats=seats, max_rounds=3, runner=runner, home=str(tmp_path))
         assert dc.read_status(collab)["phase"] == "paused"
         assert hc.state_of(collab, "001") == "pending"  # nothing was claimed while paused
         monkeypatch.undo()
 
         dc.set_paused(collab, False)  # resume -> it now runs to the cap
-        rounds = ap.run(collab, seats=seats, max_rounds=3, runner=lambda *a, **k: "ok", home=str(tmp_path))
+        rounds = ap.run(collab, seats=seats, max_rounds=3, runner=runner, home=str(tmp_path))
         assert rounds == 3
 
 

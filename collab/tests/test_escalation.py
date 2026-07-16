@@ -18,6 +18,7 @@ _LIB = Path(__file__).resolve().parent.parent / "tools" / "lib"
 sys.path.insert(0, str(_LIB))
 
 import autopilot as ap  # noqa: E402
+import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
 import escalation  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
@@ -174,9 +175,9 @@ class TestLoopPolicy:
             "source_roots": ["src/*.py"],
             "test_path": str(tiny),
         }
-        (Path(home) / "seats.json").write_text(
-            json.dumps({"version": 1, "closeout": closeout, "seats": _closeout_seats()}), encoding="utf-8"
-        )
+        # Autonomous closeout requires a valid v2 catalog (ADR-0005). The example's repo-capable role
+        # seats drive the assurance plan; the fake dispatch seats are injected via run(seats=...).
+        conftest.write_v2_seats(home, closeout=closeout)
 
     def test_persistent_lane_defect_escalates_with_repro(self, tmp_path):
         # A defect the lanes CONFIRM on every candidate: each attempt is repair_required, the driver retries
@@ -188,6 +189,7 @@ class TestLoopPolicy:
         n = {"b": 0}
 
         def runner(cmd, prompt, *, timeout, **kw):
+            argv = " ".join(cmd)
             who = cmd[0]
             if "builder" in who:
                 n["b"] += 1
@@ -195,10 +197,14 @@ class TestLoopPolicy:
                 return f"attempt {n['b']}"
             if "reviewer" in who:
                 return "looks fine\n[[SIGNOFF]]"
-            if "grok" in who:  # breaker always finds the persistent defect
-                return "FINDING: src/gateway.py:233 -> tz-aware/naive TypeError gates the snapshot read"
-            if "gemini" in who:  # verifier confirms it
-                return "VERDICT: CONFIRMED src/gateway.py:233 skew"
+            # The resolved v2 baseline pair speaks the bounded BATCH protocol (ADR-0004 D3); both
+            # executors are the claude CLI, so dispatch is told apart by MODEL, not seat name.
+            if "opus-4.8" in argv:  # breaker always finds the persistent defect
+                return (
+                    "FINDING: F1 | src/gateway.py:233 | tz-aware/naive TypeError | gates the snapshot read"
+                )
+            if "sonnet-5" in argv:  # verifier confirms it
+                return "VERDICT: CONFIRMED F1 | src/gateway.py:233 skew"
             return "ok"
 
         self._lane_slice(collab, home, tmp_path, runner)
@@ -213,10 +219,12 @@ class TestLoopPolicy:
         assert hc.state_of(collab, "001") == "claimed"  # not shipped
 
     def test_reviewer_withhold_escalates_at_budget(self, tmp_path):
-        # No lanes, no confirmed defect — just a reviewer that keeps withholding sign-off. The candidate is
-        # repair_required each attempt and the driver escalates at the work-attempt budget (the ADR-0003
-        # replacement for the old "block without a confirmed defect runs silently to the cap").
+        # No confirmed defect — just a reviewer that keeps withholding sign-off (the always-on v2
+        # baseline pair reports NO-FINDING below). The candidate is repair_required each attempt and
+        # the driver escalates at the work-attempt budget (the ADR-0003 replacement for the old
+        # "block without a confirmed defect runs silently to the cap").
         collab, home = str(tmp_path / "c"), str(tmp_path)
+        conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
         n = {"b": 0}
 
@@ -224,7 +232,9 @@ class TestLoopPolicy:
             if "builder" in cmd[0]:
                 n["b"] += 1
                 return f"rev {n['b']}"  # genuine progress each attempt
-            return "not yet — keep going"  # reviewer withholds
+            if "reviewer" in cmd[0]:
+                return "not yet — keep going"  # reviewer withholds
+            return "NO-FINDING"  # baseline pair clean -> withheld sign-off is the sole blocker
 
         ap.run(collab, seats=_seats(), max_rounds=2, runner=fake, home=home)
         assert escalation.pending(collab) == ["001"]
@@ -255,8 +265,8 @@ class TestOperatorRetry:
                 return "built"
             if "reviewer" in who:
                 return "verified\n[[SIGNOFF]]" if phase["sign"] else "not yet — keep going"
-            if "grok" in who:
-                return "NO-FINDING"  # breaker finds nothing -> clean lanes
+            if "opus-4.8" in " ".join(cmd):  # v2 baseline breaker finds nothing -> clean lanes
+                return "NO-FINDING"
             return "ok"
 
         TestLoopPolicy()._lane_slice(collab, home, tmp_path, runner)
@@ -291,7 +301,7 @@ class TestOperatorRetry:
                 return "built"
             if "reviewer" in who:
                 return "verified\n[[SIGNOFF]]"
-            if "grok" in who:
+            if "opus-4.8" in " ".join(cmd):  # v2 baseline breaker
                 return "NO-FINDING"
             return "ok"
 

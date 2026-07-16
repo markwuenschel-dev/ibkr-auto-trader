@@ -110,7 +110,12 @@ def _ledger(collab, hid="001", **over):
         # collab/tests/test_verification.py.
         "tests": green_record(base),
         "reviewer_preflight": _preflight(base),
-        "lanes": [],
+        # A v2 ledger owns its RESOLVED plan (ADR-0004 D4/ADR-0005). Condition 3 requires the plan to be
+        # present — without it, required passes fall back to mutable current config, which is how a
+        # legacy fan-out candidate (no seat validation) could satisfy the condition vacuously.
+        "verification_plan": {"passes": [{"id": "baseline"}]},
+        "verification_plan_digest": "plan:test-digest",
+        "lanes": [{"pass": "baseline", "ran": True, "confirmed": [], "refuted": []}],
         "blockers": [],
         "accepted_residuals": [],
     }
@@ -134,6 +139,25 @@ class TestEvaluate:
         v = _eval(collab)
         assert v["satisfied"] is True
         assert len(v["conditions"]) == 11 and _failed(v) == set()
+
+    def test_ledger_without_a_resolved_plan_cannot_close(self, tmp_path):
+        # ADR-0005: a legacy fan-out ledger carries no plan, so `ledger_required_passes` would fall back
+        # to MUTABLE current config — with no guardrails that is ZERO required passes, and condition 3
+        # passed vacuously. That is the path on which a text-only adapter could sit in a verifier seat.
+        # Every other condition here is green; the missing plan alone must refuse the close.
+        collab = _setup(tmp_path)
+        _ledger(collab, verification_plan=None, verification_plan_digest="", lanes=[])
+        v = _eval(collab)
+        assert v["satisfied"] is False
+        assert "lanes-ran" in _failed(v)
+
+    def test_plan_present_but_digest_missing_cannot_close(self, tmp_path):
+        # The plan must be BOUND (digest), not merely echoed: an unbound plan is unattributable evidence.
+        collab = _setup(tmp_path)
+        _ledger(collab, verification_plan_digest="")
+        v = _eval(collab)
+        assert v["satisfied"] is False
+        assert "lanes-ran" in _failed(v)
 
     def test_no_ledger_fails_evidence_conditions(self, tmp_path):
         collab = _setup(tmp_path)

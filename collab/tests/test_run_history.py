@@ -25,6 +25,7 @@ sys.path.insert(0, str(_LIB))
 
 import autopilot as ap  # noqa: E402
 import collab_common as cc  # noqa: E402
+import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
 import dashboard_core as dc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import run_history as rh  # noqa: E402
@@ -348,6 +349,7 @@ class TestDriverArchive:
         # assert the run is archived on exit (history/<run_uid>/ with run.json + events.jsonl) and that the
         # live log reflects ONLY this run (the junk is gone).
         home = str(tmp_path)
+        conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
         hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="review this")
         live = Path(ap._log_default(collab))
@@ -360,7 +362,9 @@ class TestDriverArchive:
             if "builder" in cmd[0]:
                 n["b"] += 1
                 return f"rev {n['b']}"  # distinct output per attempt -> genuine progress
-            return "keep going"  # reviewer withholds -> repair to the work-attempt budget
+            if "reviewer" in cmd[0]:
+                return "keep going"  # reviewer withholds -> repair to the work-attempt budget
+            return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2)
 
         rounds = ap.run(
             collab, seats=_cli(["reviewer", "builder"]), max_rounds=2, watch=False, runner=runner, home=home
@@ -388,6 +392,7 @@ class TestDriverArchive:
         # ADR-0003: a run that escalates must record the truthful terminal in run.json — signoff.result
         # "escalated", the terminal_reason, an escalation count, and the per-outcome tally.
         home = str(tmp_path)
+        conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
         hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="build it")
         n = {"b": 0}
@@ -396,7 +401,9 @@ class TestDriverArchive:
             if "builder" in cmd[0]:
                 n["b"] += 1
                 return f"rev {n['b']}"  # distinct output -> genuine progress, loops to the budget
-            return "not yet — keep going"  # reviewer withholds -> repair_required each attempt
+            if "reviewer" in cmd[0]:
+                return "not yet — keep going"  # reviewer withholds -> repair_required each attempt
+            return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2)
 
         ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=2, runner=runner, home=home)
         run_uid = dc.read_status(collab)["run_uid"]
@@ -451,6 +458,7 @@ class TestLiveMaxRounds:
         # and reconstructs the RunBudget with the new ceiling, so it charges 3 work attempts — beyond the
         # launch-time cap of 1 — proving the live max_rounds (not the launch value) governs the budget.
         home = str(tmp_path)
+        conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
         hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="review this")
         n = {"b": 0}
@@ -460,7 +468,9 @@ class TestLiveMaxRounds:
                 n["b"] += 1
                 dc.set_max_rounds(collab, 3)  # bump the live ceiling mid-run
                 return f"rev {n['b']}"  # distinct output per attempt -> genuine progress
-            return "keep going"  # reviewer withholds
+            if "reviewer" in cmd[0]:
+                return "keep going"  # reviewer withholds
+            return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2)
 
         ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=1, runner=runner, home=home)
         assert self._work_attempts(collab) == 3  # loop honored the raised live cap beyond the launch max of 1
@@ -468,6 +478,7 @@ class TestLiveMaxRounds:
     def test_loop_honors_a_lowered_live_cap(self, tmp_path):
         # The inverse: a pre-set live cap of 1 must LOWER an otherwise-generous launch budget of 5.
         home = str(tmp_path)
+        conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
         hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="review this")
         dc.set_max_rounds(collab, 1)  # live cap lower than the launch max_rounds
@@ -477,7 +488,9 @@ class TestLiveMaxRounds:
             if "builder" in cmd[0]:
                 n["b"] += 1
                 return f"rev {n['b']}"
-            return "keep going"
+            if "reviewer" in cmd[0]:
+                return "keep going"
+            return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2)
 
         ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=5, runner=runner, home=home)
         assert self._work_attempts(collab) == 1  # the live cap (1) won over the launch cap (5)

@@ -21,6 +21,7 @@ sys.path.insert(0, str(_LIB))
 
 import autopilot as ap  # noqa: E402
 import collab_common as cc  # noqa: E402
+import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
 import escalation  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import run_budget as rb  # noqa: E402
@@ -156,6 +157,7 @@ class TestWebSeatAndBackendFailure:
         # is created, and the run does not crash. At run() level this is outcome "stalled" — the run stops
         # and pings a human.
         home = str(tmp_path)
+        conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
         hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
 
@@ -175,6 +177,7 @@ class TestWorkAttemptBudget:
         # WORK_ATTEMPT per builder turn until the work-attempt budget is exhausted, then writes a durable
         # escalation and pings the human ([C35] bounded — it cannot ping-pong forever).
         home = str(tmp_path)
+        conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
         hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="start the exchange")
         seats = {
@@ -187,7 +190,9 @@ class TestWorkAttemptBudget:
             if "builder" in cmd[0]:
                 n["b"] += 1
                 return f"revision {n['b']}"  # distinct output per attempt -> genuine progress
-            return "not yet — keep going"  # reviewer withholds every time
+            if "reviewer" in cmd[0]:
+                return "not yet — keep going"  # reviewer withholds every time
+            return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2) finds nothing
 
         ap.run(collab, seats=seats, max_rounds=3, runner=runner, home=home)
         assert escalation.pending(collab) == ["001"]  # escalated on budget exhaustion
@@ -483,13 +488,104 @@ def _gate_repo(base: Path, *, ok: bool) -> None:
         subprocess.run(["git", *argv], cwd=str(base), capture_output=True)
 
 
-def _home_with(home, closeout, seats):
-    (Path(home) / "seats.json").write_text(
-        json.dumps({"version": 1, "closeout": closeout, "seats": seats}), encoding="utf-8"
-    )
+def _home_with(home, closeout, seats=None):
+    """Write ``home/seats.json``: the checked-in v2 example catalog plus this slice's ``closeout``.
+
+    Autonomous closeout requires a valid v2 catalog (ADR-0005), so the assurance resolver reads the
+    example's four repo-capable role seats. A test's own FAKE dispatch seats are injected through
+    ``run(seats=...)`` and are deliberately NOT written here: they are neither repo-capable nor
+    role-declaring, so ``_validate_role_seats`` would (correctly) reject them.
+    """
+    del seats  # dispatch-only; injected via run(seats=...), never resolved from disk
+    conftest.write_v2_seats(home, closeout=closeout)
 
 
 _GEN = ["bounded-autonomy", "untrusted-agent-output"]  # baseline + two matching generic contracts
+
+
+class TestAssuranceActivationFailsClosed:
+    """ADR-0005: autonomous closeout REQUIRES a valid v2 catalog — there is no legacy fallback.
+
+    Returning ``None`` for an unmigrated catalog is what let the whole risk-tiered machinery sit inert
+    while real runs took the generic fan-out: a text-only adapter occupied an assessment seat and
+    candidates closed with no resolved plan in the ledger. Silence was indistinguishable from safety.
+    Each test proves the refusal lands BEFORE any model call and BEFORE any ledger exists.
+    """
+
+    def _slice_only(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        return collab
+
+    def _boom(self, *a, **k):
+        raise AssertionError("no seat may be dispatched before the assurance catalog is validated")
+
+    def _assert_blocked(self, collab, calls):
+        assert calls == 0  # refused before any model call
+        assert escalation.pending(collab) == ["001"]
+        esc = next(e for e in _events(collab) if e["stage"] == "autopilot.escalation")
+        assert "reason:infrastructure_blocked" in esc["decision"]["reason_codes"]
+        assert hc.state_of(collab, "001") != "done"  # never closes on an unvalidated catalog
+        # ...and no ledger was written by the legacy fan-out
+        assert not list((Path(collab) / "autopilot" / "verification").rglob("*.ledger.json"))
+
+    def test_v1_catalog_pauses_before_any_model_call(self, tmp_path):
+        home = str(tmp_path)
+        (Path(home) / "seats.json").write_text(
+            json.dumps({"version": 1, "seats": _cli(["builder"])}), encoding="utf-8"
+        )
+        collab = self._slice_only(tmp_path)
+        calls = ap.run(collab, seats=_cli(["builder"]), runner=self._boom, home=home)
+        self._assert_blocked(collab, calls)
+
+    def test_missing_catalog_pauses_before_any_model_call(self, tmp_path):
+        home = str(tmp_path)  # no seats.json at all
+        collab = self._slice_only(tmp_path)
+        calls = ap.run(collab, seats=_cli(["builder"]), runner=self._boom, home=home)
+        self._assert_blocked(collab, calls)
+
+    def test_v2_catalog_without_assessment_profiles_pauses(self, tmp_path):
+        home = str(tmp_path)
+        doc = conftest.v2_seats_document()
+        doc.pop("assessment_profiles")  # version 2, but the assurance surface is absent
+        (Path(home) / "seats.json").write_text(json.dumps(doc), encoding="utf-8")
+        collab = self._slice_only(tmp_path)
+        calls = ap.run(collab, seats=_cli(["builder"]), runner=self._boom, home=home)
+        self._assert_blocked(collab, calls)
+
+    def test_text_only_assessment_seat_is_rejected_before_dispatch(self, tmp_path):
+        # The exact misconfiguration the inert machinery allowed: a text-only adapter (no repo access)
+        # seated as the verifier. ADR-0004 D1/D2 declares it invalid; the legacy path never checked.
+        home = str(tmp_path)
+        conftest.write_v2_seats(home, conftest.text_only_verifier_document())
+        collab = self._slice_only(tmp_path)
+        calls = ap.run(collab, seats=_cli(["builder"]), runner=self._boom, home=home)
+        self._assert_blocked(collab, calls)
+
+    def test_valid_v2_catalog_binds_the_resolved_plan_into_the_ledger(self, tmp_path):
+        # The positive control: the same driver, a valid catalog -> a plan is resolved and its identity
+        # is bound into the immutable ledger, which is what done_contract reads.
+        home = tmp_path / "home"
+        home.mkdir()
+        collab = str(tmp_path / "c")
+        _slice(collab, guardrails=_GEN)
+        _home_with(home, _closeout(collab, tmp_path, ok=True))
+
+        def runner(cmd, prompt, *, timeout, **kw):
+            if "reviewer" in cmd[0]:
+                return "Verified.\n[[SIGNOFF]]"
+            if "builder" in cmd[0]:
+                return "ok"
+            return "NO-FINDING"
+
+        ap.run(collab, seats=_closeout_seats(), runner=runner, home=str(home))
+        led = json.loads(
+            next((Path(collab) / "autopilot" / "verification" / "001").glob("*.ledger.json")).read_text(
+                "utf-8"
+            )
+        )
+        assert led["verification_plan_digest"].startswith("plan:")
+        assert led["verification_plan"]["passes"][0]["profile"]["breaker"]["model"] == "opus-4.8"
 
 
 class TestCandidateClose:
@@ -507,18 +603,24 @@ class TestCandidateClose:
             who = cmd[0]
             if "reviewer" in who:
                 return "Verified against source.\n[[SIGNOFF]]"
-            if "grok" in who:
-                return "NO-FINDING"
-            return "ok"
+            if "builder" in who:
+                return "ok"
+            return "NO-FINDING"  # the resolved v2 baseline pair (opus-4.8 breaker) finds nothing
 
         ap.run(collab, seats=_closeout_seats(), runner=runner, home=str(home))
         assert hc.state_of(collab, "001") == "done"  # self-closed, contract satisfied
         assert any(e["stage"] == "autopilot.autonomous_done" for e in _events(collab))
-        # the immutable per-candidate ledger records the compatibility baseline contracts that ran
+        # the immutable per-candidate ledger records the baseline contracts that ran. v2 batches them
+        # into ONE breaker->verifier pair (ADR-0004 D2) rather than fanning out one lane per contract.
         ledgers = list((Path(collab) / "autopilot" / "verification" / "001").glob("*.ledger.json"))
         assert len(ledgers) == 1
         led = json.loads(ledgers[0].read_text("utf-8"))
-        assert len(led["lanes"]) == 3
+        assert [entry["pass"] for entry in led["lanes"]] == ["baseline"]  # no high-risk guardrail
+        assert set(led["lanes"][0]["contracts"]) == {
+            "change-regression",  # always_baseline
+            "bounded-autonomy",
+            "untrusted-agent-output",  # the two _GEN guardrails
+        }
 
     def test_v2_high_risk_plan_runs_two_profiled_pairs_and_closes(self, tmp_path):
         """The real driver resolves once, binds that plan, and dispatches only two breaker→verifier pairs."""
@@ -563,12 +665,19 @@ class TestCandidateClose:
         home = tmp_path / "home"
         home.mkdir()
         collab = str(tmp_path / "c")
-        _slice(collab)  # no guardrails -> 0 lanes; the FAILING tests are what block it
+        # No guardrails, but v2 still always resolves the baseline pair (change-regression is
+        # always_baseline, ADR-0004 D2). It reports NO-FINDING below, so the FAILING suite is the
+        # only thing that can block the close — which is exactly what this pins.
+        _slice(collab)
         closeout = _closeout(collab, tmp_path, ok=False)
         _home_with(home, closeout, _closeout_seats())
 
         def runner(cmd, prompt, *, timeout, **kw):
-            return "Verified.\n[[SIGNOFF]]" if "reviewer" in cmd[0] else "ok"
+            if "reviewer" in cmd[0]:
+                return "Verified.\n[[SIGNOFF]]"
+            if "builder" in cmd[0]:
+                return "ok"
+            return "NO-FINDING"  # baseline pair finds nothing -> red tests are the sole blocker
 
         ap.run(collab, seats=_closeout_seats(), runner=runner, home=str(home))
         assert hc.state_of(collab, "001") == "claimed"  # tests failed -> not shipped
@@ -630,6 +739,7 @@ class TestRepairLoop:
         state = {"builder": 0}
 
         def runner(cmd, prompt, *, timeout, **kw):
+            argv = " ".join(cmd)
             who = cmd[0]
             if "builder" in who:
                 state["builder"] += 1
@@ -639,13 +749,15 @@ class TestRepairLoop:
             if "reviewer" in who:
                 return "Conformance: all met.\n[[SIGNOFF]]"
             bad = "BUG" in (src.read_text("utf-8") if src.exists() else "")
-            if "grok" in who:  # breaker
-                return "FINDING: src/m.py:1 -> x is unchecked -> data loss" if bad else "NO-FINDING"
-            if "gemini" in who:  # verifier
-                return "VERDICT: CONFIRMED src/m.py:1 x unchecked" if bad else "VERDICT: REFUTED"
+            # The resolved v2 baseline pair speaks the bounded BATCH protocol (ADR-0004 D3) and is
+            # dispatched by MODEL, not seat name — both executors are the claude CLI.
+            if "opus-4.8" in argv:  # baseline breaker
+                return "FINDING: F1 | src/m.py:1 | x is unchecked | data loss" if bad else "NO-FINDING"
+            if "sonnet-5" in argv:  # baseline verifier — one verdict per finding id
+                return "VERDICT: CONFIRMED F1 | x unchecked" if bad else "VERDICT: REFUTED F1"
             return "ok"
 
-        # A generous model-call ceiling so the 5-lane x 3-attempt run isn't cut short by the balanced default.
+        # A generous model-call ceiling so the 3-attempt run isn't cut short by the balanced default.
         limits = rb.Limits(
             max_work_attempts=5,
             max_verification_passes=6,
@@ -674,15 +786,16 @@ class TestRepairLoop:
         src.write_text("x = 1  # persistent bug\n", encoding="utf-8")  # never changes -> always the same cand
 
         def runner(cmd, prompt, *, timeout, **kw):
+            argv = " ".join(cmd)
             who = cmd[0]
             if "builder" in who:
                 return "I looked but changed nothing"  # source untouched every attempt
             if "reviewer" in who:
                 return "Conformance: all met.\n[[SIGNOFF]]"
-            if "grok" in who:
-                return "FINDING: src/m.py:1 -> unchecked -> data loss"
-            if "gemini" in who:
-                return "VERDICT: CONFIRMED src/m.py:1 unchecked"
+            if "opus-4.8" in argv:  # v2 baseline breaker (batch protocol, ADR-0004 D3)
+                return "FINDING: F1 | src/m.py:1 | unchecked | data loss"
+            if "sonnet-5" in argv:  # v2 baseline verifier
+                return "VERDICT: CONFIRMED F1 | unchecked"
             return "ok"
 
         ap.run(collab, seats=_closeout_seats(), runner=runner, home=str(home))
@@ -701,12 +814,14 @@ class TestBoardLease:
         _slice(collab)
         closeout = _closeout(collab, tmp_path, ok=True)
         _home_with(home, closeout, _closeout_seats())
-        ap.run(
-            collab,
-            seats=_closeout_seats(),
-            runner=lambda *a, **k: "Verified.\n[[SIGNOFF]]" if "reviewer" in a[0][0] else "ok",
-            home=str(home),
-        )
+        def runner(cmd, prompt, *, timeout, **kw):
+            if "reviewer" in cmd[0]:
+                return "Verified.\n[[SIGNOFF]]"
+            if "builder" in cmd[0]:
+                return "ok"
+            return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2)
+
+        ap.run(collab, seats=_closeout_seats(), runner=runner, home=str(home))
         assert hc.state_of(collab, "001") == "done"
         assert hc.ActiveHandoffLease(collab, "probe").holder() is None  # board released on exit
 
@@ -734,6 +849,7 @@ class TestOneHandoffAtATime:
     def test_stalled_handoff_stops_and_does_not_advance(self, tmp_path):
         # A backend stall on the first handoff must STOP the run (ping the human), NOT skip to the second.
         home = str(tmp_path)
+        conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
         hc.create(collab, to="builder", from_="reviewer", title="first", body="a")  # 001
         hc.create(collab, to="builder", from_="reviewer", title="second", body="b")  # 002
@@ -758,7 +874,11 @@ class TestOneHandoffAtATime:
         _home_with(home, closeout, _closeout_seats())
 
         def runner(cmd, prompt, *, timeout, **kw):
-            return "Verified.\n[[SIGNOFF]]" if "reviewer" in cmd[0] else "ok"
+            if "reviewer" in cmd[0]:
+                return "Verified.\n[[SIGNOFF]]"
+            if "builder" in cmd[0]:
+                return "ok"
+            return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2)
 
         ap.run(collab, seats=_closeout_seats(), runner=runner, home=str(home))
         assert hc.state_of(collab, "001") == "done"
