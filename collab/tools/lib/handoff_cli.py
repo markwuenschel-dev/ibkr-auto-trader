@@ -107,10 +107,47 @@ def _emit_safe(fn, *args, **kwargs) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _parse_constraints(raw) -> list[tuple[str, str]]:
+    """Parse repeated ``--constraint ID=TEXT`` into ordered ``(id, text)`` pairs.
+
+    Validated here rather than downstream so a malformed declaration is EXIT_USAGE, not a handoff
+    whose conformance contract is quietly wrong. A newline would forge a second bullet (or a heading)
+    inside the Constraints section, which is the same structure-injection ``_reject_unsafe_body``
+    refuses for bodies — [C38] is about typed fields, so the typed path has to hold the line too.
+    """
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in raw or []:
+        cid, sep, text = str(item).partition("=")
+        cid, text = cid.strip(), text.strip()
+        if not sep or not cid or not text:
+            raise cc.CollabError(f"--constraint must be ID=TEXT, got {item!r}")
+        if "]" in cid or "[" in cid:
+            raise cc.CollabError(f"constraint id {cid!r} may not contain '[' or ']'")
+        if any(ch in item for ch in ("\n", "\r", "\x00")):
+            raise cc.CollabError(f"constraint {cid!r} may not contain newlines or NUL")
+        if cid in seen:
+            raise cc.CollabError(f"duplicate constraint id {cid!r}")
+        seen.add(cid)
+        out.append((cid, text))
+    return out
+
+
 def cmd_create(args) -> int:
     collab = _collab_from(args)
+    try:
+        constraints = _parse_constraints(getattr(args, "constraints", None))
+    except cc.CollabError as e:
+        print(f"handoff: {e}", file=sys.stderr)
+        return EXIT_USAGE
     r = hc.create(
-        collab, to=args.to, from_=args.from_, title=args.title, priority=args.priority, body=args.body or ""
+        collab,
+        to=args.to,
+        from_=args.from_,
+        title=args.title,
+        priority=args.priority,
+        body=args.body or "",
+        constraints=constraints or None,
     )  # [C19] guard lives in render_handoff
     _emit_safe(
         he.on_create, _log(collab), _run_id(collab), r["id"], span_id=r["id"], title=args.title
@@ -265,6 +302,16 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument("--title", required=True)
     c.add_argument("--priority", default="normal", choices=("high", "normal", "low"))
     c.add_argument("--body", default="")
+    c.add_argument(
+        "--constraint",
+        action="append",
+        metavar="ID=TEXT",
+        dest="constraints",
+        help="declare a typed constraint, repeatable (e.g. --constraint C1='paper-trading only'). "
+        "Required for any handoff eligible for autonomous closure (ADR-0005): conformance is "
+        "adjudicated against declared IDs, so a handoff with none makes 'the spec was met' "
+        "unfalsifiable.",
+    )
     c.set_defaults(func=cmd_create)
 
     ls = sub.add_parser("list", help="list handoffs")
