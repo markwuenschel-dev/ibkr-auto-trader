@@ -108,38 +108,27 @@ def _emit_safe(fn, *args, **kwargs) -> None:
 
 
 def _parse_constraints(raw) -> list[tuple[str, str]]:
-    """Parse repeated ``--constraint ID=TEXT`` into ordered ``(id, text)`` pairs.
+    """Split repeated ``--constraint ID=TEXT`` into ``(id, text)`` pairs.
 
-    Validated here rather than downstream so a malformed declaration is EXIT_USAGE, not a handoff
-    whose conformance contract is quietly wrong. A newline would forge a second bullet (or a heading)
-    inside the Constraints section, which is the same structure-injection ``_reject_unsafe_body``
-    refuses for bodies — [C38] is about typed fields, so the typed path has to hold the line too.
+    Only the CLI-shaped concern lives here (the ``ID=TEXT`` split, so a malformed flag is
+    EXIT_USAGE). Content validation — newlines, duplicates, bracket ids — belongs to
+    ``handoff_core._reject_unsafe_constraints``, the canonical writer boundary, so every caller gets
+    it and not just this one. [C14]: the CLI stays thin over handoff_core.
     """
     out: list[tuple[str, str]] = []
-    seen: set[str] = set()
     for item in raw or []:
         cid, sep, text = str(item).partition("=")
-        cid, text = cid.strip(), text.strip()
-        if not sep or not cid or not text:
+        if not sep:
             raise cc.CollabError(f"--constraint must be ID=TEXT, got {item!r}")
-        if "]" in cid or "[" in cid:
-            raise cc.CollabError(f"constraint id {cid!r} may not contain '[' or ']'")
-        if any(ch in item for ch in ("\n", "\r", "\x00")):
-            raise cc.CollabError(f"constraint {cid!r} may not contain newlines or NUL")
-        if cid in seen:
-            raise cc.CollabError(f"duplicate constraint id {cid!r}")
-        seen.add(cid)
-        out.append((cid, text))
+        out.append((cid.strip(), text.strip()))
     return out
 
 
 def cmd_create(args) -> int:
     collab = _collab_from(args)
-    try:
-        constraints = _parse_constraints(getattr(args, "constraints", None))
-    except cc.CollabError as e:
-        print(f"handoff: {e}", file=sys.stderr)
-        return EXIT_USAGE
+    # A CollabError from either the ID=TEXT split or handoff_core's constraint validation is mapped
+    # to EXIT_USAGE by main() ([C16]) — no local handling, no second error path to drift.
+    constraints = _parse_constraints(getattr(args, "constraints", None))
     r = hc.create(
         collab,
         to=args.to,

@@ -40,6 +40,11 @@ def _slice(tmp_path, constraints=(_C1, _C2)):
     src = Path(collab) / "src"
     src.mkdir(parents=True, exist_ok=True)
     (src / "planner.py").write_text("\n".join(f"line {i}" for i in range(1, 120)), encoding="utf-8")
+    tests = Path(collab) / "tests"
+    tests.mkdir(parents=True, exist_ok=True)
+    # A REAL test file: cited test pointers are validated, so a fixture citing a fake one would fail
+    # for the wrong reason (and did, when pointer validation was added).
+    (tests / "t.py").write_text("\n".join(f"# t{i}" for i in range(1, 90)), encoding="utf-8")
     return collab
 
 
@@ -130,6 +135,94 @@ class TestTheGrokFixture:
         assert r["satisfied"] is False
         assert [b["id"] for b in r["blockers"]] == ["conformance:C1"]
         assert _C1[1] in r["blockers"][0]["description"]  # the builder gets the exact unmet item
+
+
+class TestBothReportsAreValidated:
+    """Regressions for a gap found in review: only the ASSESSOR's pointers were ever checked.
+
+    The contract this gate advertises is "two independent, resolvable citations". Validating one side
+    bought the words without the property — a verifier could cite a path outside the repo entirely and
+    still close.
+    """
+
+    def test_verifier_source_outside_the_repo_is_refused(self, tmp_path):
+        # The reproduction from review: verifier source '../outside.py:1' previously returned
+        # satisfied=True, incomplete=None.
+        collab = _slice(tmp_path)
+        c = cf.compile_contract(collab, "001")
+        r = cf.reconcile(
+            c,
+            _report(c, {"C1": "met", "C2": "met"}),
+            _report(c, {"C1": "met", "C2": "met"}, {"C1": "../outside.py:1"}),
+            source_base=collab,
+        )
+        assert r["satisfied"] is False
+        assert r["incomplete"]["reason"] == "evidence"
+        assert "verifier source" in r["incomplete"]["detail"]
+
+    def test_verifier_source_that_does_not_exist_is_refused(self, tmp_path):
+        collab = _slice(tmp_path)
+        c = cf.compile_contract(collab, "001")
+        r = cf.reconcile(
+            c,
+            _report(c, {"C1": "met", "C2": "met"}),
+            _report(c, {"C1": "met", "C2": "met"}, {"C1": "src/planner.py:9999"}),
+            source_base=collab,
+        )
+        assert r["satisfied"] is False and r["incomplete"]["reason"] == "evidence"
+
+    def test_a_fabricated_test_pointer_is_refused(self, tmp_path):
+        # A pointer offered as corroboration and never checked is worse than no pointer.
+        collab = _slice(tmp_path)
+        c = cf.compile_contract(collab, "001")
+        bad = json.dumps(
+            {
+                "contract_digest": c.digest,
+                "requirements": [
+                    {
+                        "id": rid,
+                        "status": "met",
+                        "source": "src/planner.py:5",
+                        "test": "tests/nope.py:9999",
+                        "evidence": "e",
+                    }
+                    for rid in c.ids
+                ],
+            }
+        )
+        r = cf.reconcile(c, bad, bad, source_base=collab)
+        assert r["satisfied"] is False
+        assert r["incomplete"]["reason"] == "evidence" and "test" in r["incomplete"]["detail"]
+
+    def test_a_null_test_is_allowed_but_a_bad_one_is_not(self, tmp_path):
+        collab = _slice(tmp_path)
+        c = cf.compile_contract(collab, "001")
+        ok = json.dumps(
+            {
+                "contract_digest": c.digest,
+                "requirements": [
+                    {"id": rid, "status": "met", "source": "src/planner.py:5", "test": None, "evidence": "e"}
+                    for rid in c.ids
+                ],
+            }
+        )
+        r = cf.reconcile(c, ok, ok, source_base=collab)
+        assert r["satisfied"] is True  # "no test covers this" is honest, not a refusal
+
+    def test_both_evidence_records_are_retained(self, tmp_path):
+        # Keeping only the assessor's record would make the verifier's agreement unauditable.
+        collab = _slice(tmp_path)
+        c = cf.compile_contract(collab, "001")
+        r = cf.reconcile(
+            c,
+            _report(c, {"C1": "met", "C2": "met"}, {"C1": "src/planner.py:5"}),
+            _report(c, {"C1": "met", "C2": "met"}, {"C1": "src/planner.py:9"}),
+            source_base=collab,
+        )
+        assert r["satisfied"] is True
+        c1 = next(x for x in r["results"] if x["id"] == "C1")
+        assert c1["assessor"]["source_resolved"] == "src/planner.py:5-5"
+        assert c1["verifier"]["source_resolved"] == "src/planner.py:9-9"
 
 
 class TestEvidenceIsRefusedUnlessItResolves:
@@ -258,3 +351,11 @@ class TestPrompt:
         c = cf.compile_contract(_slice(tmp_path), "001")
         p = cf.build_prompt(c, role="verifier")
         assert "own conclusion" in p and "Default to 'missing'" in p
+
+    @pytest.mark.parametrize("role", ["Verifier", "breaker", "", "assessor "])
+    def test_an_unknown_role_is_refused(self, tmp_path, role):
+        # Treating every non-'assessor' string as the verifier would let a typo hand BOTH seats the
+        # assessor stance — collapsing independence into two identical opinions that still "agree".
+        c = cf.compile_contract(_slice(tmp_path), "001")
+        with pytest.raises(cc.CollabError, match="unknown conformance role"):
+            cf.build_prompt(c, role=role)

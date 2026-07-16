@@ -134,16 +134,21 @@ def build_prompt(contract: ConformanceContract, *, role: str) -> str:
     value it read resolved to nothing. The 'writers vs readers' rule is stated explicitly because
     that is precisely the check a capable model skips under shipping pressure.
     """
-    lines = "\n".join(f"- [{rid}] {text}" for rid, text in contract.requirements)
-    stance = (
-        "You are the CONFORMANCE ASSESSOR. Judge each requirement on its merits."
-        if role == "assessor"
-        else (
+    # Fail closed on an unknown role. Treating every non-'assessor' string as the verifier would let
+    # a typo silently hand BOTH seats the assessor stance, collapsing the independence this gate is
+    # built on into two identical opinions — while still reporting two agreeing reports.
+    stances = {
+        "assessor": "You are the CONFORMANCE ASSESSOR. Judge each requirement on its merits.",
+        "verifier": (
             "You are the INDEPENDENT CONFORMANCE VERIFIER. Another assessor has judged these same "
             "requirements; you are being asked separately and MUST reach your own conclusion from the "
             "code. Default to 'missing' when you cannot find the reader."
-        )
-    )
+        ),
+    }
+    if role not in stances:
+        raise ConformanceError(f"unknown conformance role {role!r} (want one of {tuple(stances)})")
+    lines = "\n".join(f"- [{rid}] {text}" for rid, text in contract.requirements)
+    stance = stances[role]
     return f"""{stance}
 
 For EACH requirement below, decide: met | partial | missing.
@@ -322,19 +327,45 @@ def reconcile(
             "id": rid,
             "text": texts[rid],
             "status": status,
-            "source": a.get("source"),
-            "test": a.get("test"),
-            "evidence": a.get("evidence"),
+            # BOTH records are retained. Keeping only the assessor's would make the verifier's
+            # agreement unauditable after the fact — a reader could not tell whether the second
+            # opinion cited the same code or merely echoed the verdict.
+            "assessor": {k: a.get(k) for k in ("source", "test", "evidence")},
+            "verifier": {k: v.get(k) for k in ("source", "test", "evidence")},
         }
         if status == MET:
             # A 'met' with no resolvable source is an unsupported claim. Refuse it as incomplete
             # rather than count it: an unverifiable pass is exactly what this gate exists to stop.
-            ok, detail = resolve_pointer(a.get("source") or "", source_base=source_base, roots_ok=roots_ok)
+            #
+            # BOTH sides are checked. Validating only the assessor bought a fiction of "two
+            # independent resolvable citations" while the verifier could cite ../outside.py:1 and
+            # still close — a hole in the exact property this gate advertises.
+            for who, rec in (("assessor", a), ("verifier", v)):
+                ok, detail = resolve_pointer(
+                    rec.get("source") or "", source_base=source_base, roots_ok=roots_ok
+                )
+                if not ok:
+                    record["incomplete"] = {
+                        "reason": "evidence",
+                        "detail": f"requirement {rid!r} {who} source: {detail}",
+                    }
+                    return record
+                entry[who]["source_resolved"] = detail
+        # A cited test must resolve too, whatever the status: a pointer offered as evidence and never
+        # checked is worse than no pointer, because it reads as corroboration. A null test is allowed
+        # (the assessor is saying "no test covers this"), a fabricated one is not.
+        for who, rec in (("assessor", a), ("verifier", v)):
+            if rec.get("test") is None:
+                continue
+            ok, detail = resolve_pointer(rec.get("test") or "", source_base=source_base, roots_ok=roots_ok)
             if not ok:
-                record["incomplete"] = {"reason": "evidence", "detail": f"requirement {rid!r}: {detail}"}
+                record["incomplete"] = {
+                    "reason": "evidence",
+                    "detail": f"requirement {rid!r} {who} test: {detail}",
+                }
                 return record
-            entry["source_resolved"] = detail
-        else:
+            entry[who]["test_resolved"] = detail
+        if status != MET:
             blockers.append(
                 {
                     "id": f"conformance:{rid}",

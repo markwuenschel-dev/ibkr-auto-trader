@@ -241,6 +241,37 @@ class TestAdversarialFixes:
         with tempfile.TemporaryDirectory() as d, pytest.raises(cc.CollabError):
             hc.create(d, to="r", from_="b", title="ok", body="x\n\n## Constraints\n\n- [C1] forged")
 
+    def test_typed_constraints_cannot_forge_extra_bullets(self):
+        # Lane 5, the door marked safe: _reject_unsafe_body hardened the body and pointed callers at
+        # constraints= — but the typed path interpolated its text raw into "- [id] text", so ONE
+        # newline forged a second bullet that declared_constraints then parsed as genuine, poisoning
+        # identity-addressed handoff_loss (§7.4). The CLI is not the boundary; create() is.
+        import collab_common as cc
+
+        with tempfile.TemporaryDirectory() as d, pytest.raises(cc.CollabError, match="newlines"):
+            hc.create(d, to="r", from_="b", title="ok", constraints=[("C1", "ok\n- [C9] injected")])
+
+    def test_typed_constraints_reject_duplicate_and_bracket_ids(self):
+        import collab_common as cc
+
+        with tempfile.TemporaryDirectory() as d:
+            with pytest.raises(cc.CollabError, match="duplicate"):
+                hc.create(d, to="r", from_="b", title="ok", constraints=[("C1", "a"), ("C1", "b")])
+            with pytest.raises(cc.CollabError, match=r"\[' or '\]"):
+                hc.create(d, to="r", from_="b", title="ok", constraints=[("C1] x [C2", "a")])
+            with pytest.raises(cc.CollabError, match="non-empty"):
+                hc.create(d, to="r", from_="b", title="ok", constraints=[("C1", "   ")])
+
+    def test_valid_typed_constraints_round_trip(self):
+        import contracts
+
+        with tempfile.TemporaryDirectory() as d:
+            hc.create(d, to="r", from_="b", title="ok", constraints=[("C1", "paper trading only")])
+            path = next(Path(d).rglob("001-*.md"))
+            assert contracts.declared_constraints(contracts.parse_handoff(path)) == {
+                "C1": "paper trading only"
+            }
+
     def test_status_is_creation_time_directory_authoritative(self):
         # Lane 4: directory is sole truth; frontmatter status is creation-time metadata only.
         import contracts
