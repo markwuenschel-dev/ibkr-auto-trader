@@ -35,6 +35,7 @@ def context(unavailable=False):
         data_as_of={7: NOW},
         account_observed_at=NOW,
         as_of=NOW,
+        generation=7,  # the session generation the assembler fenced + sealed
         context_digest="ctx",
     )
 
@@ -45,6 +46,7 @@ def control():
         session_date=NOW.date(),
         realized_daily_pnl=Decimal(0),
         observed_at=NOW,
+        session_generation=7,
     )
 
 
@@ -87,6 +89,4 @@ def test_stop_direction_and_price_are_validated():
             control(),
         )
     with pytest.raises(ValueError):
-        PortfolioProjector().project(
-            {"instrument_id": 7, "quantity": 1, "price": 0}, context(), control()
-        )
+        PortfolioProjector().project({"instrument_id": 7, "quantity": 1, "price": 0}, context(), control())

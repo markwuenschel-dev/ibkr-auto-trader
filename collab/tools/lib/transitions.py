@@ -103,7 +103,7 @@ def read(collab, hid) -> dict | None:
     """The transition record, or ``None`` when absent/corrupt. ``None`` is never autonomous."""
     try:
         data = json.loads(_path(collab, hid).read_text("utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
     return data if isinstance(data, dict) and data.get("kind") in KINDS else None
 

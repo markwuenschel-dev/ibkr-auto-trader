@@ -49,6 +49,16 @@ Done-contract condition 3 (`lanes-ran`) requires the resolved plan to be **prese
 
 ## Budget and safety
 
-Balanced limits permit three work attempts, six verification passes, eighteen total model calls, and three findings per pass. A normal run tops out at twelve calls; a high-risk run tops out at eighteen. Reviewer assessment still runs concurrently with the selected assurance pair or pairs, but nothing can reach done until the reviewer, every resolved pass, source/test evidence, and the done contract agree.
+Balanced limits permit three work attempts, nine verification passes, twenty-four total model calls, and three findings per pass. A normal run tops out at eighteen calls; a high-risk run tops out at twenty-four. Reviewer assessment still runs concurrently with the selected assurance pair or pairs, but nothing can reach done until the reviewer, every resolved pass, source/test evidence, spec conformance, and the done contract agree.
 
-For the full decision record, see [ADR-0004](docs/adr/0004-four-role-risk-tiered-assurance.md).
+## Spec conformance (ADR-0005)
+
+Every candidate also runs an always-on **spec-conformance pair**, reusing the baseline profile. It is not an eleventh lane: the ten lane contracts are *defect* probes ("what is wrong here?"), and they are blind to a requirement the change silently OMITS — nothing is wrong, something is absent, and absence raises no finding.
+
+It adjudicates the handoff's **declared, typed constraints** (`## Constraints` / `- [ID] text`). Declare them with `handoff create --constraint ID=TEXT`. **A handoff that declares none cannot close autonomously** and is refused before any model work: an autonomous close asserts the spec was met, and with no requirements that assertion is unfalsifiable.
+
+Two assessors independently judge every requirement and must agree; each `met` must cite a `path:line` that resolves. Disagreement, malformed output, a stale digest, or an unresolvable pointer is `verification_incomplete` — unknown never closes. A confirmed unmet requirement becomes a blocker carrying its text. Done-contract condition 12 gates it, reading the ledger; the reviewer's `[met]` prose stays advisory (it was never authoritative).
+
+**What this buys, exactly:** independent agreement with resolvable citations — *not* proof. A false `met` citing a real line passes every mechanical check; only the second assessor disagreeing catches it. So a requirement expressible as a type or a test should be one, since `verify.py` cannot be talked out of a verdict.
+
+For the full decision record, see [ADR-0004](docs/adr/0004-four-role-risk-tiered-assurance.md) and [ADR-0005](docs/adr/0005-candidate-bound-spec-conformance.md).

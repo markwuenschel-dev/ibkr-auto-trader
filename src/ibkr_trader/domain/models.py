@@ -120,8 +120,20 @@ class RiskPlan(_Frozen):
     planner_projection: Any = None
     projection_is_authoritative: bool = False
     context_digest: str = ""
-    decision_generation: Any = None
-    session_generation: Any = None
+    # REQUIRED and typed, deliberately. These were `Any = None`, and a planner that read them off
+    # attributes which did not exist bound None on every plan while looking correct — a defect the
+    # type checker could not see (None is a valid `Any`), the tests did not assert, the adversarial
+    # lanes never raised, and a reviewer marked `[met]` citing the real assignment line (2026-07-16).
+    # `int` with no default is what makes that omission a pyright error instead of a silent lie:
+    # ADR-0003 requires plans to BIND these, and a binding that is structurally None is not a binding.
+    #
+    # decision_generation: the session generation the RiskContext was SEALED at (the assembler's
+    # fenced gen_at_seal). session_generation: the session generation observed when the control state
+    # was built. They differ exactly when the session reconnected between the seal and planning —
+    # i.e. the plan would be mixing pre- and post-reconnect state. The plan binds both; the approver
+    # re-checks (ADR-0003: mutable state is revalidated at execution).
+    decision_generation: int
+    session_generation: int
     policy_version: str = ""
     declined: bool = False
     decline_reason: str | None = None
@@ -184,6 +196,12 @@ class RiskContext(_MintGuarded):
     account_observed_at: datetime
     as_of: datetime
     context_digest: str
+    #: The session generation this context was SEALED at (ADR-0002 ⑨) — the value the assembler's
+    #: fence proved the account snapshot and the quote batch agreed on. It was computed and fenced at
+    #: seal, then discarded: downstream had no way to ask "which session produced this decision?", so
+    #: a planner binding a `generation` read it off a field that never existed and got None forever.
+    #: Carrying it makes the plan's binding a real read of a real value.
+    generation: int
 
     def model_post_init(self, __context: Any) -> None:
         """Copy and seal every decision-universe map, including model-construct paths.

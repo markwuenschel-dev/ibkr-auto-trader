@@ -331,6 +331,129 @@ def _plan_incomplete(
     }
 
 
+def run_conformance_pass(
+    collab,
+    hid: str,
+    conformance_pass,
+    *,
+    runner=ap._cli_runner,
+    log: str | None = None,
+    budget=None,
+    candidate_id: str | None = None,
+    source_base=None,
+) -> dict:
+    """Run the always-on spec-conformance pair and return its candidate-bound record (ADR-0005).
+
+    Two independent assessors judge the handoff's DECLARED constraints against the real source, and
+    must agree. Every refusal path here is deliberately ``incomplete`` rather than a soft pass: no
+    typed constraints, a dead backend, an exhausted budget, malformed output, disagreement,
+    unresolvable evidence. An autonomous close asserts the spec was met — if that assertion cannot be
+    adjudicated, the honest answer is "unknown", and unknown must not close.
+    """
+    import conformance as cf
+
+    log = log or ap._log_default(collab)
+    rid = ap._run_id(collab)
+    if conformance_pass is None:
+        # A plan resolved before ADR-0005 (or hand-built) carries no conformance pair. Refuse rather
+        # than crash, and refuse rather than skip: "the plan had no conformance pass" must not read as
+        # "conformance passed". Condition 12 rejects this record; the legacy path is still runnable.
+        return {
+            "pass": "spec-conformance",
+            "candidate_id": candidate_id,
+            "requirement_ids": [],
+            "results": [],
+            "blockers": [],
+            "incomplete": {"reason": "plan", "detail": "verification plan carries no conformance pass"},
+            "satisfied": False,
+            "ran": False,
+        }
+    profile = conformance_pass.profile
+    record: dict = {
+        "pass": conformance_pass.id,
+        "candidate_id": candidate_id,
+        "protocol_revision": conformance_pass.protocol_revision,
+        "profile": profile.identity_data(),
+        "contract_digest": None,
+        "requirement_ids": [],
+        "results": [],
+        "blockers": [],
+        "incomplete": None,
+        "satisfied": False,
+        "ran": False,
+    }
+    try:
+        contract = cf.compile_contract(collab, hid, protocol_revision=conformance_pass.protocol_revision)
+    except cc.CollabError as exc:
+        # No typed constraints (or an unreadable handoff): the claim "the spec was met" is
+        # unfalsifiable, so refuse BEFORE spending a model call.
+        record["incomplete"] = {"reason": "contract", "detail": str(exc)}
+        return record
+    record["contract_digest"] = contract.digest
+    record["requirement_ids"] = list(contract.ids)
+
+    _, path = hc._reconcile(collab, hid)
+    if path is None:
+        raise hc.HandoffNotFound(f"handoff {hid} not found")
+    content = ap._substance(collab, Path(path))
+
+    raws = {}
+    for role, seat, cmd, system, timeout, unset in (
+        ("assessor", profile.breaker_seat, profile.breaker_cmd, profile.breaker_system,
+         profile.breaker_timeout, profile.breaker_unset_env),
+        ("verifier", profile.verifier_seat, profile.verifier_cmd, profile.verifier_system,
+         profile.verifier_timeout, profile.verifier_unset_env),
+    ):  # fmt: skip
+        try:
+            if budget is not None and role == "assessor":
+                budget.charge(rb.VERIFICATION_PASS)  # one pass, two calls (ADR-0005 D2)
+            raws[role] = _dispatch(
+                runner,
+                list(cmd),
+                ap._build_prompt(system, f"{cf.build_prompt(contract, role=role)}\n\n---\n\n{content}"),
+                timeout=timeout,
+                unset_env=list(unset) or None,
+                budget=budget,
+            )
+        except rb.BudgetExceeded as exc:
+            record["incomplete"] = {"reason": "budget", "detail": exc.which}
+            return record
+        except cc.CollabError as exc:
+            record["incomplete"] = {"reason": "backend", "detail": f"{role} seat {seat!r}: {exc}"}
+            return record
+        ap._write_reply(collab, f"{seat}-conformance-{role}", ap._sanitize(raws[role]))
+
+    verdict = cf.reconcile(contract, raws["assessor"], raws["verifier"], source_base=source_base or collab)
+    record.update(
+        {
+            "results": verdict["results"],
+            "blockers": verdict["blockers"],
+            "incomplete": verdict["incomplete"],
+            "satisfied": verdict["satisfied"],
+            "ran": True,
+        }
+    )
+    ap._emit_safe(
+        ap._trace.emit,  # autopilot owns the local-trace loader (stdlib `trace` shadowing, ap:71)
+        log,
+        run_id=rid,
+        stage="autopilot.conformance",
+        role="verifier",
+        artifact=f"handoff:{hid}",
+        decision={
+            "action": "conformance",
+            "reason_codes": [
+                f"requirements:{len(contract.ids)}",
+                f"satisfied:{verdict['satisfied']}",
+                *([f"incomplete:{verdict['incomplete']['reason']}"] if verdict["incomplete"] else []),
+                *[f"unmet:{b['id']}" for b in verdict["blockers"]],
+            ],
+            "confidence": None,
+        },
+    )
+    return record
+
+
 def run_plan_pass(
     collab,
     hid: str,
@@ -530,6 +653,16 @@ def _run_resolved_plan(
                 verification_plan.passes,
             )
         )
+    conformance = run_conformance_pass(
+        collab,
+        hid,
+        verification_plan.conformance,
+        runner=runner,
+        log=log,
+        budget=budget,
+        candidate_id=candidate_id,
+        source_base=source_base,
+    )
     blockers = [
         {
             "id": f"{result['pass']}-{finding['id']}",
@@ -543,10 +676,21 @@ def _run_resolved_plan(
         for result in results
         for finding in result.get("confirmed") or []
     ]
+    # A confirmed-unmet requirement is a BLOCKER, not a footnote: it flows into the same
+    # blockers-fixed/repair machinery as a lane defect, so the builder receives the exact unmet
+    # requirement text rather than a vague send-back.
+    blockers += list(conformance.get("blockers") or [])
     tool_error = next((result["tool_error"] for result in results if result.get("tool_error")), None)
     overflow = sum(int(result.get("overflow", 0) or 0) for result in results)
     unverified = [item for result in results for item in (result.get("unverified") or [])]
-    incomplete = bool(overflow) or any(result.get("incomplete") for result in results)
+    # Conformance that could not be adjudicated (disagreement / malformed / unresolvable / no typed
+    # constraints) is verification_incomplete for the whole candidate — the same fail-closed posture
+    # the defect passes take, for the same reason: unknown is not a pass.
+    incomplete = (
+        bool(overflow)
+        or any(result.get("incomplete") for result in results)
+        or bool(conformance.get("incomplete"))
+    )
     preflight = (
         ap._capture_preflight(source_base, test_path, reviewer_seat, manifest)
         if reviewer_seat and source_base
@@ -570,6 +714,9 @@ def _run_resolved_plan(
         "verification_plan": verification_plan.identity_data(),
         "verification_plan_digest": verification_plan.identity_digest,
         "lanes": results,
+        # One ledger write carries defect evidence AND conformance (ADR-0005): two artifacts would let
+        # a reader see a green lane table beside an unmet requirement and believe the table.
+        "conformance": conformance,
         "blockers": blockers,
         "accepted_residuals": [],
         "tool_error": tool_error,

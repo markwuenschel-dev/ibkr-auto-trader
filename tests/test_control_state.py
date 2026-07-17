@@ -19,17 +19,22 @@ def test_control_state_carries_only_the_control_plane_facts_and_is_frozen():
         session_date=date(2026, 7, 11),
         realized_daily_pnl=Decimal("-12.34"),
         observed_at=observed_at,
+        session_generation=7,
     )
 
     assert state.policy.version == "reviewed-2026-07-11"
     assert state.realized_daily_pnl == Decimal("-12.34")
     assert isinstance(state.realized_daily_pnl, Decimal)
     assert state.observed_at == observed_at
+    assert state.session_generation == 7
     assert set(RiskControlState.model_fields) == {
         "policy",
         "session_date",
         "realized_daily_pnl",
         "observed_at",
+        # A session-scoped control-plane fact like session_date: the generation (ADR-0002 ⑨) observed
+        # when this state was built, which a plan binds against the sealed context's generation.
+        "session_generation",
     }
     assert "mode" not in RiskControlState.model_fields
     assert "reservation" not in RiskControlState.model_fields

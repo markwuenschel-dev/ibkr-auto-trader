@@ -164,9 +164,7 @@ def test_json_numbers_are_parsed_from_text_and_never_via_a_binary_float() -> Non
     ``0.30000000000000004``) never happens on this path. What you wrote is what you get.
     """
     for literal in ("0.3", "0.30", "0.1", "0.30000000000000004"):
-        parsed = RiskPolicy.model_validate_json(
-            f'{{"session_drawdown_pct": {literal}}}'
-        ).session_drawdown_pct
+        parsed = RiskPolicy.model_validate_json(f'{{"session_drawdown_pct": {literal}}}').session_drawdown_pct
         assert parsed == Decimal(literal), f"{literal} must survive as its own exact value"
 
     # the flag stays strict on the JSON path too: an int is not a bool

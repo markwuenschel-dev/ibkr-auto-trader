@@ -62,17 +62,22 @@ class Limits:
 
     @classmethod
     def balanced(cls) -> Limits:
-        """The calibrated 'balanced' defaults (ADR-0002 Open questions; ADR-0003).
+        """The calibrated 'balanced' defaults (ADR-0002 Open questions; ADR-0003; ADR-0005 D2).
 
-        Three work attempts permit a normal run to top out at 12 model calls and a high-risk run at
-        18: 3/6 verification passes, 30 min wall-clock, and three findings per bounded batch. These
-        are calibration knobs, not contract — a run may
-        override them (and `control.json` may raise them mid-run for the current epoch).
+        Three work attempts. Every candidate now runs an always-on spec-conformance pair alongside
+        its defect passes (ADR-0005), so the per-attempt ceiling is three passes rather than two:
+        9 verification passes over 3 attempts, and 24 total model calls (a normal run tops out at 18,
+        a high-risk run at 24). 30 min wall-clock, three findings per bounded batch.
+
+        These are calibration knobs, not contract — a run may override them (and `control.json` may
+        raise them mid-run for the current epoch). Raising 6->9 and 18->24 is what pays for
+        conformance: left at 6/18, the third pair would exhaust the budget mid-candidate and every
+        run would escalate budget_exhausted instead of closing.
         """
         return cls(
             max_work_attempts=3,
-            max_verification_passes=6,
-            max_total_model_calls=18,
+            max_verification_passes=9,
+            max_total_model_calls=24,
             max_wall_clock_seconds=1800.0,
             max_findings_per_lane=3,
         )

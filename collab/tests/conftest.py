@@ -17,6 +17,7 @@ path simply do not call it.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -71,6 +72,39 @@ def write_v2_seats(home, document: dict | None = None, *, closeout=None) -> Path
     seats = path / "seats.json"
     seats.write_text(json.dumps(document or v2_seats_document(closeout=closeout), indent=2), encoding="utf-8")
     return seats
+
+
+def is_conformance_prompt(prompt: str) -> bool:
+    """True when this dispatch is the spec-conformance pair rather than a defect lane.
+
+    The conformance pair reuses the BASELINE profile, so its cmd is identical to the baseline lane's;
+    only the prompt differs. A fake runner therefore has to route on the prompt, exactly as a real
+    model would have to read it.
+    """
+    return "CONFORMANCE ASSESSOR" in (prompt or "") or "CONFORMANCE VERIFIER" in (prompt or "")
+
+
+def conformance_reply(prompt: str, *, status="met", source="src/m.py:1", test=None) -> str:
+    """A well-formed conformance report answering whatever contract the prompt carries.
+
+    Parses the digest and requirement ids back out of the prompt so the reply is genuinely bound to
+    the contract under test — a hard-coded digest would drift the moment a fixture's constraints
+    change, and would pass for the wrong reason.
+    """
+    digest = re.search(r'"contract_digest":\s*"([^"]+)"', prompt or "")
+    # Deduped, order-preserving: the handoff's own '## Constraints' section is appended after the
+    # requirement list, so each id appears TWICE in the prompt. Emitting both would be a duplicate
+    # record — which the parser rightly refuses.
+    ids = list(dict.fromkeys(re.findall(r"^- \[([^\]]+)\]", prompt or "", re.MULTILINE)))
+    return json.dumps(
+        {
+            "contract_digest": digest.group(1) if digest else "conformance:unknown",
+            "requirements": [
+                {"id": rid, "status": status, "source": source, "test": test, "evidence": "read it"}
+                for rid in ids
+            ],
+        }
+    )
 
 
 @pytest.fixture

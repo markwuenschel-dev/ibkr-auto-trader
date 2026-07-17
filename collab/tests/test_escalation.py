@@ -152,7 +152,16 @@ class TestLoopPolicy:
         (Path(collab) / "src").mkdir(parents=True, exist_ok=True)
         (Path(collab) / "src" / "gateway.py").write_text("x = 1\n", encoding="utf-8")
         subprocess.run(["git", "init"], cwd=collab, capture_output=True)  # cond-11 preflight needs a repo
-        hc.create(collab, to="builder", from_="reviewer", title="PT-3 gateway", body="build it")
+        # Typed constraints (ADR-0005): conformance is adjudicated against declared ids, and a handoff
+        # with none is refused before any model work.
+        hc.create(
+            collab,
+            to="builder",
+            from_="reviewer",
+            title="PT-3 gateway",
+            body="build it",
+            constraints=[("C1", "the gateway module exports x")],
+        )
         import re as _re
 
         _, p = hc._reconcile(collab, "001")
@@ -197,12 +206,13 @@ class TestLoopPolicy:
                 return f"attempt {n['b']}"
             if "reviewer" in who:
                 return "looks fine\n[[SIGNOFF]]"
+            if conftest.is_conformance_prompt(prompt):
+                # Requirements met: the persistent LANE defect is what this test is about.
+                return conftest.conformance_reply(prompt, source="src/gateway.py:1")
             # The resolved v2 baseline pair speaks the bounded BATCH protocol (ADR-0004 D3); both
             # executors are the claude CLI, so dispatch is told apart by MODEL, not seat name.
             if "opus-4.8" in argv:  # breaker always finds the persistent defect
-                return (
-                    "FINDING: F1 | src/gateway.py:233 | tz-aware/naive TypeError | gates the snapshot read"
-                )
+                return "FINDING: F1 | src/gateway.py:233 | tz-aware/naive TypeError | gates the snapshot read"
             if "sonnet-5" in argv:  # verifier confirms it
                 return "VERDICT: CONFIRMED F1 | src/gateway.py:233 skew"
             return "ok"
@@ -225,7 +235,14 @@ class TestLoopPolicy:
         # "block without a confirmed defect runs silently to the cap").
         collab, home = str(tmp_path / "c"), str(tmp_path)
         conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
-        hc.create(collab, to="builder", from_="reviewer", title="x", body="y")
+        # Typed constraints + a real source file: conformance refuses a handoff that declares no
+        # requirements, and refuses evidence whose pointer does not resolve. Either would escalate
+        # verification_incomplete and this test would never reach the budget it is about.
+        (Path(collab) / "src").mkdir(parents=True, exist_ok=True)
+        (Path(collab) / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
+        hc.create(
+            collab, to="builder", from_="reviewer", title="x", body="y", constraints=[("C1", "exports x")]
+        )
         n = {"b": 0}
 
         def fake(cmd, prompt, **k):
@@ -234,6 +251,8 @@ class TestLoopPolicy:
                 return f"rev {n['b']}"  # genuine progress each attempt
             if "reviewer" in cmd[0]:
                 return "not yet — keep going"  # reviewer withholds
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt, source="src/m.py:1")
             return "NO-FINDING"  # baseline pair clean -> withheld sign-off is the sole blocker
 
         ap.run(collab, seats=_seats(), max_rounds=2, runner=fake, home=home)
@@ -265,6 +284,8 @@ class TestOperatorRetry:
                 return "built"
             if "reviewer" in who:
                 return "verified\n[[SIGNOFF]]" if phase["sign"] else "not yet — keep going"
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt, source="src/gateway.py:1")
             if "opus-4.8" in " ".join(cmd):  # v2 baseline breaker finds nothing -> clean lanes
                 return "NO-FINDING"
             return "ok"
@@ -301,6 +322,8 @@ class TestOperatorRetry:
                 return "built"
             if "reviewer" in who:
                 return "verified\n[[SIGNOFF]]"
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt, source="src/gateway.py:1")
             if "opus-4.8" in " ".join(cmd):  # v2 baseline breaker
                 return "NO-FINDING"
             return "ok"

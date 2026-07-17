@@ -153,6 +153,21 @@ class TestGenerationFence:
         with pytest.raises(GenerationFenceError):
             asyncio.run(assembler.capture([MSFT]))
 
+    def test_the_fenced_generation_is_sealed_into_the_context(self):
+        # The fence proved account/quotes/session agree on a generation — and then the value was
+        # emitted to telemetry and DROPPED. Downstream had nothing to read, so a planner binding "the
+        # generation this decision was made at" bound None forever while looking right (2026-07-16).
+        # Sealing it in is what makes that binding a real read of a real value (ADR-0002 ⑨).
+        session = FakeSession(generation=5)
+        gateway = FakeAccountGateway(
+            clock=FixedClock(_SEAL), summary=_summary(), held=[_held(MSFT, "MSFT", -4)], session=session
+        )
+        feed = FakeMarketDataFeed(quotes={}, session=session)
+        asyncio.run(gateway.connect())
+        assembler = DecisionContextAssembler(gateway, feed, decision_time_source=FixedDecisionClock(_SEAL))
+        context = asyncio.run(assembler.capture([MSFT]))
+        assert context.generation == 5
+
 
 class TestDigestDeterminism:
     def test_same_inputs_same_digest_change_on_drift(self):

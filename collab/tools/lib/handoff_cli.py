@@ -107,10 +107,36 @@ def _emit_safe(fn, *args, **kwargs) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _parse_constraints(raw) -> list[tuple[str, str]]:
+    """Split repeated ``--constraint ID=TEXT`` into ``(id, text)`` pairs.
+
+    Only the CLI-shaped concern lives here (the ``ID=TEXT`` split, so a malformed flag is
+    EXIT_USAGE). Content validation — newlines, duplicates, bracket ids — belongs to
+    ``handoff_core._reject_unsafe_constraints``, the canonical writer boundary, so every caller gets
+    it and not just this one. [C14]: the CLI stays thin over handoff_core.
+    """
+    out: list[tuple[str, str]] = []
+    for item in raw or []:
+        cid, sep, text = str(item).partition("=")
+        if not sep:
+            raise cc.CollabError(f"--constraint must be ID=TEXT, got {item!r}")
+        out.append((cid.strip(), text.strip()))
+    return out
+
+
 def cmd_create(args) -> int:
     collab = _collab_from(args)
+    # A CollabError from either the ID=TEXT split or handoff_core's constraint validation is mapped
+    # to EXIT_USAGE by main() ([C16]) — no local handling, no second error path to drift.
+    constraints = _parse_constraints(getattr(args, "constraints", None))
     r = hc.create(
-        collab, to=args.to, from_=args.from_, title=args.title, priority=args.priority, body=args.body or ""
+        collab,
+        to=args.to,
+        from_=args.from_,
+        title=args.title,
+        priority=args.priority,
+        body=args.body or "",
+        constraints=constraints or None,
     )  # [C19] guard lives in render_handoff
     _emit_safe(
         he.on_create, _log(collab), _run_id(collab), r["id"], span_id=r["id"], title=args.title
@@ -265,6 +291,16 @@ def _build_parser() -> argparse.ArgumentParser:
     c.add_argument("--title", required=True)
     c.add_argument("--priority", default="normal", choices=("high", "normal", "low"))
     c.add_argument("--body", default="")
+    c.add_argument(
+        "--constraint",
+        action="append",
+        metavar="ID=TEXT",
+        dest="constraints",
+        help="declare a typed constraint, repeatable (e.g. --constraint C1='paper-trading only'). "
+        "Required for any handoff eligible for autonomous closure (ADR-0005): conformance is "
+        "adjudicated against declared IDs, so a handoff with none makes 'the spec was met' "
+        "unfalsifiable.",
+    )
     c.set_defaults(func=cmd_create)
 
     ls = sub.add_parser("list", help="list handoffs")

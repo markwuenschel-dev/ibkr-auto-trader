@@ -106,11 +106,9 @@ def is_canonical_command(argv) -> bool:
 
 def _git(argv: list[str], base) -> str:
     try:
-        p = subprocess.run(
-            ["git", *argv], cwd=str(base), capture_output=True, text=True, timeout=60
-        )
+        p = subprocess.run(["git", *argv], cwd=str(base), capture_output=True, text=True, timeout=60)
         return p.stdout if p.returncode == 0 else ""
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return ""
 
 
@@ -123,9 +121,7 @@ _EPHEMERAL = ("__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".co
 
 def _significant(status: str) -> str:
     keep = [
-        line
-        for line in status.splitlines()
-        if line.strip() and not any(frag in line for frag in _EPHEMERAL)
+        line for line in status.splitlines() if line.strip() and not any(frag in line for frag in _EPHEMERAL)
     ]
     return "\n".join(sorted(keep))
 
@@ -136,7 +132,7 @@ def _norm_root(root: str | None) -> str | None:
         return None
     try:
         return str(Path(root).resolve()).replace("\\", "/").casefold()
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
 
 
@@ -197,9 +193,7 @@ def _record(kind, label, *, passed, command, exit_code, start, end, started_ts, 
 def _run(argv, base, kind, pass_label, fail_label) -> dict:
     start, started_ts = _checkout_state(base), _now()
     try:
-        proc = subprocess.run(
-            list(argv), cwd=str(base), capture_output=True, text=True, timeout=_TIMEOUT_S
-        )
+        proc = subprocess.run(list(argv), cwd=str(base), capture_output=True, text=True, timeout=_TIMEOUT_S)
         exit_code = proc.returncode
     except (OSError, subprocess.SubprocessError) as e:
         end = _checkout_state(base)
@@ -283,9 +277,7 @@ def run_authoritative(base, argv=_OMITTED) -> dict:
     if normalized is None:
         return rejected(candidate, "malformed argv: expected a non-empty list of non-empty strings")
     if normalized != AUTHORITATIVE_ARGV:
-        return rejected(
-            candidate, f"{' '.join(normalized)!r} != {' '.join(AUTHORITATIVE_ARGV)!r}"
-        )
+        return rejected(candidate, f"{' '.join(normalized)!r} != {' '.join(AUTHORITATIVE_ARGV)!r}")
     return _run(normalized, base, KIND_AUTHORITATIVE, LABEL_GREEN, LABEL_AUTHORITATIVE_FAIL)
 
 

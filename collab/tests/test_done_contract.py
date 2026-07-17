@@ -116,6 +116,16 @@ def _ledger(collab, hid="001", **over):
         "verification_plan": {"passes": [{"id": "baseline"}]},
         "verification_plan_digest": "plan:test-digest",
         "lanes": [{"pass": "baseline", "ran": True, "confirmed": [], "refuted": []}],
+        # A satisfied, candidate-bound conformance record (ADR-0005, condition 12). Conditions 1..11
+        # gate mechanical evidence and cannot see a requirement the change simply omits.
+        "conformance": {
+            "candidate_id": None,
+            "contract_digest": "conformance:test-digest",
+            "requirement_ids": ["C1"],
+            "results": [{"id": "C1", "status": "met"}],
+            "incomplete": None,
+            "satisfied": True,
+        },
         "blockers": [],
         "accepted_residuals": [],
     }
@@ -133,12 +143,105 @@ def _eval(collab):
 
 
 class TestEvaluate:
-    def test_all_eleven_conditions_satisfied(self, tmp_path):
+    def test_all_twelve_conditions_satisfied(self, tmp_path):
         collab = _setup(tmp_path)
         _ledger(collab)
         v = _eval(collab)
         assert v["satisfied"] is True
-        assert len(v["conditions"]) == 11 and _failed(v) == set()
+        assert len(v["conditions"]) == 12 and _failed(v) == set()
+
+    def test_a_ledger_with_no_conformance_record_cannot_close(self, tmp_path):
+        # The 2026-07-16 shape: every mechanical condition green, and a requirement silently omitted.
+        # Absence of the record is refusal, never "nothing to check".
+        collab = _setup(tmp_path)
+        _ledger(collab, conformance=None)
+        v = _eval(collab)
+        assert v["satisfied"] is False and "spec-conformance" in _failed(v)
+
+    def test_an_unmet_requirement_cannot_close(self, tmp_path):
+        collab = _setup(tmp_path)
+        _ledger(
+            collab,
+            conformance={
+                "candidate_id": None,
+                "contract_digest": "conformance:d",
+                "requirement_ids": ["C1", "C2"],
+                "results": [{"id": "C1", "status": "met"}, {"id": "C2", "status": "missing"}],
+                "incomplete": None,
+            },
+        )
+        v = _eval(collab)
+        assert v["satisfied"] is False and "spec-conformance" in _failed(v)
+
+    def test_incomplete_conformance_is_not_a_pass(self, tmp_path):
+        # Disagreement/malformed/unresolvable evidence is UNKNOWN. Unknown must never close.
+        collab = _setup(tmp_path)
+        _ledger(
+            collab,
+            conformance={
+                "candidate_id": None,
+                "contract_digest": "conformance:d",
+                "requirement_ids": ["C1"],
+                "results": [],
+                "incomplete": {"reason": "disagreement", "detail": "assessor=met verifier=missing"},
+            },
+        )
+        v = _eval(collab)
+        assert v["satisfied"] is False and "spec-conformance" in _failed(v)
+
+    def test_a_contract_declaring_no_requirements_cannot_close_vacuously(self, tmp_path):
+        # The condition-3 lesson: a check that requires nothing passes for free.
+        collab = _setup(tmp_path)
+        _ledger(
+            collab,
+            conformance={
+                "candidate_id": None,
+                "contract_digest": "conformance:d",
+                "requirement_ids": [],
+                "results": [],
+                "incomplete": None,
+            },
+        )
+        v = _eval(collab)
+        assert v["satisfied"] is False and "spec-conformance" in _failed(v)
+
+    def test_conformance_evidence_bound_to_another_candidate_is_refused(self, tmp_path):
+        # An unbound record could be replayed from a different candidate.
+        collab = _setup(tmp_path)
+        _ledger(
+            collab,
+            conformance={
+                "candidate_id": "cand:someone-else",
+                "contract_digest": "conformance:d",
+                "requirement_ids": ["C1"],
+                "results": [{"id": "C1", "status": "met"}],
+                "incomplete": None,
+            },
+        )
+        v = dcon.evaluate(
+            collab,
+            "001",
+            seats={},
+            reviewer_seat="reviewer",
+            builder_seat="builder",
+            candidate_id="cand:this-one",
+        )
+        assert v["satisfied"] is False and "spec-conformance" in _failed(v)
+
+    def test_coverage_mismatch_is_refused(self, tmp_path):
+        collab = _setup(tmp_path)
+        _ledger(
+            collab,
+            conformance={
+                "candidate_id": None,
+                "contract_digest": "conformance:d",
+                "requirement_ids": ["C1", "C2"],
+                "results": [{"id": "C1", "status": "met"}],  # C2 never adjudicated
+                "incomplete": None,
+            },
+        )
+        v = _eval(collab)
+        assert v["satisfied"] is False and "spec-conformance" in _failed(v)
 
     def test_ledger_without_a_resolved_plan_cannot_close(self, tmp_path):
         # ADR-0005: a legacy fan-out ledger carries no plan, so `ledger_required_passes` would fall back

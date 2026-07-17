@@ -28,9 +28,15 @@ def test_is_reducing_matches_signed_position_contract(current: int, resulting: i
 @pytest.mark.parametrize(
     ("current", "resulting", "expected"),
     [
-        (100, 50, True), (-100, -50, True), (100, 0, True), (-100, 0, True),
-        (0, 100, False), (100, 150, False), (-100, -150, False),
-        (100, -100, False), (-100, 100, False),
+        (100, 50, True),
+        (-100, -50, True),
+        (100, 0, True),
+        (-100, 0, True),
+        (0, 100, False),
+        (100, 150, False),
+        (-100, -150, False),
+        (100, -100, False),
+        (-100, 100, False),
     ],
 )
 def test_is_reducing_examples(current: int, resulting: int, expected: bool) -> None:
@@ -40,9 +46,15 @@ def test_is_reducing_examples(current: int, resulting: int, expected: bool) -> N
 def _mint(*, latch: ReduceOnlyLatch, current_qty: int, side: Side, quantity: int) -> ApprovedOrderIntent:
     return ApprovedOrderIntent._mint(
         RISK_AUTHORITY,
-        symbol="AAPL", side=side, quantity=quantity, stop_price=Decimal("180"),
-        approved_at=_NOW, ledger_ref="ledger:reduce-only", reduce_only_latch=latch,
-        session_date=_SESSION, current_qty=current_qty,
+        symbol="AAPL",
+        side=side,
+        quantity=quantity,
+        stop_price=Decimal("180"),
+        approved_at=_NOW,
+        ledger_ref="ledger:reduce-only",
+        reduce_only_latch=latch,
+        session_date=_SESSION,
+        current_qty=current_qty,
     )
 
 
@@ -78,8 +90,13 @@ def test_clearing_restores_minting_without_auto_flatten() -> None:
 def test_mint_fails_closed_without_position_context() -> None:
     with pytest.raises(ValueError, match="session_date and current_qty"):
         ApprovedOrderIntent._mint(
-            RISK_AUTHORITY, symbol="AAPL", side=Side.BUY, quantity=1,
-            stop_price=Decimal("180"), approved_at=_NOW, ledger_ref="missing",
+            RISK_AUTHORITY,
+            symbol="AAPL",
+            side=Side.BUY,
+            quantity=1,
+            stop_price=Decimal("180"),
+            approved_at=_NOW,
+            ledger_ref="missing",
             reduce_only_latch=ReduceOnlyLatch(),
         )
 

@@ -155,6 +155,44 @@ def _reject_unsafe_body(body: str) -> None:
         )
 
 
+def _reject_unsafe_constraints(constraints) -> list[tuple[str, str]]:
+    """Validate typed constraints at the WRITER boundary and return them normalized.
+
+    ``_reject_unsafe_body`` hardened the body and pointed callers at ``constraints=`` as the safe
+    typed path — but the typed path itself interpolated its text raw into ``- [{id}] {text}``. A
+    single newline in the text forges a second bullet, so `('C1', 'ok\\n- [C9] injected')` renders a
+    real ``[C9]`` that ``contracts.declared_constraints`` then parses as genuine, poisoning
+    identity-addressed ``handoff_loss`` (§7.4) — exactly what [C38] exists to prevent, reached
+    through the door marked safe.
+
+    This lives here rather than in ``handoff_cli`` because ``create()`` is the canonical writer: the
+    CLI is one caller, and a guard that only covers one caller is a guard an attacker walks around.
+    """
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in constraints or []:
+        try:
+            cid, text = item
+        except (TypeError, ValueError) as exc:
+            raise cc.CollabError(f"constraint must be an (id, text) pair, got {item!r}") from exc
+        cid, text = str(cid).strip(), str(text).strip()
+        if not cid or not text:
+            raise cc.CollabError(f"constraint {item!r} needs a non-empty id and text")
+        for name, value in (("id", cid), ("text", text)):
+            if any(ch in value for ch in ("\n", "\r", "\x00")):
+                raise cc.CollabError(
+                    f"constraint {cid!r} {name} may not contain newlines or NUL (it would forge a "
+                    f"second '- [ID]' bullet or a heading)"
+                )
+        if "[" in cid or "]" in cid:
+            raise cc.CollabError(f"constraint id {cid!r} may not contain '[' or ']'")
+        if cid in seen:
+            raise cc.CollabError(f"duplicate constraint id {cid!r}")
+        seen.add(cid)
+        out.append((cid, text))
+    return out
+
+
 def render_handoff(
     *, to, from_, hid, title, priority, date, status="pending", body="", constraints=None
 ) -> str:
@@ -175,6 +213,7 @@ def render_handoff(
     ):
         _reject_unsafe_scalar(_n, _v)
     _reject_unsafe_body(body)
+    constraints = _reject_unsafe_constraints(constraints)
     fm = "\n".join(
         [
             "---",
