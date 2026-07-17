@@ -62,7 +62,7 @@ class TestCleanRun:
 
     def test_writes_done_contract_verdict(self, clean):
         dc = json.loads((Path(clean["bundle_dir"]) / "done_contract.json").read_text("utf-8"))
-        assert dc["satisfied"] is True and len(dc["conditions"]) == 11
+        assert dc["satisfied"] is True and len(dc["conditions"]) == 12  # +spec-conformance (ADR-0005)
 
     def test_reaches_done_on_clean_evidence(self, clean):
         assert clean["reached_done"] is True
@@ -77,7 +77,7 @@ class TestCleanRun:
         summary = json.loads((d / "summary.json").read_text("utf-8"))
         assert summary["handoff_id"] == clean["handoff_id"]
         assert summary["seats"]["builder"] == "builder" and summary["seats"]["reviewer"] == "reviewer"
-        assert len(summary["done_contract"]["conditions"]) == 11
+        assert len(summary["done_contract"]["conditions"]) == 12  # +spec-conformance (ADR-0005)
 
 
 def _blocked(tmp_path_factory, scenario):

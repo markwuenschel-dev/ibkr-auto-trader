@@ -343,6 +343,20 @@ class TestListRuns:
 # --------------------------------------------------------------------------- #
 
 
+def _conformable(collab):
+    """Give a collab what ADR-0005 requires of an autonomously-closable slice.
+
+    Conformance is adjudicated against DECLARED constraints and refuses evidence whose pointer does
+    not resolve, so a driver test needs both a typed requirement and a real file to cite — otherwise
+    it escalates verification_incomplete and never reaches the behaviour under test.
+    """
+    (Path(collab) / "src").mkdir(parents=True, exist_ok=True)
+    (Path(collab) / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
+
+
+_CONSTRAINTS = [("C1", "the module exports x")]
+
+
 class TestDriverArchive:
     def test_run_archives_history_and_wipes_live_log(self, tmp_path):
         # Drive a real run() with a fake runner. Pre-seed the live log with junk to prove the run-start wipe;
@@ -351,7 +365,15 @@ class TestDriverArchive:
         home = str(tmp_path)
         conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
-        hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="review this")
+        _conformable(collab)  # typed constraints + a real source file (ADR-0005)
+        hc.create(
+            collab,
+            to="builder",
+            from_="reviewer",
+            title="kickoff",
+            body="review this",
+            constraints=_CONSTRAINTS,
+        )
         live = Path(ap._log_default(collab))
         live.parent.mkdir(parents=True, exist_ok=True)
         live.write_text(json.dumps({"stage": "JUNK_FROM_PRIOR_RUN", "marker": "STALE"}) + "\n", "utf-8")
@@ -364,6 +386,8 @@ class TestDriverArchive:
                 return f"rev {n['b']}"  # distinct output per attempt -> genuine progress
             if "reviewer" in cmd[0]:
                 return "keep going"  # reviewer withholds -> repair to the work-attempt budget
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt, source="src/m.py:1")
             return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2)
 
         rounds = ap.run(
@@ -394,7 +418,10 @@ class TestDriverArchive:
         home = str(tmp_path)
         conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
-        hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="build it")
+        _conformable(collab)  # typed constraints + a real source file (ADR-0005)
+        hc.create(
+            collab, to="builder", from_="reviewer", title="kickoff", body="build it", constraints=_CONSTRAINTS
+        )
         n = {"b": 0}
 
         def runner(cmd, prompt, *, timeout, **kw):
@@ -403,6 +430,8 @@ class TestDriverArchive:
                 return f"rev {n['b']}"  # distinct output -> genuine progress, loops to the budget
             if "reviewer" in cmd[0]:
                 return "not yet — keep going"  # reviewer withholds -> repair_required each attempt
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt, source="src/m.py:1")
             return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2)
 
         ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=2, runner=runner, home=home)
@@ -460,7 +489,15 @@ class TestLiveMaxRounds:
         home = str(tmp_path)
         conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
-        hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="review this")
+        _conformable(collab)  # typed constraints + a real source file (ADR-0005)
+        hc.create(
+            collab,
+            to="builder",
+            from_="reviewer",
+            title="kickoff",
+            body="review this",
+            constraints=_CONSTRAINTS,
+        )
         n = {"b": 0}
 
         def runner(cmd, prompt, *, timeout, **kw):
@@ -470,6 +507,8 @@ class TestLiveMaxRounds:
                 return f"rev {n['b']}"  # distinct output per attempt -> genuine progress
             if "reviewer" in cmd[0]:
                 return "keep going"  # reviewer withholds
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt, source="src/m.py:1")
             return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2)
 
         ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=1, runner=runner, home=home)
@@ -480,7 +519,15 @@ class TestLiveMaxRounds:
         home = str(tmp_path)
         conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
-        hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="review this")
+        _conformable(collab)  # typed constraints + a real source file (ADR-0005)
+        hc.create(
+            collab,
+            to="builder",
+            from_="reviewer",
+            title="kickoff",
+            body="review this",
+            constraints=_CONSTRAINTS,
+        )
         dc.set_max_rounds(collab, 1)  # live cap lower than the launch max_rounds
         n = {"b": 0}
 
@@ -490,6 +537,8 @@ class TestLiveMaxRounds:
                 return f"rev {n['b']}"
             if "reviewer" in cmd[0]:
                 return "keep going"
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt, source="src/m.py:1")
             return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2)
 
         ap.run(collab, seats=_cli(["reviewer", "builder"]), max_rounds=5, runner=runner, home=home)

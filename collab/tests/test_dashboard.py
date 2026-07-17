@@ -162,16 +162,30 @@ class TestStatusAndControl:
         # first sleep raise (same technique as test_watch_polls_on_idle) — never actually waiting.
         conftest.write_v2_seats(tmp_path)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
-        hc.create(collab, to="reviewer", from_="builder", title="x", body="review")
+        # Typed constraints + a real file to cite (ADR-0005): without them conformance refuses and the
+        # loop escalates verification_incomplete before reaching the round cap this test asserts.
+        (Path(collab) / "src").mkdir(parents=True, exist_ok=True)
+        (Path(collab) / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
+        hc.create(
+            collab,
+            to="reviewer",
+            from_="builder",
+            title="x",
+            body="review",
+            constraints=[("C1", "exports x")],
+        )
         seats = _cli(["reviewer", "builder"])
         dc.set_paused(collab, True)
 
         class _Slept(Exception):
             pass
 
-        def runner(cmd, *a, **k):
-            # The always-on v2 baseline pair (ADR-0004 D2) must report cleanly, or the candidate
-            # escalates verification_incomplete before the loop ever reaches the round cap.
+        def runner(cmd, prompt="", *a, **k):
+            # The always-on v2 baseline pair (ADR-0004 D2) and the conformance pair (ADR-0005) must
+            # both report cleanly, or the candidate escalates verification_incomplete before the loop
+            # ever reaches the round cap.
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt)
             return "NO-FINDING" if "claude" in cmd[0] else "ok"
 
         monkeypatch.setattr(ap.time, "sleep", lambda _s: (_ for _ in ()).throw(_Slept()))
@@ -263,9 +277,7 @@ class TestSnapshotAndActions:
         # (no live lease, no open escalation), never to a parked or in-progress slice.
         assert set(hc._TRANSITIONS) == {"claim", "done", "archive", "reclaim"}
         backward = {
-            a
-            for a, (frm, to) in hc._TRANSITIONS.items()
-            if hc._STATE_ORDER[to] < hc._STATE_ORDER[frm]
+            a for a, (frm, to) in hc._TRANSITIONS.items() if hc._STATE_ORDER[to] < hc._STATE_ORDER[frm]
         }
         assert backward == {"reclaim"}
 

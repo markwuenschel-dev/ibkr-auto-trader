@@ -128,10 +128,13 @@ class TestNoRefund:
 
 class TestBalancedDefaults:
     def test_balanced_profile(self):
+        # ADR-0005 D2 raised 6->9 passes and 18->24 calls to pay for the always-on conformance pair:
+        # three passes per attempt over three attempts. Left at 6/18 the third pair would exhaust the
+        # budget mid-candidate and every run would escalate budget_exhausted instead of closing.
         lim = rb.Limits.balanced()
         assert lim.max_work_attempts == 3
-        assert lim.max_verification_passes == 6
-        assert lim.max_total_model_calls == 18
+        assert lim.max_verification_passes == 9
+        assert lim.max_total_model_calls == 24
         assert lim.max_wall_clock_seconds == 1800.0
         assert lim.max_findings_per_lane == 3
         assert lim.max_review_decisions_per_candidate == 1

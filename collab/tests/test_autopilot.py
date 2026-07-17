@@ -179,7 +179,20 @@ class TestWorkAttemptBudget:
         home = str(tmp_path)
         conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
-        hc.create(collab, to="builder", from_="reviewer", title="kickoff", body="start the exchange")
+        # Typed constraints (ADR-0005): without them conformance refuses before any model work and the
+        # run would escalate verification_incomplete, never reaching the budget this test is about.
+        # The real source file matters too: conformance validates that cited evidence RESOLVES, so a
+        # fixture citing a nonexistent path fails for the wrong reason.
+        (Path(collab) / "src").mkdir(parents=True, exist_ok=True)
+        (Path(collab) / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
+        hc.create(
+            collab,
+            to="builder",
+            from_="reviewer",
+            title="kickoff",
+            body="start the exchange",
+            constraints=_SLICE_CONSTRAINTS,
+        )
         seats = {
             "builder": {"backend": "cli", "cmd": ["fake-builder"], "system": "b"},
             **_signer(["reviewer"]),
@@ -192,6 +205,8 @@ class TestWorkAttemptBudget:
                 return f"revision {n['b']}"  # distinct output per attempt -> genuine progress
             if "reviewer" in cmd[0]:
                 return "not yet — keep going"  # reviewer withholds every time
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt)  # requirements met -> reviewer is the blocker
             return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2) finds nothing
 
         ap.run(collab, seats=seats, max_rounds=3, runner=runner, home=home)
@@ -421,13 +436,21 @@ def _tiny_test(tmp_path, ok=True):
     return t
 
 
-def _slice(collab, *, to="builder", from_="reviewer", guardrails=None):
+#: Every autonomously-closable handoff must declare typed constraints (ADR-0005): conformance is
+#: adjudicated against declared ids, so a handoff with none makes "the spec was met" unfalsifiable and
+#: is refused before any model work.
+_SLICE_CONSTRAINTS = [("C1", "the module exports x")]
+
+
+def _slice(collab, *, to="builder", from_="reviewer", guardrails=None, constraints=_SLICE_CONSTRAINTS):
     """Lay out a git-inited collab with a real source file and a candidate handoff addressed to the worker.
     ``git init`` is what makes the reviewer repo-preflight (done-contract condition 11) succeed."""
     (Path(collab) / "src").mkdir(parents=True, exist_ok=True)
     (Path(collab) / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
     subprocess.run(["git", "init"], cwd=collab, capture_output=True)
-    hc.create(collab, to=to, from_=from_, title="slice", body="please build")
+    hc.create(
+        collab, to=to, from_=from_, title="slice", body="please build", constraints=list(constraints) or None
+    )
     if guardrails:
         import re as _re
 
@@ -472,9 +495,7 @@ def _gate_repo(base: Path, *, ok: bool) -> None:
     """
     base.mkdir(parents=True, exist_ok=True)
     (base / "scripts").mkdir(parents=True, exist_ok=True)
-    (base / "scripts" / "verify.py").write_text(
-        f"import sys; sys.exit({0 if ok else 1})\n", encoding="utf-8"
-    )
+    (base / "scripts" / "verify.py").write_text(f"import sys; sys.exit({0 if ok else 1})\n", encoding="utf-8")
     (base / "pyproject.toml").write_text(
         '[project]\nname = "t"\nversion = "0.0.0"\nrequires-python = ">=3.12"\n', encoding="utf-8"
     )
@@ -605,6 +626,9 @@ class TestCandidateClose:
                 return "Verified against source.\n[[SIGNOFF]]"
             if "builder" in who:
                 return "ok"
+            # The conformance pair reuses the baseline profile's cmd, so route on the PROMPT.
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt)
             return "NO-FINDING"  # the resolved v2 baseline pair (opus-4.8 breaker) finds nothing
 
         ap.run(collab, seats=_closeout_seats(), runner=runner, home=str(home))
@@ -641,6 +665,8 @@ class TestCandidateClose:
             calls.append(argv)
             if "gpt-5.6-terra" in argv:
                 return "builder completed the change"
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt)
             if "REVIEWER" in prompt:
                 return "Reviewed the repository.\n[[SIGNOFF]]"
             return "NO-FINDING"
@@ -655,9 +681,15 @@ class TestCandidateClose:
         assert ledger["verification_plan"]["passes"][0]["profile"]["breaker"]["model"] == "opus-4.8"
         assert ledger["verification_plan"]["passes"][1]["profile"]["breaker"]["model"] == "gpt-5.6-luna"
         budget = json.loads((Path(collab) / "autopilot" / "budget" / "001.json").read_text(encoding="utf-8"))
-        assert budget["current"]["verification_passes"] == 2
-        assert budget["current"]["verification_calls"] == 2
-        assert len(calls) == 4  # builder + reviewer + one no-finding breaker per resolved pass
+        # Three passes now: the two defect pairs plus the always-on conformance pair (ADR-0005 D2),
+        # which is why balanced() moved 6->9 passes and 18->24 calls.
+        assert budget["current"]["verification_passes"] == 3
+        # 2 defect-pass breaker calls + the conformance pair's 2 calls. This IS the standing cost of
+        # conformance: two model calls on every candidate, forever — the price of independent
+        # agreement on requirements that cannot be expressed as a type or a test.
+        assert budget["current"]["verification_calls"] == 4
+        # builder + reviewer + one no-finding breaker per defect pass + conformance assessor/verifier
+        assert len(calls) == 6
 
     def test_red_tests_block_close(self, tmp_path):
         # Clean findings but a FAILING test suite: ca approves (no findings) yet the evidence contract refuses
@@ -677,6 +709,8 @@ class TestCandidateClose:
                 return "Verified.\n[[SIGNOFF]]"
             if "builder" in cmd[0]:
                 return "ok"
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt)  # requirements met -> red tests are the blocker
             return "NO-FINDING"  # baseline pair finds nothing -> red tests are the sole blocker
 
         ap.run(collab, seats=_closeout_seats(), runner=runner, home=str(home))
@@ -748,6 +782,8 @@ class TestRepairLoop:
                 return f"attempt {state['builder']}"
             if "reviewer" in who:
                 return "Conformance: all met.\n[[SIGNOFF]]"
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt)  # the LANE defect is what drives repair here
             bad = "BUG" in (src.read_text("utf-8") if src.exists() else "")
             # The resolved v2 baseline pair speaks the bounded BATCH protocol (ADR-0004 D3) and is
             # dispatched by MODEL, not seat name — both executors are the claude CLI.
@@ -792,6 +828,8 @@ class TestRepairLoop:
                 return "I looked but changed nothing"  # source untouched every attempt
             if "reviewer" in who:
                 return "Conformance: all met.\n[[SIGNOFF]]"
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt)  # the persistent LANE defect is the point
             if "opus-4.8" in argv:  # v2 baseline breaker (batch protocol, ADR-0004 D3)
                 return "FINDING: F1 | src/m.py:1 | unchecked | data loss"
             if "sonnet-5" in argv:  # v2 baseline verifier
@@ -814,11 +852,14 @@ class TestBoardLease:
         _slice(collab)
         closeout = _closeout(collab, tmp_path, ok=True)
         _home_with(home, closeout, _closeout_seats())
+
         def runner(cmd, prompt, *, timeout, **kw):
             if "reviewer" in cmd[0]:
                 return "Verified.\n[[SIGNOFF]]"
             if "builder" in cmd[0]:
                 return "ok"
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt)
             return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2)
 
         ap.run(collab, seats=_closeout_seats(), runner=runner, home=str(home))
@@ -852,7 +893,14 @@ class TestOneHandoffAtATime:
         conftest.write_v2_seats(home)  # autonomous closeout requires a v2 catalog (ADR-0005)
         collab = str(tmp_path / "c")
         hc.create(collab, to="builder", from_="reviewer", title="first", body="a")  # 001
-        hc.create(collab, to="builder", from_="reviewer", title="second", body="b")  # 002
+        hc.create(
+            collab,
+            to="builder",
+            from_="reviewer",
+            title="second",
+            body="b",
+            constraints=_SLICE_CONSTRAINTS,  # ADR-0005: no typed constraints -> conformance refuses
+        )  # 002
 
         def boom(*a, **k):
             raise cc.CollabError("backend died")
@@ -869,7 +917,14 @@ class TestOneHandoffAtATime:
         home.mkdir()
         collab = str(tmp_path / "c")
         _slice(collab, to="builder", from_="reviewer")  # 001 (also git-inits the collab)
-        hc.create(collab, to="builder", from_="reviewer", title="second", body="b")  # 002
+        hc.create(
+            collab,
+            to="builder",
+            from_="reviewer",
+            title="second",
+            body="b",
+            constraints=_SLICE_CONSTRAINTS,  # ADR-0005: no typed constraints -> conformance refuses
+        )  # 002
         closeout = _closeout(collab, tmp_path, ok=True)
         _home_with(home, closeout, _closeout_seats())
 
@@ -878,6 +933,8 @@ class TestOneHandoffAtATime:
                 return "Verified.\n[[SIGNOFF]]"
             if "builder" in cmd[0]:
                 return "ok"
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt)
             return "NO-FINDING"  # the always-on v2 baseline pair (ADR-0004 D2)
 
         ap.run(collab, seats=_closeout_seats(), runner=runner, home=str(home))
@@ -906,7 +963,11 @@ class TestClaimedInvariant:
                 claimed_snaps.append(len(list((Path(collab) / "handoffs" / "claimed").glob("*.md"))))
                 pending_snaps.append(len(list((Path(collab) / "handoffs" / "pending").glob("*.md"))))
                 return "still working"
-            return "not yet — keep going" if "reviewer" in cmd[0] else "NO-FINDING"  # reviewer withholds
+            if "reviewer" in cmd[0]:
+                return "not yet — keep going"  # reviewer withholds -> repair to the work-attempt budget
+            if conftest.is_conformance_prompt(prompt):
+                return conftest.conformance_reply(prompt)
+            return "NO-FINDING"
 
         ap.run(collab, seats=_closeout_seats(), max_rounds=3, runner=runner, home=str(home))
         assert len(claimed_snaps) == 3  # 3 builder attempts (the work-attempt budget)

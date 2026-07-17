@@ -20,8 +20,13 @@ from typing import Any
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
-import adapter_profiles as adapters  # noqa: E402, I001
+import adapter_profiles as adapters  # noqa: E402
 import collab_common as cc  # noqa: E402
+import conformance as _conformance  # noqa: E402  — protocol revision only; no cycle (it imports neither)
+
+#: The conformance evidence protocol this plan binds. Sourced from :mod:`conformance` so the revision
+#: has ONE definition: a second copy would drift and silently re-validate stale evidence.
+_CONFORMANCE_PROTOCOL = _conformance.PROTOCOL_REVISION
 
 
 HIGH_RISK_GUARDRAILS = frozenset(
@@ -175,6 +180,33 @@ class LanePass:
 
 
 @dataclass(frozen=True)
+class ConformancePass:
+    """The always-on spec-conformance pair (ADR-0005).
+
+    Deliberately NOT a ``LanePass``. A LanePass carries ``LaneSpec`` checklists and speaks the
+    bounded FINDING/VERDICT batch protocol (ADR-0004 D3) — it asks "what is WRONG here?". Conformance
+    asks a different question ("is every declared requirement actually PRESENT?"), against per-handoff
+    constraint ids rather than config-owned contracts, and answers in strict per-requirement JSON.
+    Modelling it as an eleventh LaneSpec would have forced one protocol to mean two things, and would
+    have let a defect-hunting checklist dilute a completeness check.
+
+    The pair reuses the BASELINE profile: conformance runs on every candidate, so it inherits the
+    profile that is itself always resolved, and no fifth seat is created (ADR-0004 D1 stands).
+    """
+
+    id: str
+    profile: AssessmentProfile
+    protocol_revision: str
+
+    def identity_data(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "protocol_revision": self.protocol_revision,
+            "profile": self.profile.identity_data(),
+        }
+
+
+@dataclass(frozen=True)
 class VerificationPlan:
     """The single immutable assurance decision for one candidate.
 
@@ -190,10 +222,22 @@ class VerificationPlan:
     high_risk: LanePass | None
     identity_payload: str
     identity_digest: str
+    conformance: ConformancePass | None = None
 
     @property
     def passes(self) -> tuple[LanePass, ...]:
+        """The DEFECT passes only — what the FINDING/VERDICT lane runner fans out.
+
+        Conformance is deliberately excluded: it speaks a different protocol, so handing it to the
+        lane runner would dispatch a completeness check with a defect-hunting prompt. It is scheduled
+        separately and accounted for by :attr:`assessment_pass_count`.
+        """
         return (self.baseline,) if self.high_risk is None else (self.baseline, self.high_risk)
+
+    @property
+    def assessment_pass_count(self) -> int:
+        """Every pass that charges a VERIFICATION_PASS — defect passes plus conformance (ADR-0005 D2)."""
+        return len(self.passes) + (1 if self.conformance is not None else 0)
 
     def identity_data(self) -> dict[str, Any]:
         return json.loads(self.identity_payload)
@@ -448,14 +492,22 @@ def resolve_verification_plan(
         if high_requested
         else None
     )
+    # Conformance is ALWAYS resolved (ADR-0005 D1): a candidate that proves no requirement has
+    # proven nothing, so this pair is not guardrail-selected the way high-risk is. It reuses the
+    # baseline profile, which is itself unconditional.
+    conformance = ConformancePass(
+        id="spec-conformance", profile=profiles["baseline"], protocol_revision=_CONFORMANCE_PROTOCOL
+    )
     payload = {
-        "schema": "verification-plan-v1",
+        "schema": "verification-plan-v2",  # v2: the plan now carries the conformance pair
         "lane_config_revision": lane_config_revision,
         "prompt_revision": prompt_revision,
         "assessment_profile_revision": profile_revision,
         "guardrails": list(normalized),
         "passes": [lane_pass.identity_data() for lane_pass in (baseline,) if lane_pass is not None]
         + ([high.identity_data()] if high is not None else []),
+        # Bound into identity, so a protocol revision cannot silently reinterpret historic evidence.
+        "conformance": conformance.identity_data(),
     }
     identity_payload = _canonical_json(payload)
     return VerificationPlan(
@@ -467,6 +519,7 @@ def resolve_verification_plan(
         high_risk=high,
         identity_payload=identity_payload,
         identity_digest="plan:" + hashlib.sha256(identity_payload.encode("utf-8")).hexdigest(),
+        conformance=conformance,
     )
 
 

@@ -64,8 +64,12 @@ def _setup(tmp_path, *, drift=False, tests_passed=True):
         "source_base": str(base),
         "source_manifest": gr.source_manifest(["src/*.py"], base),
         # An authoritative verification record; ``tests_passed=False`` models the gate failing.
-        "tests": green_record(base) if tests_passed else {
-            **green_record(base), "passed": False, "exit_code": 1,
+        "tests": green_record(base)
+        if tests_passed
+        else {
+            **green_record(base),
+            "passed": False,
+            "exit_code": 1,
             "label": _vfy.LABEL_AUTHORITATIVE_FAIL,
         },
         "reviewer_preflight": _preflight(base),
@@ -73,6 +77,16 @@ def _setup(tmp_path, *, drift=False, tests_passed=True):
         "verification_plan": {"passes": [{"id": "baseline"}]},
         "verification_plan_digest": "plan:test-digest",
         "lanes": [{"pass": "baseline", "ran": True, "confirmed": [], "refuted": []}],
+        # A satisfied conformance record (ADR-0005, condition 12): conditions 1..11 cannot see a
+        # requirement the change simply omits.
+        "conformance": {
+            "candidate_id": None,
+            "contract_digest": "conformance:test-digest",
+            "requirement_ids": ["C1"],
+            "results": [{"id": "C1", "status": "met"}],
+            "incomplete": None,
+            "satisfied": True,
+        },
         "blockers": [],
         "accepted_residuals": [],
     }
@@ -86,7 +100,7 @@ class TestCollect:
     def test_collects_summary_on_satisfied_evidence(self, tmp_path):
         s = cr.collect(_setup(tmp_path), "001")
         assert s["done_contract"]["satisfied"] is True
-        assert len(s["done_contract"]["conditions"]) == 11
+        assert len(s["done_contract"]["conditions"]) == 12  # +spec-conformance (ADR-0005)
         assert s["reviewer_preflight"]["present"] is True
         assert s["source_manifest"]["file_count"] == 1
         assert s["final_state"] == "claimed"

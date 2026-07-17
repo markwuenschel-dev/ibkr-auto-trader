@@ -104,6 +104,46 @@ def _reviewer_preflight_ok(ledger: dict, reviewer_seat: str) -> tuple[bool, str]
     return True, f"reviewer {reviewer_seat!r} proved repo awareness ({len(files)} inspected files)"
 
 
+def _conformance_ok(ledger: dict, *, candidate_id=None) -> tuple[bool, str]:
+    """Condition 12: the ledger carries a SATISFIED, candidate-bound conformance record (ADR-0005).
+
+    Fail-closed at every step, and enforced here rather than in a harness for the same reason as
+    condition 11: no other ``hc.done`` caller can then bypass it.
+
+    Requires, in order:
+      * a conformance record exists — absence is refusal, never "nothing to check";
+      * it is bound to THIS candidate — an unbound record could be replayed from another candidate,
+        which is the replay condition 5's ``matches_checkout`` exists to stop, one level up;
+      * it carries a contract digest and at least one requirement id — a contract proving nothing
+        would satisfy this vacuously, exactly how condition 3 passed with zero required passes;
+      * no incomplete evidence — disagreement/malformed/unresolvable is UNKNOWN, and unknown is not a
+        pass;
+      * every result is a validated ``met``, with coverage matching the declared ids exactly.
+    """
+    record = ledger.get("conformance")
+    if not isinstance(record, dict):
+        return False, "no conformance record in the ledger"
+    if not record.get("contract_digest"):
+        return False, "conformance record carries no contract digest"
+    bound = record.get("candidate_id")
+    if candidate_id is not None and bound != candidate_id:
+        return False, f"conformance evidence is bound to {bound!r}, not this candidate {candidate_id!r}"
+    if record.get("incomplete"):
+        inc = record["incomplete"]
+        return False, f"conformance incomplete ({inc.get('reason')}): {inc.get('detail')}"
+    ids = record.get("requirement_ids") or []
+    results = record.get("results") or []
+    if not ids:
+        return False, "conformance contract declares no requirements"
+    unmet = [r.get("id") for r in results if r.get("status") != "met"]
+    if unmet:
+        return False, f"requirements not met: {sorted(unmet)}"
+    covered = sorted({r.get("id") for r in results})
+    if covered != sorted(ids):
+        return False, f"conformance coverage mismatch: declared={sorted(ids)} covered={covered}"
+    return True, f"{len(ids)} requirement(s) independently confirmed met: {sorted(ids)}"
+
+
 def evaluate(
     collab,
     hid: str,
@@ -155,6 +195,7 @@ def evaluate(
         _c(9, "approval-recorded", bool(rseat), "reviewer seat present" if rseat else "no reviewer seat")
         _c(10, "state-machine-safety", state in ("pending", "claimed"), f"state={state}")
         _c(11, "reviewer-repo-preflight", False, "no verification ledger")
+        _c(12, "spec-conformance", False, "no verification ledger")
         return _verdict(conds)
 
     blockers = ledger.get("blockers") or []
@@ -248,5 +289,17 @@ def evaluate(
     # 11 — the signing reviewer proved repo awareness (repo-aware preflight, not text-only review)
     ok11, detail11 = _reviewer_preflight_ok(ledger, reviewer_seat)
     _c(11, "reviewer-repo-preflight", ok11, detail11)
+
+    # 12 — every DECLARED requirement was independently confirmed present (ADR-0005).
+    #
+    # Conditions 1..11 gate mechanical evidence: a manifest, seat independence, a green authoritative
+    # gate, freshness. None of them can see a requirement the change simply OMITS -- nothing is wrong,
+    # something is absent, and absence raises no finding. On 2026-07-16 handoff 035 satisfied every
+    # one of those conditions with a binding that was structurally None.
+    #
+    # Sourced from the ledger, like every other condition: the reviewer's [met] prose remains advisory
+    # (narrative.py) and is NOT read here. Prose that grades itself is what failed.
+    ok12, detail12 = _conformance_ok(ledger, candidate_id=candidate_id)
+    _c(12, "spec-conformance", ok12, detail12)
 
     return _verdict(conds)

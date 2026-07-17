@@ -53,6 +53,10 @@ SCENARIOS = (
     "confirmed-finding",
 )
 GUARDRAILS = ["path-safety", "data-integrity", "bounded-autonomy", "untrusted-agent-output"]
+
+#: The slice's declared, typed requirements (ADR-0005). ``closeout_report.py`` is the file the
+#: disposable repo seeds as the source under review, so this is a claim a real assessor could check.
+_CONSTRAINTS = [("C1", "closeout_report.collect recomputes the done-contract verdict read-only")]
 _TITLE = "Add closeout-report command for autonomous closeout evidence summaries"
 BUNDLE_FILES = (
     "summary.json",
@@ -72,6 +76,33 @@ def _seats() -> dict:
         "gemini": {"backend": "cli", "cmd": ["fake-gemini"], "system": "verifier"},
         "reviewer": {"backend": "cli", "cmd": ["fake-reviewer"], "system": "reviewer", "can_sign_off": True},
     }
+
+
+def _conformance_report(prompt: str) -> str:
+    """A well-formed all-met conformance report for whatever contract the prompt carries.
+
+    The digest and ids are parsed back OUT of the prompt so the reply is genuinely bound to the
+    contract under test; a hard-coded digest would pass for the wrong reason the moment the declared
+    constraints change. Ids are deduped because the handoff's own '## Constraints' section is appended
+    after the requirement list, so each id appears twice — emitting both would be a duplicate record.
+    """
+    digest = re.search(r'"contract_digest":\s*"([^"]+)"', prompt or "")
+    ids = list(dict.fromkeys(re.findall(r"^- \[([^\]]+)\]", prompt or "", re.MULTILINE)))
+    return json.dumps(
+        {
+            "contract_digest": digest.group(1) if digest else "conformance:unknown",
+            "requirements": [
+                {
+                    "id": rid,
+                    "status": "met",
+                    "source": "closeout_report.py:1",  # the seeded slice's source under review
+                    "test": None,
+                    "evidence": "collect() recomputes the verdict without writing",
+                }
+                for rid in ids
+            ],
+        }
+    )
 
 
 def _resolve_plan() -> object:
@@ -104,6 +135,10 @@ def _scripted_runner(inject: str):
         argv = " ".join(cmd)
         if "reviewer" in who:
             return "Reviewed against source; inspected closeout_report.py.\n[[SIGNOFF]]"
+        # The conformance pair reuses the BASELINE profile, so its cmd is identical to the baseline
+        # lane's — only the prompt differs. Route on the prompt, exactly as a real assessor must.
+        if "CONFORMANCE ASSESSOR" in prompt or "CONFORMANCE VERIFIER" in prompt:
+            return _conformance_report(prompt)
         if any(model in argv for model in _BREAKERS) or "breaker" in who:
             return (
                 "FINDING: F1 | closeout_report.collect | a crafted ledger | yields a wrong verdict"
@@ -251,7 +286,17 @@ def run_smoke(*, inject: str = "clean", workspace=None, real: bool = False, coll
 
     # --- create + claim the real handoff ---
     builder = "reviewer" if inject == "self-approval" else "builder"  # self-approval: from == reviewer
-    hid = hc.create(collab_p, to="reviewer", from_=builder, title=_TITLE, body="please review")["id"]
+    hid = hc.create(
+        collab_p,
+        to="reviewer",
+        from_=builder,
+        title=_TITLE,
+        body="please review",
+        # Typed constraints (ADR-0005): autonomous closure is adjudicated against DECLARED ids, so a
+        # handoff with none is refused before any model work. `clean` must therefore declare one, or
+        # this harness would prove only that the new gate blocks everything.
+        constraints=_CONSTRAINTS,
+    )["id"]
     _inject_guardrails(collab_p, hid, GUARDRAILS)
     hc.claim(collab_p, hid)
 
