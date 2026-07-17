@@ -436,6 +436,7 @@ _PAGE = r"""<!doctype html>
   .hchip:hover{ border-color:var(--accent); }
   .hchip .id{ font-weight:640; } .hchip .rt{ color:var(--muted); font-size:11px; margin-left:auto; white-space:nowrap; }
   .hchip .rt .c{ color:var(--claude); } .hchip .rt .g{ color:var(--gpt); }
+  .hchip .rt .k{ color:#c8c8c8; } .hchip .rt .m{ color:var(--gemini); }
   .stage .more{ font-size:11.5px; color:var(--faint); padding:2px; }
 
   .feed .ev{ display:grid; grid-template-columns:64px 18px 1fr auto; gap:10px; align-items:center;
@@ -446,6 +447,7 @@ _PAGE = r"""<!doctype html>
   .feed .ev .ts{ color:var(--faint); font-size:11.5px; } .feed .ev .ic{ text-align:center; }
   .feed .ev .msg b{ font-weight:640; } .feed .ev .lat{ color:var(--muted); font-size:11px; }
   .role-c{ color:var(--claude); } .role-g{ color:var(--gpt); }
+  .role-k{ color:#c8c8c8; } .role-m{ color:var(--gemini); }
   .v-ok{ color:var(--ok); } .v-crit{ color:var(--crit); } .v-violet{ color:var(--violet); } .v-warn{ color:var(--warn); }
   #empty{ padding:40px 16px; text-align:center; color:var(--muted); }
 
@@ -563,7 +565,9 @@ _PAGE = r"""<!doctype html>
 
     <section class="card"><h2>Agents
       <span class="r"><span class="legdot"><i style="background:var(--claude)"></i>Claude</span>
-      <span class="legdot"><i style="background:var(--gpt)"></i>OpenAI</span></span></h2>
+      <span class="legdot"><i style="background:var(--gpt)"></i>OpenAI</span>
+      <span class="legdot"><i style="background:#313131;outline:1px solid #6a6a6a"></i>Grok</span>
+      <span class="legdot"><i style="background:var(--gemini)"></i>Gemini</span></span></h2>
       <div id="agents"></div></section>
 
     <section class="card" id="lanesCard"><h2>Adversarial lanes <span class="r lanehead" id="lanehead"></span></h2>
@@ -637,7 +641,10 @@ function vendorOf(m,name){ const t=(((m&&m.launcher)||"")+" "+((m&&m.model)||"")
   if(t.indexOf("gpt")>=0||t.indexOf("openai")>=0||t.indexOf("chatgpt")>=0) return "g";
   return name==="builder"?"c":"g"; }
 function seatVendor(n){ return vendorOf((last&&last.seats&&last.seats[n])||null, n); }
-function vColor(n){ return {c:"var(--claude)",g:"var(--gpt)",k:"var(--grok)",m:"var(--gemini)"}[seatVendor(n)]||"var(--gpt)"; }
+function vColor(n){ return {c:"var(--claude)",g:"var(--gpt)",k:"#c8c8c8",m:"var(--gemini)"}[seatVendor(n)]||"var(--gpt)"; }
+// Activity/pipeline role color class — all four vendors, not the old Claude-vs-OpenAI binary.
+function roleCls(n){ return {c:"role-c",g:"role-g",k:"role-k",m:"role-m"}[seatVendor(n)]||"role-g"; }
+function seatVCls(n){ return seatVendor(n); }  // c|g|k|m — for hchip spans
 function seatModel(n){ const m=(last&&last.seats&&last.seats[n])||null;
   // While a run is LIVE, prefer the model the driver actually composed at start (status.run_seats — ids only,
   // held in the driver's memory) over the on-disk seats.json value, which a mid-run edit would desync. Keep
@@ -769,8 +776,11 @@ function render(s){
   [["pending",cn.pending],["claimed",cn.claimed],["done",cn.done],["archive",cn.archive]].forEach(([k,v])=>{
     const w=el("span"); w.appendChild(document.createTextNode(k+" ")); w.appendChild(el("b",null,String(v||0))); foot.appendChild(w); });
   foot.appendChild(el("span","spacer")); foot.lastChild.style.flex="1";
-  const l1=el("span","legdot"); l1.appendChild(el("i")); l1.lastChild.style.background="var(--claude)"; l1.appendChild(el("span",null,"Claude builds")); foot.appendChild(l1);
-  const l2=el("span","legdot"); l2.appendChild(el("i")); l2.lastChild.style.background="var(--gpt)"; l2.appendChild(el("span",null,"ChatGPT reviews · breaks · verifies")); foot.appendChild(l2);
+  [["var(--claude)","Claude"],["var(--gpt)","OpenAI"],["#313131","Grok"],["var(--gemini)","Gemini"]].forEach(([bg,lab])=>{
+    const ld=el("span","legdot"); const i=el("i"); i.style.background=bg;
+    if(lab==="Grok") i.style.outline="1px solid #6a6a6a";
+    ld.appendChild(i); ld.appendChild(el("span",null,lab)); foot.appendChild(ld);
+  });
 }
 
 // ---- "What happened" narrative card ------------------------------------- //
@@ -911,20 +921,36 @@ function renderHero(s){
   const pendingCt=((s.board||{}).pending||[]).length;
   let color="var(--faint)";
   if(active){
-    const seat=st.active_seat, isLanes=(seat==="lanes");
-    color=isLanes?vColor("breaker"):vColor(seat);
-    eb.textContent="round "+(st.round||0)+" / "+(st.max_rounds||0)+" · working";
-    const verb = seat==="reviewer"?"is reviewing":seat==="builder"?"is building on":
+    const seat=st.active_seat, isLanes=(seat==="lanes"||seat==="assess"), isVerify=(seat==="verify"||st.stage==="verify");
+    color=isVerify?"var(--ok)":isLanes?vColor("breaker"):vColor(seat);
+    eb.textContent="round "+(st.round||0)+" / "+(st.max_rounds||0)+" · "+(st.stage||"working");
+    const verb = isVerify?"is running the authoritative gate on":
+      seat==="reviewer"?"is reviewing":seat==="builder"?"is building on":
       (seat==="breaker"||seat==="verifier"||isLanes)?"is probing":"is working on";
-    const label=isLanes?"adversarial lanes":seat;
+    const label=isVerify?"verify.py":isLanes?"adversarial lanes":seat;
     const t1=el("span",null,label); t1.style.color=color; ti.appendChild(t1);
     ti.appendChild(document.createTextNode(" "+verb+" "+st.current_hid));
-    const model=isLanes?(seatModel("breaker")||seatModel("verifier")||"opus"):(seatModel(seat)||"");
+    const model=isLanes?(seatModel("breaker")||seatModel("verifier")||""):(isVerify?"":(seatModel(seat)||""));
     const since=Date.parse(st.active_since||st.updated_ts); const elp=(Date.now()-since)/1000, to=st.timeout||0;
     // During the multi-minute closeout the sub-line reads the newest lane event (live play-by-play) instead of
     // the static "breaker→verifier"; falls back to the static label until the first lane event lands.
     const laneLine=isLanes?latestLaneLine(s):null;
-    sub.textContent=(isLanes?(laneLine||("breaker→verifier · "+model)):model)+" · "+fmtdur(elp)+(to?" / "+fmtdur(to):"")+" elapsed";
+    const cand=st.candidate?("candidate "+st.candidate+" · "):"";
+    sub.textContent=cand+(isVerify?("scripts/verify.py · "):(isLanes?(laneLine||("reviewer ∥ breaker→verifier · "+model)):model))
+      +" · "+fmtdur(elp)+(to?" / "+fmtdur(to):"")+" elapsed";
+  } else if(ph==="thinking" && !s.paused){
+    // Mid-assess / mid-stage with no active_seat mark (or a cleared one): still tell the operator what
+    // the driver is doing. The old fall-through painted a blank "Autopilot" for multi-minute gaps.
+    const hid=st.current_hid||((((s.board||{}).claimed||[])[0]||{}).id)||null;
+    const stage=st.stage||"working";
+    const cand=st.candidate?("candidate "+st.candidate):"";
+    color="var(--accent)";
+    eb.textContent="round "+(st.round||0)+" / "+(st.max_rounds||0)+" · "+stage;
+    ti.textContent=(hid?(stage+" on "+hid):("Autopilot · "+stage));
+    const since=Date.parse(st.active_since||st.updated_ts); const elp=since?(Date.now()-since)/1000:null;
+    const laneLine=latestLaneLine(s);
+    const bits=[cand, laneLine, elp!=null?(fmtdur(elp)+" since last seat mark"):null].filter(Boolean);
+    sub.textContent=bits.length?bits.join(" · "):"Driver is live — waiting for the next seat mark (tests, lanes, or conformance).";
   } else if(!s.paused && pendingCt>0){
     // Queued work with NO driver actively running it — show this REGARDLESS of a stale status.phase (a
     // prior run that already exited leaves phase "done"/"capped"). Actionable: press Start.
@@ -1045,10 +1071,26 @@ function renderSeats(s){
 let laneOpen=new Set();  // lane names the user expanded — persists across the 1s poll re-render so detail stays open
 function renderLanes(s){
   const L=s.lanes; const card=$("lanesCard"), box=$("lanes"), head=$("lanehead");
+  const st=s.status||{}, ph=s.paused?"paused":(st.phase||"");
+  const assessing = ph==="thinking" && (st.stage==="assess"||st.stage==="verify"||st.active_seat==="lanes"||st.active_seat==="verify");
   // CLEAR before hiding. Hiding alone left the previous run's lane DOM in the document, so it reappeared
   // intact the moment anything un-hid the card. The server now only ever sends lanes belonging to the
-  // live run (scoped by run_uid), so "no lanes" genuinely means there is nothing to show.
-  if(!L||!L.lanes||!L.lanes.length){ box.textContent=""; head.textContent=""; card.style.display="none"; return; }
+  // live run (scoped by run_uid), so "no lanes" genuinely means there is nothing to show — except while
+  // assess is in flight, when the ledger is not written yet and the card used to vanish for minutes.
+  if(!L||!L.lanes||!L.lanes.length){
+    box.textContent=""; head.textContent="";
+    if(assessing){
+      card.style.display="";
+      head.appendChild(el("span","chip","in progress"));
+      const line=latestLaneLine(s);
+      box.appendChild(el("div","muted",
+        st.stage==="verify"
+          ? "Running scripts/verify.py (authoritative gate) before reviewer ∥ lanes fan-out…"
+          : (line||"Reviewer ∥ adversarial lanes ∥ spec-conformance running — ledger appears when the pair finishes.")));
+      return;
+    }
+    card.style.display="none"; return;
+  }
   card.style.display=""; head.textContent="";
   // Only an AUTHORITATIVE pass earns the green chip. A pytest-only run also reports passed=true;
   // showing that as "tests ✓" is how a lint/type-broken checkout reads as verified.
@@ -1115,8 +1157,8 @@ function renderPipe(s){
     if(showChips){ rows.slice(0,4).forEach(h=>{ const ch=el("div","hchip"); ch.onclick=()=>openHandoff(h.id);
       ch.appendChild(el("span","id mono",h.id));
       ch.appendChild(el("span",null,(h.slug||"").replace(/-/g," ").slice(0,22)));
-      const rt=el("span","rt"); const f=el("span",seatVendor(h.from)==="c"?"c":"g",h.from||"?");
-      rt.appendChild(f); rt.appendChild(document.createTextNode("→")); rt.appendChild(el("span",seatVendor(h.to)==="c"?"c":"g",h.to||"?"));
+      const rt=el("span","rt"); const f=el("span",seatVCls(h.from),h.from||"?");
+      rt.appendChild(f); rt.appendChild(document.createTextNode("→")); rt.appendChild(el("span",seatVCls(h.to),h.to||"?"));
       ch.appendChild(rt); st.appendChild(ch); });
       if(!rows.length) st.appendChild(el("div","more","empty"));
     } else { if(rows.length){ const h=rows[rows.length-1]; const ch=el("div","hchip"); ch.onclick=()=>openHandoff(h.id);
@@ -1129,10 +1171,10 @@ function renderPipe(s){
 
 function evIcon(ev){ const dec=ev.decision||{}, act=dec.action||"", stage=ev.stage||"";
   if(stage==="autopilot.round"&&act==="fail") return ["✖","v-crit"];
-  if(stage==="autopilot.round"&&act==="reply") return ["↳",seatVendor(ev.role)==="c"?"role-c":"role-g"];
-  if(stage==="autopilot.round"&&act==="start") return ["▶",seatVendor(ev.role)==="c"?"role-c":"role-g"];
+  if(stage==="autopilot.round"&&act==="reply") return ["↳",roleCls(ev.role)];
+  if(stage==="autopilot.round"&&act==="start") return ["▶",roleCls(ev.role)];
   if(stage==="autopilot.lane"&&act==="verdict") return ["⚖",(dec.reason_codes||[]).some(x=>x.indexOf("CONFIRMED")>=0)?"v-crit":"v-ok"];
-  if(stage==="autopilot.lane"&&act==="breaker") return ["🔨","role-g"];
+  if(stage==="autopilot.lane"&&act==="breaker") return ["🔨",roleCls(ev.role||"breaker")];
   if(stage==="autopilot.lane") return ["⚖","v-violet"];
   if(stage==="autopilot.autonomous_done"||stage==="handoff.done") return ["✓✓","v-ok"];
   if(stage==="autopilot.sendback") return ["🔁","v-crit"];
@@ -1147,16 +1189,17 @@ function evMsg(ev){ const dec=ev.decision||{}, act=dec.action||"", stage=ev.stag
   const art=(ev.artifact||"").replace("handoff:",""); const role=ev.role||"";
   const b=(t,cls)=>{ const s=el("b",cls,t); return s; };
   const wrap=(...parts)=>{ const s=el("span","msg"); parts.forEach(p=> s.appendChild(typeof p==="string"?document.createTextNode(p):p)); return s; };
-  const rcls=seatVendor(role)==="c"?"role-c":"role-g";
+  const rcls=roleCls(role);
   if(stage==="autopilot.round"&&act==="reply"){ const nid=(rc.find(x=>x.indexOf("new:")===0)||"new:?").slice(4);
     return wrap(b(role,rcls)," answered "+art+" → "+nid); }
   if(stage==="autopilot.round"&&act==="fail") return wrap(b(role,rcls)," FAILED "+art+": ", el("span","v-crit",esc((ev.failure||{}).message).slice(0,50)));
   if(stage==="autopilot.round"&&act==="start") return wrap(b(role,rcls)," thinking on "+art);
+  if(stage==="autopilot.round"&&act==="turn") return wrap(b(role,rcls)," finished turn on "+art);
   if(stage==="autopilot.lane"&&act==="breaker"){ const ln=(rc.find(x=>x.indexOf("lane:")===0)||"lane:?").slice(5);
-    const nf=(rc.find(x=>x.indexOf("findings:")===0)||"findings:0").slice(9); return wrap(b(role,"role-g")," probed "+ln+" — "+nf+" finding"+(nf==="1"?"":"s")); }
+    const nf=(rc.find(x=>x.indexOf("findings:")===0)||"findings:0").slice(9); return wrap(b(role,roleCls(role||"breaker"))," probed "+ln+" — "+nf+" finding"+(nf==="1"?"":"s")); }
   if(stage==="autopilot.lane"&&act==="verdict"){ const ln=(rc.find(x=>x.indexOf("lane:")===0)||"lane:?").slice(5);
     const fi=(rc.find(x=>x.indexOf("finding:")===0)||"").slice(8); const vd=(rc.find(x=>x.indexOf("verdict:")===0)||"verdict:?").slice(8);
-    return wrap(b(role,"role-g")," "+ln+" "+fi+" → ", el("b",vd==="CONFIRMED"?"v-crit":"v-ok",vd)); }
+    return wrap(b(role,roleCls(role||"verifier"))," "+ln+" "+fi+" → ", el("b",vd==="CONFIRMED"?"v-crit":"v-ok",vd)); }
   if(stage==="autopilot.lane"){ const ln=(rc.find(x=>x.indexOf("lane:")===0)||"lane:?").slice(5);
     const cf=(rc.find(x=>x.indexOf("confirmed:")===0)||"confirmed:0").slice(10); const rf=(rc.find(x=>x.indexOf("refuted:")===0)||"refuted:0").slice(8);
     return wrap("lane "+ln+" done · ", el("span","v-crit",cf+" confirmed"), " / ", el("span","v-ok",rf+" refuted")); }

@@ -143,7 +143,7 @@ class TestStatusAndControl:
         st = dc.read_status(collab)
         assert st is not None
         assert st["round"] == 2
-        assert st["current_hid"] is None  # cleared at round end
+        assert st["current_hid"] == "001"  # drive owns it between seats; cleared at terminal states
         assert st["last_latency_ms"] is not None
         assert json.loads(ap._status_path(collab).read_text("utf-8"))["schema_version"] == "0.1"
 
@@ -583,8 +583,8 @@ class TestNoStaleRunSurface:
     def test_epitaph_names_the_handoff_after_autopilot_clears_current_hid(self, tmp_path):
         # THE REGRESSION THAT COST SIX DAYS (2026-07-15). The epitaph test above passes while the
         # feature is structurally broken, because releasing the lease is NOT how a run actually ends:
-        # autopilot also writes current_hid=None (autopilot.py, the done/paused/idle/post-seat paths).
-        # current_hid is a LIVENESS field — "what a seat is working on RIGHT NOW" — so it is always
+        # autopilot also writes current_hid=None (autopilot.py, the done/paused/idle terminal paths).
+        # current_hid is a LIVENESS field — "what the drive is working on RIGHT NOW" — so it is always
         # None by the time an epitaph is wanted. Reading it to describe a finished run could never
         # work, for any run. The durable answer is handoffs_touched in the archived run.json.
         collab = str(tmp_path / "c")

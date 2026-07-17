@@ -806,14 +806,18 @@ def _dispatch_seat(
             failure={"kind": "backend", "message": str(e)[:500]},
             metrics={"latency_ms": lat_ms},
         )
+        # Keep current_hid: the candidate drive still owns this handoff (reviewer ∥ lanes fan-out
+        # continues after a single seat finishes). Blanking it made the dashboard show "thinking ·
+        # Autopilot" with no seat, no hid, and no lanes for the multi-minute remainder of assess.
         _write_status(
-            collab, active_seat=None, current_hid=None, last_error=str(e)[:200], last_latency_ms=lat_ms
+            collab, active_seat=None, last_error=str(e)[:200], last_latency_ms=lat_ms
         )
         return None  # handoff stays claimed for a human; the drive stalls ([C39])
     lat_ms = round((time.monotonic() - t0) * 1000, 1)
     resp_bytes = len(raw.encode("utf-8", "replace"))
     relpath = _write_reply(collab, seat, _sanitize(raw))  # the turn, stored as an inert artifact
-    _write_status(collab, active_seat=None, current_hid=None, last_latency_ms=lat_ms, last_error=None)
+    # Clear only the active seat mark — not current_hid. Assess (and repair loops) still own the hid.
+    _write_status(collab, active_seat=None, last_latency_ms=lat_ms, last_error=None)
     _emit_safe(
         _trace.emit,
         log,
@@ -1004,7 +1008,19 @@ def _assess_candidate(
             "incomplete": {"reason": "budget", "which": e.which},
         }
     base = closeout or {}
-    tests = _run_test_suite(test_path, source_base)
+    # Authoritative verify can take minutes. Surface it as a named stage so the dashboard does not
+    # freeze on "thinking · Autopilot" with no seat and no hid (the previous silent gap).
+    _write_status(
+        collab,
+        phase="thinking",
+        stage="verify",
+        active_seat="verify",
+        current_hid=hid,
+        active_since=_now_utc(),
+        timeout=0,
+    )
+    with _Heartbeat(collab):
+        tests = _run_test_suite(test_path, source_base)
 
     def _review():
         return _dispatch_seat(
@@ -1041,14 +1057,33 @@ def _assess_candidate(
             verification_plan=verification_plan,
         )
 
+    # "lanes" is the dashboard's special active_seat for the concurrent fan-out (reviewer ∥ adversarial
+    # pairs ∥ conformance). Reviewer dispatch overwrites it while that seat runs; restore after.
     _write_status(
-        collab, phase="thinking", active_seat="assess", current_hid=hid, active_since=_now_utc(), timeout=0
+        collab,
+        phase="thinking",
+        stage="assess",
+        active_seat="lanes",
+        current_hid=hid,
+        active_since=_now_utc(),
+        timeout=0,
     )
     # Keep updated_ts fresh through the multi-minute reviewer ∥ lanes fan-out.
     with _Heartbeat(collab), ThreadPoolExecutor(max_workers=2) as ex:
         f_rev = ex.submit(_review)
         f_lanes = ex.submit(_run_lanes)
         rev_raw = f_rev.result()
+        # Reviewer finished; lanes/conformance may still be burning minutes. Put the board mark back so
+        # the hero does not collapse to "Autopilot" after _dispatch_seat clears active_seat.
+        _write_status(
+            collab,
+            phase="thinking",
+            stage="assess",
+            active_seat="lanes",
+            current_hid=hid,
+            active_since=_now_utc(),
+            timeout=0,
+        )
         try:
             lane_ledger = f_lanes.result()
         except (cc.CollabError, hc.HandoffNotFound) as e:
@@ -1996,11 +2031,17 @@ def _pause_note(collab, home, max_rounds: int) -> None:
         h = Path(home) if home is not None else cc.resolve_collab_home()
         ob = h / "outbox"
         ob.mkdir(parents=True, exist_ok=True)
+        # ``--collab .`` => Path('.').name == "" => slugify raises ValueError and crashed the whole
+        # driver after a clean escalate (2026-07-17). Resolve first; fall back to "collab".
+        try:
+            label = cc.slugify(Path(collab).resolve().name or "collab")
+        except ValueError:
+            label = "collab"
         msg = (
-            f"autopilot paused: reached the {max_rounds}-round cap for {Path(collab).name}. "
+            f"autopilot paused: reached the {max_rounds}-round cap for {label}. "
             f"Human review needed before it continues."
         )
-        cc.safe_write(ob / f"{time.time_ns()}-autopilot-{cc.slugify(Path(collab).name)}.md", msg + "\n")
+        cc.safe_write(ob / f"{time.time_ns()}-autopilot-{label}.md", msg + "\n")
     except (OSError, cc.CollabError) as e:
         print(f"[autopilot] could not write pause note: {e}", file=sys.stderr)
 

@@ -27,6 +27,7 @@ BUILDER seat on ANY model (not just Claude) can implement a handoff and run the 
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -366,6 +367,48 @@ def _post_json(url: str, key: str, payload: dict, timeout: float) -> dict:
         return json.load(r)
 
 
+def _is_gpt54_plus(model: str) -> bool:
+    """True for gpt-5.4, gpt-5.5, gpt-5.6-luna, … — the family that rejects tools on /chat/completions."""
+    m = re.match(r"^gpt-5\.(\d+)", (model or "").strip().lower())
+    return bool(m and int(m.group(1)) >= 4)
+
+
+def _should_bridge_to_responses(
+    model: str,
+    *,
+    has_tools: bool,
+    reasoning_effort=None,
+    reasoning_summary=None,
+) -> bool:
+    """Choose /responses over /chat/completions for the agentic tool loop.
+
+    Bridges when:
+
+    * ``reasoning_effort`` AND ``reasoning_summary`` are both explicitly set (original older-model
+      path), OR
+    * model is gpt-5.4+ AND tools are present — **unconditional** for that family.
+
+    The second arm used to also require ``reasoning_effort is not None``. That gate was wrong: the
+    platform injects reasoning for gpt-5.6-luna even when the client never sets the field, and chat
+    then 400s with *Function tools with reasoning_effort are not supported … use /v1/responses*.
+    Detect the family + tools up front instead of burning a failed chat call (2026-07-17).
+    """
+    if reasoning_effort is not None and reasoning_summary is not None:
+        return True
+    return bool(has_tools and _is_gpt54_plus(model))
+
+
+def _chat_rejects_tools_for_responses(code: int, body: str) -> bool:
+    """HTTP errors from /chat that mean "retry on /responses", not "hard fail"."""
+    b = (body or "").lower()
+    if code == 404 and "responses" in b:
+        return True
+    # 400 invalid_request: tools + reasoning_effort on chat (luna / gpt-5.4+ family).
+    return code == 400 and (
+        "reasoning_effort" in b or "use /v1/responses" in b or "use the v1/responses" in b
+    )
+
+
 _SYSTEM_TOOL_NOTE = (
     "You have read-only tools to inspect the ACTUAL repository under review: list_dir, read_file, and "
     "search. Before you raise a blocker or sign off, USE them to verify the builder's claims against the "
@@ -574,8 +617,9 @@ def main(argv=None) -> int:
         choices=("auto", "chat", "responses"),
         default="auto",
         help=(
-            "which OpenAI-shaped API to drive the tool loop over; 'auto' tries chat, "
-            "falls back to responses on 404"
+            "which OpenAI-shaped API to drive the tool loop over; 'auto' uses /responses for "
+            "gpt-5.4+ with tools (and when reasoning fields are both set), else tries chat and "
+            "falls back to responses on 404 / reasoning_effort 400"
         ),
     )
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
@@ -609,16 +653,23 @@ def main(argv=None) -> int:
             system_note=system_note,
             run_timeout=args.run_timeout,
         )
-        if args.api == "responses":
+        has_tools = bool(tools_spec)
+        bridge = _should_bridge_to_responses(args.model, has_tools=has_tools)
+        if args.api == "responses" or (args.api == "auto" and bridge):
+            if args.api == "auto" and bridge:
+                sys.stderr.write(
+                    f"openai-repo-seat: bridging {args.model!r}+tools to /responses "
+                    f"(gpt-5.4+ family or explicit reasoning fields)\n"
+                )
             out = _run_agentic_responses(base, args.model, key, prompt, root, **kw)
         elif args.api == "chat":
             out = _run_agentic(base, args.model, key, prompt, root, **kw)
-        else:  # auto: chat, but fall back to /responses if the model rejects /chat/completions
+        else:  # auto, no bridge: try chat; fall back when the model demands /responses
             try:
                 out = _run_agentic(base, args.model, key, prompt, root, **kw)
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", "replace")
-                if e.code == 404:
+                if _chat_rejects_tools_for_responses(e.code, body):
                     sys.stderr.write(
                         "openai-repo-seat: model rejects /chat/completions; retrying /responses\n"
                     )
