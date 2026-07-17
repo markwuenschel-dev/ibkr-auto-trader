@@ -373,9 +373,18 @@ def _latest_lanes(collab, *, run_uid: str | None = None, hid: str | None = None)
     """
     vdir = Path(collab) / "autopilot" / "verification"
     try:
-        # Candidate ledgers are immutable under ``verification/<hid>/``;
-        # include their one-level descendants as well as the pre-v2 flat path.
-        ledgers = sorted(vdir.rglob("*.ledger.json"), key=lambda p: p.stat().st_mtime)
+        if hid is not None:
+            # Ledgers for a handoff live under ``verification/<slugify(hid)>/`` (lanes.ledger_path); the
+            # flat ``verification/<slugify(hid)>.ledger.json`` is the pre-v2 path. Scope to just this hid
+            # instead of walking (rglob + per-file stat) EVERY run's ledgers on each ~1s poll — the
+            # ``doc["hid"]`` filter below already required this hid, so narrowing WHERE we look does not
+            # change WHAT we return.
+            slug = cc.slugify(str(hid))
+            found = list((vdir / slug).glob("*.ledger.json")) + list(vdir.glob(f"{slug}.ledger.json"))
+        else:
+            # No hid to scope by (idle / between runs): fall back to the full tree, matched by run_uid.
+            found = list(vdir.rglob("*.ledger.json"))
+        ledgers = sorted(found, key=lambda p: p.stat().st_mtime)
     except OSError:
         return None
     data = None
