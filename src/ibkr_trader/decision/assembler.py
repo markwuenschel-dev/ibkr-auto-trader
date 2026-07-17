@@ -171,6 +171,10 @@ class DecisionContextAssembler:
             account_observed_at=account.observed_at,
             as_of=decision_at,
             context_digest=context_digest,
+            # The fence above proved account/quotes/session agree on this; seal it INTO the context.
+            # It was previously fenced, emitted to telemetry, and dropped — so a downstream that
+            # wanted to bind "the generation this decision was made at" had nothing to read.
+            generation=gen_at_seal,
         )
 
     def _emit(self, stage: str, metrics: dict) -> None:

@@ -99,7 +99,10 @@ class RiskPlanner:
             except (ValueError, UnpricedHoldingError) as exc:
                 quantity, reason = 0, str(exc)
 
-        generation = _get(context, "generation", _get(control_state, "generation"))
+        # Read the REAL fields, not duck-typed lookups. `_get(context, "generation", ...)` silently
+        # returned None because neither RiskContext nor RiskControlState declared the attribute: the
+        # binding looked present in the diff and bound nothing. Both are now typed fields, so a typo
+        # here is a pyright error rather than a plan that lies quietly (ADR-0003; 2026-07-16).
         return RiskPlan(
             symbol=symbol,
             side=side,
@@ -109,8 +112,8 @@ class RiskPlanner:
             planner_projection=projection,
             projection_is_authoritative=False,
             context_digest=context.context_digest,
-            decision_generation=generation,
-            session_generation=_get(control_state, "session_generation", generation),
+            decision_generation=context.generation,  # the generation the context was SEALED at
+            session_generation=control_state.session_generation,  # ...and the one seen at plan time
             policy_version=policy.version,
             declined=quantity == 0,
             decline_reason=reason,

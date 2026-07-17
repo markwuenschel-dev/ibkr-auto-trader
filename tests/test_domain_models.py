@@ -52,6 +52,8 @@ def _fields(**overrides: object) -> dict[str, object]:
         "account_observed_at": _NOW,
         "as_of": _NOW,
         "context_digest": "context:abc",
+        # The session generation the assembler fenced and sealed (ADR-0002 ⑨).
+        "generation": 7,
     }
     fields.update(overrides)
     return fields
