@@ -37,7 +37,7 @@ from typing import Protocol, runtime_checkable
 from ..config import Mode
 from ..domain.models import InstrumentId, ValuationStatus
 from ..telemetry import TelemetrySink
-from .session import Session
+from .session import Session, signed_inventory_diff
 
 # --------------------------------------------------------------------------- #
 # telemetry stage names (§8 envelope) — named constants so they stay greppable
@@ -304,15 +304,10 @@ def reconcile_positions(
     broker: Mapping[InstrumentId, int], cache: Mapping[InstrumentId, int]
 ) -> PositionReconciliation:
     """Diff broker truth against the PT-2 cache. Non-zero holdings only; conId -> (cache, broker)."""
-    broker_nz = {int(k): int(q) for k, q in broker.items() if int(q) != 0}
-    cache_nz = {int(k): int(q) for k, q in cache.items() if int(q) != 0}
-    diffs: dict[InstrumentId, tuple[int, int]] = {}
-    for con_id in set(broker_nz) | set(cache_nz):
-        b = broker_nz.get(con_id, 0)
-        c = cache_nz.get(con_id, 0)
-        if b != c:
-            diffs[con_id] = (c, b)
-    return PositionReconciliation(broker=broker_nz, cache=cache_nz, diffs=diffs)
+    # Shared signed-inventory diff: left=cache, right=broker, so diffs are keyed (cache_qty, broker_qty)
+    # to match PositionReconciliation's contract.
+    diff = signed_inventory_diff(cache, broker)
+    return PositionReconciliation(broker=diff.right, cache=diff.left, diffs=diff.diffs)
 
 
 def _as_utc(dt: datetime) -> datetime:

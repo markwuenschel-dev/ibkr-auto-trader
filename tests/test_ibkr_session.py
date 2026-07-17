@@ -10,9 +10,14 @@ from __future__ import annotations
 import asyncio
 
 from ibkr_trader.ibkr import FakeSession, PacingGate
-from ibkr_trader.ibkr.session import Session, aggregate_signed, reconcile_inventory
+from ibkr_trader.ibkr.session import (
+    Session,
+    aggregate_signed,
+    reconcile_inventory,
+    signed_inventory_diff,
+)
 
-AAPL, MSFT = 265598, 272093
+AAPL, MSFT, TSLA = 265598, 272093, 76792991
 
 
 class TestGeneration:
@@ -64,3 +69,11 @@ class TestInventoryReconcile:
 
     def test_aggregate_signed_sums_duplicate_rows(self):
         assert aggregate_signed([(AAPL, 5), (AAPL, 5), (MSFT, -4)]) == {AAPL: 10, MSFT: -4}
+
+    def test_signed_inventory_diff_filters_zeros_and_keys_left_right_pairs(self):
+        # The shared primitive under reconcile_inventory + gateway.reconcile_positions: non-zero filter,
+        # and diffs keyed (left_qty, right_qty) only where the two disagree.
+        d = signed_inventory_diff({AAPL: 10, MSFT: -4, TSLA: 0}, {AAPL: 8, MSFT: -4})
+        assert d.left == {AAPL: 10, MSFT: -4}  # TSLA:0 dropped by the non-zero filter
+        assert d.right == {AAPL: 8, MSFT: -4}
+        assert d.diffs == {AAPL: (10, 8)}  # MSFT agrees -> absent; pair is (left, right)

@@ -15,7 +15,7 @@ port, base, gate, fakes, and every downstream slice stay ib_async-free.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, runtime_checkable
@@ -108,6 +108,35 @@ class FakeSession(_GenerationOwner):
         return None
 
 
+@dataclass(frozen=True)
+class InventoryDiff:
+    """A signed-inventory comparison of two conId→quantity maps, non-zero holdings only.
+
+    ``left``/``right`` are the non-zero-filtered inputs; ``diffs`` maps a conId to ``(left_qty, right_qty)``
+    for every instrument whose quantity differs. A stale cached ``0`` vs an absent instrument is not a
+    spurious divergence (ADR-0002 ⑫).
+    """
+
+    left: dict[int, int]
+    right: dict[int, int]
+    diffs: dict[int, tuple[int, int]]
+
+
+def signed_inventory_diff(left: Mapping[int, int], right: Mapping[int, int]) -> InventoryDiff:
+    """Compare two conId→signed-quantity maps by identity, non-zero only — the one shared primitive under
+    both reconcilers. ``reconcile_inventory`` (the fail-closed snapshot gate) takes ``diffs`` keys;
+    ``gateway.reconcile_positions`` (the cache-rewrite report) takes the keyed ``(left, right)`` pairs.
+    """
+    left_nz = {int(k): int(q) for k, q in left.items() if int(q) != 0}
+    right_nz = {int(k): int(q) for k, q in right.items() if int(q) != 0}
+    diffs = {
+        k: (left_nz.get(k, 0), right_nz.get(k, 0))
+        for k in set(left_nz) | set(right_nz)
+        if left_nz.get(k, 0) != right_nz.get(k, 0)
+    }
+    return InventoryDiff(left_nz, right_nz, diffs)
+
+
 def reconcile_inventory(
     portfolio_qty: dict[int, int], position_qty: dict[int, int]
 ) -> tuple[bool, list[int]]:
@@ -117,8 +146,7 @@ def reconcile_inventory(
     subscription is not trustworthy for valuation yet → the caller fails the snapshot closed rather than
     valuing a book it cannot verify.
     """
-    keys = {k for k, q in portfolio_qty.items() if q != 0} | {k for k, q in position_qty.items() if q != 0}
-    mismatched = sorted(k for k in keys if portfolio_qty.get(k, 0) != position_qty.get(k, 0))
+    mismatched = sorted(signed_inventory_diff(portfolio_qty, position_qty).diffs)
     return (not mismatched, mismatched)
 
 
