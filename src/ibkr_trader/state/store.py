@@ -143,9 +143,7 @@ class StateStore:
             ).fetchone()
         return str(row[0]) if row else None
 
-    def set_session_start_equity(
-        self, session_date: date, equity: Decimal | int | str
-    ) -> Decimal:
+    def set_session_start_equity(self, session_date: date, equity: Decimal | int | str) -> Decimal:
         """Capture E0 once, returning the durable first value for this session.
 
         The immediate transaction makes the insert-if-absent operation safe across
