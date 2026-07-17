@@ -436,6 +436,30 @@ class TestRiskTieredLaneEvidence:
             }
         ]
 
+    def test_latest_lanes_scoped_to_hid_dir_ignores_a_newer_other_hid_ledger(self, tmp_path):
+        # Ledgers for a handoff always live under verification/<slugify(hid)>/ (lanes.ledger_path).
+        # When hid is scoped, a NEWER ledger written under a DIFFERENT hid must not be returned — the
+        # old full-tree scan enforced this via the doc["hid"] filter, and the directory-scoped lookup
+        # must stay equivalent. Characterizes the INT-012 speedup as behavior-preserving.
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="reviewer", from_="builder", title="x", body="y")  # "001"
+        lanes.write_ledger(
+            collab,
+            "001",
+            {"hid": "001", "run_uid": "R", "lanes": [{"lane": "mine", "ran": True}], "blockers": []},
+            candidate_id="cand:a",
+        )
+        # A different hid's ledger, written afterwards (newest on disk) — must be ignored for hid="001".
+        lanes.write_ledger(
+            collab,
+            "999",
+            {"hid": "999", "run_uid": "R", "lanes": [{"lane": "other", "ran": True}], "blockers": []},
+            candidate_id="cand:b",
+        )
+        got = dc._latest_lanes(collab, run_uid="R", hid="001")
+        assert got is not None and str(got["hid"]) == "001"
+        assert [ln["lane"] for ln in got["lanes"]] == ["mine"]
+
 
 # --------------------------------------------------------------------------- #
 # stats aggregation (the informational upgrade)
