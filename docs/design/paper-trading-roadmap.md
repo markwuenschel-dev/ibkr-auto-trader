@@ -6,18 +6,22 @@
 
 ## Where we are
 
-- **collab-kit (the orchestration scaffolding): done enough to pivot.** Foundation slices 001–006
-  (`collab_common`, handoff state machine, CLI, watchers, Telegram bridge, autopilot driver) are shipped;
-  the autonomy slices 012–017 (source==tested gate, `handoff bundle`, adversarial lane runner,
-  evidence-gated `done_contract`, negative-fixture sweep) are shipped; and the self-hosting harness +
-  `closeout-report` + reviewer-repo-preflight gate landed on top. All code lives in the **`collab-kit`
-  repo**; its full suite is green.
-- **The trading system: 0 lines of code.** This repo (`ibkr-auto-trader`) currently holds only design
-  docs + the collab handoff workspace. It is not yet a git repository and has no package. The 16 slices
-  below are a genuine from-scratch build.
-- **Queue: cleaned (2026-07-06).** The autopilot ping-pong replies were archived and the already-shipped
-  012–017 specs moved to `done/`; `pending/` and `claimed/` are empty. New trading handoffs allocate from
-  id **027**.
+_Status updated 2026-07-17. The original 2026-07-06 snapshot described a pre-code workspace and is now
+false — this repo has since landed ~8 PT slices; the corrected state follows._
+
+- **collab-kit (orchestration): transplanted into this repo, green.** The engine now lives here under
+  `collab/tools/lib/` — not a separate `collab-kit` repo. Foundation slices 001–006 and autonomy slices
+  012–015 are in `handoffs/done/`; the full suite is green under `scripts/verify.py` (the command CI runs).
+- **The trading system: PT-1/2/3/4a–c/6 + the reduce-only primitive have landed.** `ibkr-auto-trader` is
+  a git repository with a package (`pyproject.toml`). Built: frozen domain models (PT-1); SQLite state
+  store (PT-2, handoff 027); IBKR account gateway + session (PT-3, handoff 028); domain
+  `RiskContext`/holdings, `AccountSnapshot`, and the feed-gate assembler (PT-4a–c, handoffs 029/032/033);
+  `RiskPolicy`/`RiskControlState` and the E0/Eastern-session baseline (handoffs 030/034); the reduce-only
+  primitive (handoff 031); and `RiskPlanner` + `PortfolioProjector` (PT-6, `42f0661`, refined in handoff
+  035). **Still stubs** (`Empty until PT-N` in code): PT-5 (approver + loss-control *enforcement*), PT-8
+  (execution control), PT-12 (durable audit).
+- **Board:** `pending/` empty; handoff **035** (PT-6) is in flight; `draft/` holds 036 (PT-5) and 037 (PT-7).
+- **Nothing trades live.** Paper-first is the only path; no broker submission exists yet.
 - **Optional, off the critical path:** collab-kit §13 slice 8 (`install.sh` / `newproject` / `restart` /
   `/collab` skill). Nice for distribution, but not required — this repo already exists as a workspace.
 
