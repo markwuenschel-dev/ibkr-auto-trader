@@ -103,8 +103,7 @@ def test_a_human_override_cannot_be_forged_autonomous_by_flipping_the_kind(tmp_p
 
 def test_an_autonomous_close_records_its_receipt(tmp_path):
     collab = _claimed(tmp_path)
-    hc.done(collab, "001", kind=tr.KIND_AUTONOMOUS, actor="reviewer", receipt="a" * 64,
-            candidate_id="cand-1")
+    hc.done(collab, "001", kind=tr.KIND_AUTONOMOUS, actor="reviewer", receipt="a" * 64, candidate_id="cand-1")
     rec = tr.read(collab, "001")
     assert tr.is_autonomous(rec) is True
     assert rec["receipt"] == "a" * 64

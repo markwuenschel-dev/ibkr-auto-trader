@@ -44,12 +44,18 @@ def _seats() -> list[str]:
     """Seat subprocesses in flight — the model call actually running, if any."""
     try:
         out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_Process -Filter \"Name='claude.exe' OR Name='python.exe'\" | "
-             "Where-Object { $_.CommandLine -like '*seat*' -or $_.CommandLine -like '*claude -p*' } | "
-             "ForEach-Object { \"$($_.ProcessId) "
-             "$($_.CommandLine.Substring(0,[Math]::Min(60,$_.CommandLine.Length)))\" }"],
-            capture_output=True, text=True, timeout=8,
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"Name='claude.exe' OR Name='python.exe'\" | "
+                "Where-Object { $_.CommandLine -like '*seat*' -or $_.CommandLine -like '*claude -p*' } | "
+                'ForEach-Object { "$($_.ProcessId) '
+                '$($_.CommandLine.Substring(0,[Math]::Min(60,$_.CommandLine.Length)))" }',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
         )
         return [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
     except Exception:
@@ -110,8 +116,10 @@ def main() -> int:
             if status.get("updated_ts"):
                 _p = time.strptime(status["updated_ts"], "%Y-%m-%dT%H:%M:%SZ")
                 sage = _age(time.mktime(_p) - time.timezone)
-            print(f"\nSTATUS  phase={status.get('phase')}  stage={status.get('stage')}  "
-                  f"round={status.get('round')}/{status.get('max_rounds')}  hid={status.get('current_hid')}")
+            print(
+                f"\nSTATUS  phase={status.get('phase')}  stage={status.get('stage')}  "
+                f"round={status.get('round')}/{status.get('max_rounds')}  hid={status.get('current_hid')}"
+            )
             if sage is not None:
                 print(f"        status heartbeat {sage:.0f}s ago")
 

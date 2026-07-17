@@ -60,8 +60,11 @@ def _repo(tmp_path, *, verify_exit=0, pytest_exit=0, uv_project=False):
             '[project]\nname = "t"\nversion = "0.0.0"\nrequires-python = ">=3.12"\n'
         )
         subprocess.run(["uv", "lock"], cwd=base, capture_output=True)
-    for argv in (["init", "-q"], ["add", "-A"], ["-c", "user.email=t@t", "-c", "user.name=t",
-                                                 "commit", "-qm", "x"]):
+    for argv in (
+        ["init", "-q"],
+        ["add", "-A"],
+        ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x"],
+    ):
         subprocess.run(["git", *argv], cwd=base, capture_output=True)
     return base
 
@@ -104,11 +107,22 @@ def test_pytest_only_cannot_be_forged_green_by_flipping_fields(tmp_path):
     assert v.is_green({**rec, "kind": v.KIND_AUTHORITATIVE}) is False
     assert v.is_green({**rec, "kind": v.KIND_AUTHORITATIVE, "authoritative": True}) is False
     # even asserting the flag does not help: the argv is still pytest's
-    assert v.is_green({**rec, "kind": v.KIND_AUTHORITATIVE, "authoritative": True,
-                       "canonical_command": True}) is False
+    assert (
+        v.is_green({**rec, "kind": v.KIND_AUTHORITATIVE, "authoritative": True, "canonical_command": True})
+        is False
+    )
     # only the full authoritative shape, canonical argv included, passes
-    assert v.is_green({**rec, "kind": v.KIND_AUTHORITATIVE, "authoritative": True,
-                       "command": list(v.AUTHORITATIVE_ARGV)}) is True
+    assert (
+        v.is_green(
+            {
+                **rec,
+                "kind": v.KIND_AUTHORITATIVE,
+                "authoritative": True,
+                "command": list(v.AUTHORITATIVE_ARGV),
+            }
+        )
+        is True
+    )
 
 
 def test_authoritative_pass_is_green(tmp_path):
@@ -278,8 +292,13 @@ def test_a_non_git_tree_cannot_close_autonomously(tmp_path):
 
 
 def test_none_shas_are_not_a_match_at_any_layer():
-    null_id = {**_green_record(), "repo_root": None, "start_sha": None, "end_sha": None,
-               "checkout_stable": True}
+    null_id = {
+        **_green_record(),
+        "repo_root": None,
+        "start_sha": None,
+        "end_sha": None,
+        "checkout_stable": True,
+    }
     assert v.is_green(null_id) is False
     assert v.is_bound_to_git(null_id)[0] is False
 
@@ -334,8 +353,13 @@ def test_exit_zero_over_a_moved_checkout_is_void(tmp_path):
     """A builder mutating the tree mid-verify invalidates the result -- the 2026-07-15 shape."""
     base = _repo(tmp_path)
     rec = v.run_pytest_only("tests", str(base), python=sys.executable)
-    moved = {**rec, "kind": v.KIND_AUTHORITATIVE, "authoritative": True,
-             "end_sha": "deadbeef", "checkout_stable": False}
+    moved = {
+        **rec,
+        "kind": v.KIND_AUTHORITATIVE,
+        "authoritative": True,
+        "end_sha": "deadbeef",
+        "checkout_stable": False,
+    }
     assert v.is_green(moved) is False, "exit 0 attests the tree it ran on; that tree is gone"
 
 
@@ -365,8 +389,19 @@ def test_a_real_source_edit_during_the_run_does_void_it(tmp_path):
 def test_record_carries_the_full_provenance(tmp_path):
     base = _repo(tmp_path)
     rec = v.run_pytest_only("tests", str(base), python=sys.executable)
-    for field in ("command", "exit_code", "started_ts", "ended_ts", "start_sha", "end_sha",
-                  "start_status", "end_status", "checkout_stable", "label", "kind"):
+    for field in (
+        "command",
+        "exit_code",
+        "started_ts",
+        "ended_ts",
+        "start_sha",
+        "end_sha",
+        "start_status",
+        "end_status",
+        "checkout_stable",
+        "label",
+        "kind",
+    ):
         assert field in rec, f"ledger record must record {field}"
     assert rec["start_sha"] and len(rec["start_sha"]) == 40
     assert rec["start_sha"] == rec["end_sha"]
@@ -395,12 +430,24 @@ def _green_record(base=None):
     """
     if base is not None:
         return green_record(base)
-    return {"kind": v.KIND_AUTHORITATIVE, "authoritative": True, "canonical_command": True,
-            "exit_code": 0, "passed": True, "checkout_stable": True, "label": v.LABEL_GREEN,
-            "command": list(v.AUTHORITATIVE_ARGV), "repo_root": "/repo",
-            "start_sha": "a" * 40, "end_sha": "a" * 40, "start_status": "", "end_status": "",
-            "started_ts": "2026-07-15T11:19:18Z", "ended_ts": "2026-07-15T11:20:18Z",
-            "run_id": "authoritative-1"}
+    return {
+        "kind": v.KIND_AUTHORITATIVE,
+        "authoritative": True,
+        "canonical_command": True,
+        "exit_code": 0,
+        "passed": True,
+        "checkout_stable": True,
+        "label": v.LABEL_GREEN,
+        "command": list(v.AUTHORITATIVE_ARGV),
+        "repo_root": "/repo",
+        "start_sha": "a" * 40,
+        "end_sha": "a" * 40,
+        "start_status": "",
+        "end_status": "",
+        "started_ts": "2026-07-15T11:19:18Z",
+        "ended_ts": "2026-07-15T11:20:18Z",
+        "run_id": "authoritative-1",
+    }
 
 
 def _cond(collab, cid=5):
@@ -517,11 +564,15 @@ def test_a_pytest_only_ledger_cannot_close_the_whole_contract(tmp_path):
     collab = _setup(tmp_path)
     base = _repo(tmp_path)
     _ledger(collab, tests=v.run_pytest_only("tests", str(base), python=sys.executable))
-    assert dcon.evaluate(collab, "001", seats={}, reviewer_seat="reviewer",
-                         builder_seat="builder")["satisfied"] is False
+    assert (
+        dcon.evaluate(collab, "001", seats={}, reviewer_seat="reviewer", builder_seat="builder")["satisfied"]
+        is False
+    )
     _ledger(collab, tests=_green_record(collab))
-    assert dcon.evaluate(collab, "001", seats={}, reviewer_seat="reviewer",
-                         builder_seat="builder")["satisfied"] is True
+    assert (
+        dcon.evaluate(collab, "001", seats={}, reviewer_seat="reviewer", builder_seat="builder")["satisfied"]
+        is True
+    )
 
 
 def test_pytest_only_and_authoritative_never_share_a_status(tmp_path):

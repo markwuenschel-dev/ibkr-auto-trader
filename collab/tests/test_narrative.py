@@ -335,12 +335,8 @@ class TestUnits:
 
     def test_run_label_current_vs_previous(self):
         today = time.strftime("%Y-%m-%d", time.gmtime())
-        assert (
-            narrative._run_label("x-42", f"{today}T00:18:44Z", is_current=True) == "Current run · 00:18"
-        )
-        assert (
-            narrative._run_label("x-42", f"{today}T00:18:44Z", is_current=False) == "Previous run · 00:18"
-        )
+        assert narrative._run_label("x-42", f"{today}T00:18:44Z", is_current=True) == "Current run · 00:18"
+        assert narrative._run_label("x-42", f"{today}T00:18:44Z", is_current=False) == "Previous run · 00:18"
         assert narrative._run_label(None, None) == "the live run"
 
     def test_turns_from_an_unidentifiable_run_are_not_narrated_as_this_runs(self, tmp_path):
