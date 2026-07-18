@@ -20,7 +20,7 @@ Copy [seats.example.json](./seats.example.json) to your local seats.json, set on
 | breaker | read_test | attack the candidate without source writes |
 | verifier | read_test | reproduce/refute breaker findings without source writes |
 
-read_test means full repository visibility at the configured repo root plus allow-listed test/lint commands; it does not mean a text-only prompt or a source-write grant. Every assessor must use a repo-capable adapter. openai-compatible-seat.py is text-only and is deliberately invalid for reviewer, breaker, and verifier. The OpenAI repo adapter uses --run-checks for read_test, never --write.
+read_test means full repository visibility at the configured repo root plus allow-listed test/lint commands; it does not grant a `write_file` tool. That is a tool-surface grant, **not** a sandbox: the allow-listed interpreters (`python`/`uv`/`pytest`) can still write to the tree, so "without source writes" above is the seat's *instruction*, not enforced containment — see `collab/docs/adr/0006-check-seat-write-containment.md` (the ephemeral isolated root is the required next hardening). Every assessor must use a repo-capable adapter. openai-compatible-seat.py is text-only and is deliberately invalid for reviewer, breaker, and verifier. The OpenAI repo adapter uses --run-checks for read_test, never --write.
 
 ## Default profiles
 

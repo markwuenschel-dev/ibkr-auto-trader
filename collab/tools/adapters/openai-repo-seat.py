@@ -314,7 +314,10 @@ _WRITE_FILE_SPEC = [
 ]
 
 # A builder (--write) gets both write_file + run_command; a read_test lane (--run-checks) gets
-# run_command ONLY — it may run the allow-listed checks but can never write source it is judging.
+# run_command ONLY (no write_file). That is TOOL-SURFACE policy, not filesystem containment: the
+# allow-listed interpreters (python/uv/pytest) can still mutate the tree (e.g. `python -c`, a
+# `uv run` script, a fixture). Write-containment for check seats is NOT enforced yet — an ephemeral
+# isolated root is the required next hardening (collab/docs/adr/0006, INT-037).
 _WRITE_TOOLS_SPEC = _WRITE_FILE_SPEC + _RUN_COMMAND_SPEC
 
 
@@ -421,8 +424,9 @@ _SYSTEM_TOOL_NOTE = (
 _SYSTEM_READTEST_NOTE = (
     "You are an ADVERSARIAL VERIFICATION agent (breaker/verifier). You have read-only tools to inspect the "
     "ACTUAL repository (list_dir, read_file, search) AND run_command to run allow-listed checks "
-    "(pytest, ruff, python, uv) in the repo root. You do NOT have a write tool and you MUST NOT attempt to "
-    "modify the source you are judging — run the tests/linters to gather evidence, cite exact file:line "
+    "(pytest, ruff, python, uv) in the repo root. You are NOT granted a write tool; do NOT intentionally "
+    "modify the source you are judging (this is instruction, not a sandbox — the interpreters could write, "
+    "so honour it). Run the tests/linters to gather evidence, cite exact file:line "
     "paths, and write your finding/verdict as an ordinary message with no further tool calls."
 )
 
@@ -603,8 +607,9 @@ def main(argv=None) -> int:
     p.add_argument(
         "--run-checks",
         action="store_true",
-        help="enable run_command ONLY — allow-listed checks, NO write_file (a read_test "
-        "breaker/verifier seat). Ignored if --write is also given.",
+        help="enable run_command ONLY — allow-listed checks, NO write_file tool (a read_test "
+        "breaker/verifier seat); NOT a sandbox — interpreters can still write (see ADR-0006). "
+        "Ignored if --write is also given.",
     )
     p.add_argument(
         "--run-timeout",
