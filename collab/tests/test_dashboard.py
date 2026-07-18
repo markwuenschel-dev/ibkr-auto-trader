@@ -156,6 +156,18 @@ class TestStatusAndControl:
         dc.set_paused(collab, False)
         assert dc.read_control(collab)["paused"] is False
 
+    def test_max_rounds_survives_read_and_unrelated_writes(self, tmp_path):
+        # INT-027: read_control dropped max_rounds (absent from its default dict), and _write_control
+        # rewrites the whole dict, so a later set_paused/set_stop also erased it from disk. A mid-run
+        # set_max_rounds must survive both the read and any subsequent unrelated control write.
+        collab = str(tmp_path / "c")
+        assert dc.read_control(collab)["max_rounds"] is None  # absent -> no override
+        dc.set_max_rounds(collab, 7, by="test")
+        assert dc.read_control(collab)["max_rounds"] == 7  # carried through the read (was dropped)
+        dc.set_paused(collab, True)  # an unrelated write must not erase the budget
+        ctrl = dc.read_control(collab)
+        assert ctrl["max_rounds"] == 7 and ctrl["paused"] is True
+
     def test_pause_gate_idles_the_loop_reversibly(self, tmp_path, monkeypatch):
         # [C36]: a pause file must make run() IDLE (claim nothing) rather than progress. A paused loop
         # waits for a human, so we prove "it reached the idle sleep with zero work done" by making the
