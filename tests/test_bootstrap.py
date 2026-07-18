@@ -122,6 +122,20 @@ class TestPackDeclaration:
         t = TRADING_PACK.acceptance_thresholds
         assert t["max_risk_per_trade"] == 0.01 and t["live_rejected_by_default"] is True
 
+    def test_acceptance_thresholds_mirror_riskpolicy_defaults(self):
+        # INT-019: the pack thresholds (floats, for the declarative manifest) and RiskPolicy (the
+        # executable Decimal limits) are two hand-maintained copies of the same numbers — pack.py:48
+        # asserts the mirror in a comment, but nothing enforced it, and only max_risk_per_trade was
+        # ever compared. Pin every mirrored limit so tightening one copy without the other fails here.
+        # (PROTOCOL.md is a third, prose copy — not machine-checkable from here.) Compared as Decimal
+        # via str() so the float/Decimal representation gap is not itself the thing under test.
+        t = TRADING_PACK.acceptance_thresholds
+        policy = RiskPolicy()
+        assert Decimal(str(t["max_risk_per_trade"])) == policy.max_risk_per_trade
+        assert Decimal(str(t["daily_loss_lockout"])) == policy.daily_realized_lockout_pct
+        assert Decimal(str(t["leverage_cap"])) == policy.leverage_cap
+        assert t["stop_loss_required"] is policy.stop_loss_required
+
 
 def test_app_bootstrap_emits_event(tmp_path):
     ev = app.bootstrap(emitter=Emitter(log_path=tmp_path / "run.jsonl"))
