@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from ibkr_trader.domain.models import RiskContext, Side, ValuationStatus
+from ibkr_trader.domain.models import RiskContext, Side, StrictDecimal, ValuationStatus
 
 
 class UnpricedHoldingError(ValueError):
@@ -23,12 +23,12 @@ class VerifiedProjection(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    notional: Decimal
-    incremental_buying_power_debit: Decimal
-    resulting_gross_leverage: Decimal
-    maintenance_headroom: Decimal
-    resulting_concentration: Decimal
-    max_loss_if_stopped: Decimal
+    notional: StrictDecimal
+    incremental_buying_power_debit: StrictDecimal
+    resulting_gross_leverage: StrictDecimal
+    maintenance_headroom: StrictDecimal
+    resulting_concentration: StrictDecimal
+    max_loss_if_stopped: StrictDecimal
 
 
 def _get(value: Any, name: str, default: Any = None) -> Any:
