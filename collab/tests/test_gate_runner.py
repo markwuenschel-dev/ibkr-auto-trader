@@ -123,7 +123,12 @@ def test_pytest_check_records_resolved_argv_in_trace(tmp_path):
                     "tier": 3,
                     "name": "oracle",
                     "checks": [
-                        {"name": "tests", "kind": "pytest", "severity": "blocking", "params": {"path": str(tiny)}}
+                        {
+                            "name": "tests",
+                            "kind": "pytest",
+                            "severity": "blocking",
+                            "params": {"path": str(tiny)},
+                        }
                     ],
                 }
             ],
