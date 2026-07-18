@@ -5,7 +5,9 @@ from __future__ import annotations
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
 
-from ibkr_trader.domain.models import RiskContext, RiskPlan, Side, StrategyIntent
+from ibkr_trader.domain.models import RiskContext, RiskPlan, Side
+from ibkr_trader.risk.control_state import RiskControlState
+from ibkr_trader.risk.order_terms import OrderTerms
 from ibkr_trader.risk.projector import PortfolioProjector, UnpricedHoldingError
 
 
@@ -42,7 +44,11 @@ class RiskPlanner:
     def __init__(self, projector: PortfolioProjector | None = None) -> None:
         self.projector = projector or PortfolioProjector()
 
-    def plan(self, intent: StrategyIntent | Any, context: RiskContext, control_state: Any) -> RiskPlan:
+    def plan(self, intent: Any, context: RiskContext, control_state: RiskControlState) -> RiskPlan:
+        # `intent` is deliberately Any: the declared StrategyIntent (symbol/target_weight/rationale)
+        # is NOT the runtime shape — plan() reads ~10 fields off it, so its real type is the unbuilt
+        # PT-strategy rebalancer contract. Typing it is deferred to INT-006b/wayfinder rather than
+        # invented here. `context` and `control_state` ARE typed: that is the seam this slice closes.
         policy = control_state.policy
         instrument = _get(intent, "instrument_id", _get(intent, "con_id"))
         if instrument is None:
@@ -86,15 +92,18 @@ class RiskPlanner:
 
         projection = None
         if quantity:
-            terms = {
-                "instrument_id": instrument,
-                "quantity": quantity,
-                "side": side,
-                "price": price,
-                "stop_price": stop,
-                "multiplier": _get(intent, "multiplier", 1),
-            }
+            # Build the typed OrderTerms inside the try: a malformed field is a pydantic
+            # ValidationError (a ValueError subclass), so the planner still declines gracefully rather
+            # than crashing — same contract the projection failure path already had (INT-006).
             try:
+                terms = OrderTerms(
+                    instrument_id=instrument,
+                    quantity=quantity,
+                    side=side,
+                    price=price,
+                    stop_price=stop,
+                    multiplier=_decimal(_get(intent, "multiplier", 1), "multiplier"),
+                )
                 projection = self.projector.project(terms, context, control_state)
             except (ValueError, UnpricedHoldingError) as exc:
                 quantity, reason = 0, str(exc)

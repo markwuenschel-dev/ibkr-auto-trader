@@ -12,6 +12,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from ibkr_trader.domain.models import RiskContext, Side, StrictDecimal, ValuationStatus
+from ibkr_trader.risk.control_state import RiskControlState
+from ibkr_trader.risk.order_terms import OrderTerms
 
 
 class UnpricedHoldingError(ValueError):
@@ -31,12 +33,6 @@ class VerifiedProjection(BaseModel):
     max_loss_if_stopped: StrictDecimal
 
 
-def _get(value: Any, name: str, default: Any = None) -> Any:
-    if isinstance(value, dict):
-        return value.get(name, default)
-    return getattr(value, name, default)
-
-
 def _decimal(value: Any, label: str) -> Decimal:
     try:
         result = value if isinstance(value, Decimal) else Decimal(str(value))
@@ -50,28 +46,23 @@ def _decimal(value: Any, label: str) -> Decimal:
 class PortfolioProjector:
     """Deep module containing portfolio arithmetic and no sizing policy."""
 
-    def project(self, order_terms: Any, context: RiskContext, control_state: Any) -> VerifiedProjection:
+    def project(
+        self, order_terms: OrderTerms, context: RiskContext, control_state: RiskControlState
+    ) -> VerifiedProjection:
         # Never turn an incomplete inventory into a zero in the leverage denominator.
         if any(h.status == ValuationStatus.UNAVAILABLE for h in context.holdings.values()):
             raise UnpricedHoldingError("cannot project a portfolio containing an UNAVAILABLE holding")
 
-        instrument = _get(order_terms, "instrument_id", _get(order_terms, "con_id"))
-        if instrument is None:
-            instrument = _get(order_terms, "symbol")
-        quantity_raw = _get(order_terms, "quantity")
-        try:
-            quantity = int(quantity_raw)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("quantity must be a positive integer") from exc
-        side = Side(_get(order_terms, "side", Side.BUY))
-
-        price_raw = _get(order_terms, "price")
-        if price_raw is None and instrument in context.prices:
-            price_raw = context.prices[instrument]
-        price = _decimal(price_raw, "price")
-        multiplier = _decimal(_get(order_terms, "multiplier", 1), "multiplier")
-        stop_raw = _get(order_terms, "stop_price")
-        stop = _decimal(stop_raw, "stop_price") if stop_raw is not None else None
+        # Typed reads off OrderTerms — no _get/con_id/symbol fallbacks: a mis-keyed field is now a
+        # construction error at OrderTerms(), not a silent default here (INT-006). Identity is the
+        # resolved InstrumentId; the projector never re-resolves a symbol. `_decimal` retains only the
+        # finiteness guard (the fields are already Decimal via StrictDecimal).
+        instrument = order_terms.instrument_id
+        quantity = order_terms.quantity
+        side = order_terms.side
+        price = _decimal(order_terms.price, "price")
+        multiplier = _decimal(order_terms.multiplier, "multiplier")
+        stop = _decimal(order_terms.stop_price, "stop_price") if order_terms.stop_price is not None else None
         if quantity <= 0 or price <= 0 or multiplier <= 0:
             raise ValueError("quantity, price, and multiplier must be positive finite values")
 
