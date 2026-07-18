@@ -1,6 +1,6 @@
 """done_contract — the Autonomous Done-Transition Contract evaluator (ARCHITECTURE.md §18.3, autonomous rev).
 
-``evaluate()`` decides whether a handoff MAY be advanced to ``done/`` autonomously by checking the eleven
+``evaluate()`` decides whether a handoff MAY be advanced to ``done/`` autonomously by checking the twelve
 conditions of the contract against the verification ledger (lanes.py), the live source tree, and the
 handoff state. It is **pure**: it reads evidence and returns a verdict, and **never transitions state** — the
 driver performs the ``hc.done`` CAS only on a satisfied verdict, so the ``[[SIGNOFF]]`` token is necessary

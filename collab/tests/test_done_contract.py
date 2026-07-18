@@ -1,7 +1,7 @@
 """Tests for done_contract.py — the Autonomous Done-Transition Contract evaluator (§18.3).
 
 evaluate() is pure: it reads the verification ledger + live source + handoff state and returns a verdict,
-never transitioning anything. These tests pin each of the ten conditions independently.
+never transitioning anything. These tests pin each of the twelve conditions independently.
 """
 
 from __future__ import annotations
@@ -267,6 +267,9 @@ class TestEvaluate:
         v = _eval(collab)
         assert v["satisfied"] is False
         assert {"builder-evidence", "source==tested", "lanes-ran"} <= _failed(v)
+        # The docstring promises twelve conditions; the no-ledger branch must emit the full
+        # set (ids 1..12), not a truncated one — guard the count on this branch too (INT-020).
+        assert [c["id"] for c in v["conditions"]] == list(range(1, 13))
 
     def test_reviewer_equals_builder_fails_independence(self, tmp_path):
         collab = _setup(tmp_path)
