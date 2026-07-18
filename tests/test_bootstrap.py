@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -89,6 +90,20 @@ class TestTelemetryEnvelope:
         em = Emitter(log_path=tmp_path / "t.jsonl")
         with pytest.raises(ValueError):
             em.emit(stage="x", decision={"action": "bogus"})
+
+    def test_sink_failure_never_raises(self, tmp_path, monkeypatch, capsys):
+        # The other half of the now-honest contract (INT-036): best-effort applies to the *sink*.
+        # An I/O failure in _append is swallowed and logged, never raised into the producer — unlike a
+        # malformed envelope (tested above), which is a caller bug and DOES raise.
+        em = Emitter(log_path=tmp_path / "t.jsonl")
+
+        def _boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "mkdir", _boom)
+        ev = em.emit(stage="x")  # must not raise — the sink failed, not the envelope
+        assert ev["stage"] == "x"
+        assert "[telemetry] append failed" in capsys.readouterr().out
 
     def test_append_only(self, tmp_path):
         em = Emitter(log_path=tmp_path / "t.jsonl")
