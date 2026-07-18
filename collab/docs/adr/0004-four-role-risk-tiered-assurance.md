@@ -19,7 +19,7 @@ The system needs stronger scrutiny for trading-critical changes without turning 
 | breaker | read_test | attack the candidate without source writes |
 | verifier | read_test | reproduce or refute breaker findings without source writes |
 
-read_test means a repository-capable adapter receives the configured repo root and may inspect the full tree plus run bounded checks. It never grants source writes. The text-only OpenAI-compatible adapter is invalid for every assessment seat. This supersedes ADR-0003 D3's reviewer read row.
+read_test means a repository-capable adapter receives the configured repo root and may inspect the full tree plus run bounded checks. It grants no `write_file` tool. **Qualified by [ADR-0006](0006-check-seat-write-containment.md):** "no source writes" is a tool-surface grant, not enforced containment — the allow-listed interpreters can still write; an ephemeral isolated root is the required follow-up (INT-037b). The text-only OpenAI-compatible adapter is invalid for every assessment seat. This supersedes ADR-0003 D3's reviewer read row.
 
 The four names remain the dashboard's only role cards. A pass or profile is ledger evidence, never a fifth agent.
 
