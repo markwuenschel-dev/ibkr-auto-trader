@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
+from pydantic import ValidationError
 
 from ibkr_trader.config import RiskPolicy
 from ibkr_trader.domain.models import (
@@ -12,6 +13,7 @@ from ibkr_trader.domain.models import (
     ValuationStatus,
 )
 from ibkr_trader.risk.control_state import RiskControlState
+from ibkr_trader.risk.order_terms import OrderTerms
 from ibkr_trader.risk.projector import PortfolioProjector, UnpricedHoldingError
 
 NOW = datetime(2026, 1, 2, 15, tzinfo=UTC)
@@ -52,13 +54,13 @@ def control():
 
 def test_incremental_debit_and_broker_market_value_are_used():
     result = PortfolioProjector().project(
-        {
-            "instrument_id": 7,
-            "quantity": 5,
-            "side": Side.BUY,
-            "price": Decimal("100"),
-            "stop_price": Decimal("90"),
-        },
+        OrderTerms(
+            instrument_id=7,
+            quantity=5,
+            side=Side.BUY,
+            price=Decimal("100"),
+            stop_price=Decimal("90"),
+        ),
         context(),
         control(),
     )
@@ -71,22 +73,43 @@ def test_incremental_debit_and_broker_market_value_are_used():
 def test_unavailable_holding_fails_closed():
     with pytest.raises(UnpricedHoldingError):
         PortfolioProjector().project(
-            {"instrument_id": 7, "quantity": 1, "price": 100}, context(True), control()
+            OrderTerms(instrument_id=7, quantity=1, side=Side.BUY, price=Decimal("100")),
+            context(True),
+            control(),
         )
 
 
 def test_stop_direction_and_price_are_validated():
     with pytest.raises(ValueError):
         PortfolioProjector().project(
-            {
-                "instrument_id": 7,
-                "quantity": 1,
-                "side": Side.BUY,
-                "price": 100,
-                "stop_price": 110,
-            },
+            OrderTerms(
+                instrument_id=7,
+                quantity=1,
+                side=Side.BUY,
+                price=Decimal("100"),
+                stop_price=Decimal("110"),
+            ),
             context(),
             control(),
         )
     with pytest.raises(ValueError):
-        PortfolioProjector().project({"instrument_id": 7, "quantity": 1, "price": 0}, context(), control())
+        PortfolioProjector().project(
+            OrderTerms(instrument_id=7, quantity=1, side=Side.BUY, price=Decimal(0)),
+            context(),
+            control(),
+        )
+
+
+def test_order_terms_rejects_float_and_missing_fields_at_construction():
+    # INT-006: the typed seam turns a mis-keyed/float field into a construction error rather than a
+    # silent _get default inside the projector. A float price is rejected (StrictDecimal), and a
+    # missing required field (price) is rejected — not defaulted into a projection.
+    with pytest.raises(ValidationError):
+        OrderTerms(
+            instrument_id=7,
+            quantity=1,
+            side=Side.BUY,
+            price=0.1 + 0.2,  # type: ignore[arg-type]  # negative: float rejected by StrictDecimal
+        )
+    with pytest.raises(ValidationError):
+        OrderTerms(instrument_id=7, quantity=1, side=Side.BUY)  # type: ignore[call-arg]  # missing price

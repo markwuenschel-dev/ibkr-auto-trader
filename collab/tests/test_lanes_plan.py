@@ -226,3 +226,54 @@ def test_candidate_identity_binds_the_resolved_assurance_plan(tmp_path):
 
     assert baseline.candidate_id != high.candidate_id
     assert baseline.assessment_plan_revision == "v2"
+
+
+class TestBatchProtocolRoundTrip:
+    """INT-024: the breaker/verifier wire format lives in two hand-maintained encodings — the format
+    string advertised in the system prompt, and the regex the consumer parses it with. A wording
+    tweak to the prompt's delimiters that the regex doesn't track fails closed (a real finding
+    silently becomes ``verification_incomplete``). These tests couple the two: the prompt must still
+    advertise the exact documented shape, AND a line built to that shape must still parse.
+    """
+
+    def _lane_pass(self) -> vp.LanePass:
+        spec = vp.LaneSpec(
+            id="change-regression",
+            title="Change regression",
+            category="generic",
+            checklist=("probe",),
+            baseline_guardrails=(),
+            high_risk_guardrails=(),
+            always_baseline=True,
+            revision="v2",
+        )
+        return vp.LanePass("baseline", _profile("baseline"), (spec,), False)
+
+    def test_breaker_prompt_advertises_the_format_the_parser_accepts(self):
+        prompt = lanes._batch_breaker_system(self._lane_pass(), None)
+        assert "FINDING: F<n> | <exact code path> | <concrete trigger> | <impact>" in prompt
+        # A line built to exactly that advertised shape must parse into the fields the driver reads.
+        line = "FINDING: F1 | src/ibkr_trader/risk/planner.py:52 | mis-keyed stop_price | stop-loss skipped"
+        findings, err = lanes._parse_batch_findings(line)
+        assert err is None
+        assert len(findings) == 1
+        assert findings[0]["id"] == "F1"
+        assert findings[0]["path"] == "src/ibkr_trader/risk/planner.py:52"
+        assert findings[0]["trigger"] == "mis-keyed stop_price"
+        assert findings[0]["impact"] == "stop-loss skipped"
+
+    def test_breaker_no_finding_token_parses_clean(self):
+        findings, err = lanes._parse_batch_findings("NO-FINDING")
+        assert findings == [] and err is None
+
+    def test_verifier_prompt_advertises_the_format_the_parser_accepts(self):
+        prompt = lanes._batch_verifier_system(self._lane_pass(), None)
+        assert "VERDICT: CONFIRMED F<n> | <exact code path> | <concrete trigger>" in prompt
+        assert "VERDICT: REFUTED F<n> | <evidence>" in prompt
+        findings = [{"id": "F1"}]
+        confirmed, err = lanes._parse_batch_verdicts(
+            "VERDICT: CONFIRMED F1 | src/x.py:10 | reproduced with 0.1+0.2", findings
+        )
+        assert err is None and confirmed["F1"]["verdict"] == "CONFIRMED"
+        refuted, err2 = lanes._parse_batch_verdicts("VERDICT: REFUTED F1 | could not reproduce", findings)
+        assert err2 is None and refuted["F1"]["verdict"] == "REFUTED"

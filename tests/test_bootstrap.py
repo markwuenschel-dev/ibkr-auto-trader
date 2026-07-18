@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -90,6 +91,20 @@ class TestTelemetryEnvelope:
         with pytest.raises(ValueError):
             em.emit(stage="x", decision={"action": "bogus"})
 
+    def test_sink_failure_never_raises(self, tmp_path, monkeypatch, capsys):
+        # The other half of the now-honest contract (INT-036): best-effort applies to the *sink*.
+        # An I/O failure in _append is swallowed and logged, never raised into the producer — unlike a
+        # malformed envelope (tested above), which is a caller bug and DOES raise.
+        em = Emitter(log_path=tmp_path / "t.jsonl")
+
+        def _boom(*a, **k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(Path, "mkdir", _boom)
+        ev = em.emit(stage="x")  # must not raise — the sink failed, not the envelope
+        assert ev["stage"] == "x"
+        assert "[telemetry] append failed" in capsys.readouterr().out
+
     def test_append_only(self, tmp_path):
         em = Emitter(log_path=tmp_path / "t.jsonl")
         em.emit(stage="a")
@@ -106,6 +121,20 @@ class TestPackDeclaration:
     def test_pack_carries_protocol_limits(self):
         t = TRADING_PACK.acceptance_thresholds
         assert t["max_risk_per_trade"] == 0.01 and t["live_rejected_by_default"] is True
+
+    def test_acceptance_thresholds_mirror_riskpolicy_defaults(self):
+        # INT-019: the pack thresholds (floats, for the declarative manifest) and RiskPolicy (the
+        # executable Decimal limits) are two hand-maintained copies of the same numbers — pack.py:48
+        # asserts the mirror in a comment, but nothing enforced it, and only max_risk_per_trade was
+        # ever compared. Pin every mirrored limit so tightening one copy without the other fails here.
+        # (PROTOCOL.md is a third, prose copy — not machine-checkable from here.) Compared as Decimal
+        # via str() so the float/Decimal representation gap is not itself the thing under test.
+        t = TRADING_PACK.acceptance_thresholds
+        policy = RiskPolicy()
+        assert Decimal(str(t["max_risk_per_trade"])) == policy.max_risk_per_trade
+        assert Decimal(str(t["daily_loss_lockout"])) == policy.daily_realized_lockout_pct
+        assert Decimal(str(t["leverage_cap"])) == policy.leverage_cap
+        assert t["stop_loss_required"] is policy.stop_loss_required
 
 
 def test_app_bootstrap_emits_event(tmp_path):

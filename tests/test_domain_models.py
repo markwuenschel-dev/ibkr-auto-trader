@@ -16,7 +16,15 @@ from ibkr_trader.domain import (
     RiskContext,
     ValuationStatus,
 )
-from ibkr_trader.domain.models import ASSEMBLER_AUTHORITY, RISK_AUTHORITY
+from ibkr_trader.domain.models import (
+    ASSEMBLER_AUTHORITY,
+    RISK_AUTHORITY,
+    ApprovedOrderIntent,
+    Fill,
+    RiskPlan,
+    Side,
+    StrategyIntent,
+)
 
 _NOW = datetime(2026, 7, 11, 12, tzinfo=UTC)
 
@@ -183,3 +191,123 @@ def test_model_construct_bypasses_provenance_guard_release_gate_hole() -> None:
     assert bypassed.context_digest == "context:abc"
     with pytest.raises(TypeError):
         bypassed.holdings[265598] = _holding(quantity=999)  # type: ignore[index]  # sealed mapping
+
+
+# The invariant ADR-0003 requires and INT-013 enforces: a Python float must never enter a Decimal
+# money field. 0.1 + 0.2 (not a bare literal) is the exact binary-imprecision defect — it would
+# round-trip to Decimal('0.30000000000000004') under lax coercion.
+_FLOAT = 0.1 + 0.2
+
+
+def _strategy_intent(**over: object) -> dict[str, object]:
+    return {"symbol": "AAPL", "target_weight": Decimal("0.3"), **over}
+
+
+def _fill(**over: object) -> dict[str, object]:
+    return {
+        "order_id": "o1",
+        "symbol": "AAPL",
+        "side": Side.BUY,
+        "quantity": 10,
+        "price": Decimal("1.5"),
+        "filled_at": _NOW,
+        **over,
+    }
+
+
+def _risk_plan(**over: object) -> dict[str, object]:
+    return {
+        "symbol": "AAPL",
+        "side": Side.BUY,
+        "quantity": 10,
+        "stop_price": Decimal("1"),
+        "est_risk_amount": Decimal("1"),
+        "decision_generation": 1,
+        "session_generation": 1,
+        **over,
+    }
+
+
+def _holding_fields(**over: object) -> dict[str, object]:
+    return {
+        "quantity": 4,
+        "status": ValuationStatus.AVAILABLE,
+        "broker_market_value": Decimal("800"),
+        "mark_available_at": _NOW,
+        **over,
+    }
+
+
+class TestStrictDecimalBoundary:
+    """INT-013: per-field StrictDecimal rejects float ingress into money fields while leaving the
+    models' unrelated int/enum/datetime coercions intact (unlike model-level strict)."""
+
+    @pytest.mark.parametrize(
+        ("builder", "cls", "field"),
+        [
+            (_strategy_intent, StrategyIntent, "target_weight"),
+            (_fill, Fill, "price"),
+            (_risk_plan, RiskPlan, "stop_price"),
+            (_risk_plan, RiskPlan, "est_risk_amount"),
+            (_holding_fields, HoldingValuation, "broker_market_value"),
+        ],
+    )
+    def test_unguarded_money_field_rejects_float(self, builder, cls, field) -> None:
+        cls(**builder())  # sanity: the all-Decimal baseline constructs
+        with pytest.raises(ValidationError):
+            cls(**builder(**{field: _FLOAT}))
+
+    @pytest.mark.parametrize("field", ["net_liquidation", "buying_power", "maintenance_margin"])
+    def test_guarded_riskcontext_scalar_rejects_float_through_mint(self, field) -> None:
+        # Guarded models must be tested through their _mint seam so the check proves construction
+        # behaviour, not provenance failing first.
+        with pytest.raises(ValidationError):
+            RiskContext._mint(ASSEMBLER_AUTHORITY, **_fields(**{field: _FLOAT}))
+
+    def test_riskcontext_prices_mapping_value_rejects_float(self) -> None:
+        # The rule must reach the value type of a mapping, not only scalar fields.
+        with pytest.raises(ValidationError):
+            RiskContext._mint(ASSEMBLER_AUTHORITY, **_fields(prices={265598: _FLOAT}))
+
+    def test_approved_order_intent_stop_price_rejects_float_through_mint(self) -> None:
+        with pytest.raises(ValidationError):
+            ApprovedOrderIntent._mint(
+                RISK_AUTHORITY,
+                symbol="AAPL",
+                side=Side.BUY,
+                quantity=10,
+                stop_price=_FLOAT,
+                approved_at=_NOW,
+                ledger_ref="l1",
+            )
+
+    def test_decimal_field_accepts_decimal(self) -> None:
+        f = Fill(
+            order_id="o1", symbol="AAPL", side=Side.BUY, quantity=10, price=Decimal("0.3"), filled_at=_NOW
+        )
+        assert f.price == Decimal("0.3")
+        ctx = RiskContext._mint(ASSEMBLER_AUTHORITY, **_fields(net_liquidation=Decimal("0.3")))
+        assert ctx.net_liquidation == Decimal("0.3")
+
+    def test_optional_decimal_still_accepts_none(self) -> None:
+        # UNAVAILABLE holdings carry no value; Decimal | None must still accept None under strict.
+        h = HoldingValuation(
+            quantity=0,
+            status=ValuationStatus.UNAVAILABLE,
+            broker_market_value=None,
+            mark_available_at=None,
+        )
+        assert h.broker_market_value is None
+
+    def test_non_decimal_coercions_are_preserved(self) -> None:
+        # Per-field strict (not model-level): a str side coerces to the enum and an int quantity is
+        # accepted — the ergonomics model-wide strict would have removed.
+        f = Fill(
+            order_id="o1",
+            symbol="AAPL",
+            side="BUY",  # type: ignore[arg-type]  # coercion test: str -> Side must still work
+            quantity=10,
+            price=Decimal("1.5"),
+            filled_at=_NOW,
+        )
+        assert f.side is Side.BUY and f.quantity == 10

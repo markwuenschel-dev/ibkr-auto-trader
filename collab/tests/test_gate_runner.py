@@ -107,6 +107,44 @@ def test_all_pass_returns_passed_and_exit_zero(tmp_path):
     assert code == 0
 
 
+def test_pytest_check_records_resolved_argv_in_trace(tmp_path):
+    # INT-032: the pytest kind passes on rc==0, but a ruleset can narrow `params.path` to a single
+    # file and earn a tier pass. The resolved path AND flags must be reconstructable from the trace,
+    # so "which tests actually ran under this tier" is auditable from the ledger, not just "passed".
+    artifact = _write_json(tmp_path / "artifact.json", {"id": "A1", "kind": "widget"})
+    tiny = _tiny_passing_test(tmp_path)
+    ruleset = _write_json(
+        tmp_path / "rs.json",
+        {
+            "name": "t",
+            "version": "1",
+            "tiers": [
+                {
+                    "tier": 3,
+                    "name": "oracle",
+                    "checks": [
+                        {
+                            "name": "tests",
+                            "kind": "pytest",
+                            "severity": "blocking",
+                            "params": {"path": str(tiny)},
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    log = tmp_path / "trace.jsonl"
+    out = gr.run_gates(str(artifact), str(ruleset), log_path=str(log))
+
+    pytest_result = next(r for r in out["results"] if r["kind"] == "pytest")
+    # the exact narrowed path and the -q flag are reconstructable from the recorded detail
+    assert pytest_result["detail"].startswith(f"pytest {tiny} -q")
+    # and the same detail rides the emitted gate.check trace event
+    events = [e for e in _check_events(log) if any(g["name"] == "tests" for g in e.get("gates", []))]
+    assert events and str(tiny) in events[0]["detail"]
+
+
 # --------------------------------------------------------------------------- #
 # (b) L1 required_fields failure -> first_failing_tier==1, later tier NOT run
 # --------------------------------------------------------------------------- #

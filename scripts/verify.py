@@ -99,7 +99,10 @@ def build_plan(
         # generated autopilot/ output out of scope.
         _uv_run("core:ruff", uv, "ruff", "check", "."),
         _uv_run("core:pyright", uv, "pyright"),
-        _uv_run("collab:pytest", uv, "pytest", "-q", "collab/tests"),
+        # Same integration exclusion as core:pytest: CI runs verify.py and nothing else, so the
+        # `-m "not integration"` policy must be enforced on BOTH suites, not just src (INT-033).
+        # No collab test carries the marker today; this keeps a future one out of CI by default.
+        _uv_run("collab:pytest", uv, "pytest", "-q", "-m", "not integration", "collab/tests"),
     ]
 
     omissions: list[str] = []

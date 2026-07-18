@@ -1,7 +1,7 @@
 """Tests for done_contract.py — the Autonomous Done-Transition Contract evaluator (§18.3).
 
 evaluate() is pure: it reads the verification ledger + live source + handoff state and returns a verdict,
-never transitioning anything. These tests pin each of the ten conditions independently.
+never transitioning anything. These tests pin each of the twelve conditions independently.
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ def _preflight(base, *, seat="reviewer", **over):
     return pre
 
 
-def _ledger(collab, hid="001", **over):
+def _ledger(collab, hid="001", candidate_id=None, **over):
     base = Path(collab)
     (base / "src").mkdir(parents=True, exist_ok=True)
     (base / "src" / "m.py").write_text("x = 1\n", encoding="utf-8")
@@ -130,7 +130,11 @@ def _ledger(collab, hid="001", **over):
         "accepted_residuals": [],
     }
     led.update(over)
-    lanes.write_ledger(collab, hid, led)
+    # With a candidate_id the ledger is IMMUTABLE and lives at a per-candidate path; evaluate() must
+    # be given the SAME candidate_id to read it back (lanes.ledger_path). Writing unscoped while
+    # evaluating scoped silently reads None — which is how a "binding mismatch" test could pass via
+    # the no-ledger branch instead of the binding check (INT-035).
+    lanes.write_ledger(collab, hid, led, candidate_id=candidate_id)
     return led
 
 
@@ -205,11 +209,43 @@ class TestEvaluate:
         v = _eval(collab)
         assert v["satisfied"] is False and "spec-conformance" in _failed(v)
 
-    def test_conformance_evidence_bound_to_another_candidate_is_refused(self, tmp_path):
-        # An unbound record could be replayed from a different candidate.
+    def test_conformance_evidence_bound_to_this_candidate_passes(self, tmp_path):
+        # Positive counterpart to the mismatch case below: a conformance record bound to the SAME
+        # candidate the evaluator is attesting satisfies condition 12. The binding branch previously
+        # had only a negative test, so a regression that rejected a correct binding would have
+        # slipped through green (INT-035).
         collab = _setup(tmp_path)
         _ledger(
             collab,
+            candidate_id="cand:this-one",
+            conformance={
+                "candidate_id": "cand:this-one",
+                "contract_digest": "conformance:d",
+                "requirement_ids": ["C1"],
+                "results": [{"id": "C1", "status": "met"}],
+                "incomplete": None,
+                "satisfied": True,
+            },
+        )
+        v = dcon.evaluate(
+            collab,
+            "001",
+            seats={},
+            reviewer_seat="reviewer",
+            builder_seat="builder",
+            candidate_id="cand:this-one",
+        )
+        assert v["satisfied"] is True and _failed(v) == set()
+
+    def test_conformance_evidence_bound_to_another_candidate_is_refused(self, tmp_path):
+        # An unbound (or wrongly-bound) record could be replayed from a different candidate. The
+        # ledger is written to THIS candidate's path so it is actually found — proving the refusal
+        # comes from the binding check (condition 12), not from the no-ledger branch (INT-035):
+        # builder-evidence stays green, so the ledger was read; only spec-conformance fails.
+        collab = _setup(tmp_path)
+        _ledger(
+            collab,
+            candidate_id="cand:this-one",
             conformance={
                 "candidate_id": "cand:someone-else",
                 "contract_digest": "conformance:d",
@@ -226,7 +262,9 @@ class TestEvaluate:
             builder_seat="builder",
             candidate_id="cand:this-one",
         )
-        assert v["satisfied"] is False and "spec-conformance" in _failed(v)
+        assert v["satisfied"] is False
+        assert "spec-conformance" in _failed(v)
+        assert "builder-evidence" not in _failed(v)  # ledger WAS found → refusal is the binding check
 
     def test_coverage_mismatch_is_refused(self, tmp_path):
         collab = _setup(tmp_path)
@@ -267,6 +305,9 @@ class TestEvaluate:
         v = _eval(collab)
         assert v["satisfied"] is False
         assert {"builder-evidence", "source==tested", "lanes-ran"} <= _failed(v)
+        # The docstring promises twelve conditions; the no-ledger branch must emit the full
+        # set (ids 1..12), not a truncated one — guard the count on this branch too (INT-020).
+        assert [c["id"] for c in v["conditions"]] == list(range(1, 13))
 
     def test_reviewer_equals_builder_fails_independence(self, tmp_path):
         collab = _setup(tmp_path)

@@ -170,15 +170,17 @@ def _check_pytest(params, artifact):
     path = _resolve_path(params, artifact)
     # L3 execution oracle: a real subprocess so the gate reflects the actual test run, not an
     # in-process import that could contaminate this interpreter's state.
-    proc = subprocess.run(
-        [sys.executable, "-m", "pytest", path, "-q"],
-        capture_output=True,
-        text=True,
-    )
+    argv = [sys.executable, "-m", "pytest", path, "-q"]
+    # Record the RESOLVED invocation in the detail so the trace answers "which tests ran under this
+    # tier", not just "pytest passed" — a ruleset can narrow `params.path` to a single file and earn
+    # a tier pass, and that resolved path/flags must be auditable from the ledger (INT-032). The
+    # interpreter path is volatile/machine-specific, so report the command from `pytest` onward.
+    resolved = " ".join(["pytest", *argv[3:]])
+    proc = subprocess.run(argv, capture_output=True, text=True)
     if proc.returncode == 0:
-        return "pass", f"pytest {path}: rc=0"
+        return "pass", f"{resolved}: rc=0"
     tail = (proc.stdout or proc.stderr or "").strip().splitlines()[-1:] or [""]
-    return "fail", f"pytest {path}: rc={proc.returncode} ({tail[0]})"
+    return "fail", f"{resolved}: rc={proc.returncode} ({tail[0]})"
 
 
 def _resolve_path_key(params: dict, key: str, artifact: str) -> str | None:

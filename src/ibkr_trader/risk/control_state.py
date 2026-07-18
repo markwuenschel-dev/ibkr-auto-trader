@@ -9,10 +9,9 @@ Execution Control.
 from __future__ import annotations
 
 from datetime import date, datetime
-from decimal import Decimal
 
 from ibkr_trader.config import RiskPolicy
-from ibkr_trader.domain.models import _Frozen
+from ibkr_trader.domain.models import StrictDecimal, _Frozen
 
 
 class RiskControlState(_Frozen):
@@ -20,7 +19,7 @@ class RiskControlState(_Frozen):
 
     policy: RiskPolicy
     session_date: date
-    realized_daily_pnl: Decimal
+    realized_daily_pnl: StrictDecimal
     observed_at: datetime
     #: The session generation (ADR-0002 ⑨) observed when this control state was built. Bumped on every
     #: reconnect. A plan binds this alongside the sealed context's generation: when the two differ, the

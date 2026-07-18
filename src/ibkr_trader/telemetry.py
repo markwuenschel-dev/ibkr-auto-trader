@@ -18,7 +18,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 SCHEMA_VERSION = "0.1"
 
@@ -27,8 +27,10 @@ SCHEMA_VERSION = "0.1"
 class TelemetrySink(Protocol):
     """The narrow §8 emit seam a producer depends on (never the whole ``Emitter``).
 
-    Best-effort by contract: a sink call must never break the producer's path. Only the fields producers
-    actually populate are named; the concrete ``Emitter`` accepts the full envelope.
+    Best-effort by contract: a *sink/I/O* failure must never break the producer's path. Envelope
+    validation is separate — but note this protocol doesn't expose ``decision``, so producers coding
+    against the seam cannot hit action validation at all. Only the fields producers actually populate
+    are named; the concrete ``Emitter`` accepts the full envelope.
     """
 
     def emit(
@@ -41,8 +43,13 @@ class TelemetrySink(Protocol):
     ) -> None: ...
 
 
-# The decision actions the control plane may record (Reusable Core §8 envelope).
-ACTIONS = ("accept", "revise", "reject", "escalate", "skip", "waive")
+# The decision actions the control plane may record (Reusable Core §8 envelope). The Literal and the
+# runtime tuple are declared together so the static type and the runtime check cannot drift: the moment
+# a Decision TypedDict/dataclass lands (PT-7 durable audit, handoff 037), ``action: DecisionAction``
+# slots in and Pyright catches a typo before runtime. The line-114 check stays as the belt for the
+# dict-shaped callers this schema-light stage still allows (INT-036).
+DecisionAction = Literal["accept", "revise", "reject", "escalate", "skip", "waive"]
+ACTIONS: tuple[DecisionAction, ...] = ("accept", "revise", "reject", "escalate", "skip", "waive")
 
 
 def new_run_id() -> str:
@@ -87,8 +94,15 @@ class Emitter:
         risk: dict | None = None,
         failure: dict | None = None,
     ) -> dict:
-        """Build, hash, append, and return one §8 event. Best-effort write: a telemetry failure must
-        never break the loop (same rule as collab-kit's `_emit_safe`)."""
+        """Build, hash, append, and return one §8 event.
+
+        Best-effort applies to the *sink*: an I/O failure in ``_append`` is swallowed and logged,
+        never raised into the producer (same rule as collab-kit's ``_emit_safe``). A malformed
+        envelope is different — an unknown ``decision.action`` is a caller bug and raises
+        ``ValueError`` so it fails loudly in dev/test instead of corrupting the append-only,
+        content-hashed audit record. Producers on a hot path that want blanket immunity wrap the
+        call (see gateway.py ``_emit``, assembler.py ``_emit``).
+        """
         event = {
             "schema_version": SCHEMA_VERSION,
             "trace_id": self.trace_id,

@@ -70,6 +70,12 @@ def read_control(collab) -> dict:
         "stop": False,
         "requested_ts": None,
         "requested_by": None,
+        # Carried through so a mid-run set_max_rounds survives BOTH this read and the next
+        # _write_control: the key was absent from this default, so the dict-comprehension below
+        # dropped it on read, and _write_control (which rewrites the whole dict) then erased it from
+        # disk on any later set_paused/set_stop. None = no override; the driver keeps its launch cap
+        # (mirrors autopilot._read_control) (INT-027).
+        "max_rounds": None,
     }
     try:
         doc = json.loads(ap._control_path(collab).read_text("utf-8"))

@@ -13,9 +13,9 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 if TYPE_CHECKING:
     from ibkr_trader.risk.reduce_only import ReduceOnlyLatch
@@ -23,6 +23,15 @@ if TYPE_CHECKING:
 # IBKR's stable contract identifier is the decision-universe set key.  This is
 # an alias rather than a symbol: display symbols are neither unique nor stable.
 InstrumentId = int
+
+#: The one invariant ADR-0003 requires of money in this system: a Python ``float`` must never enter
+#: Decimal-based financial arithmetic (its binary imprecision would corrupt a limit comparison —
+#: ``Decimal(0.1 + 0.2) != Decimal("0.3")``). ``strict=True`` on the *field* rejects a float at
+#: construction while preserving the models' unrelated coercions (``quantity=10``, ``side="BUY"``) —
+#: unlike model-level strict, which would also forbid those. Reachability is dormant today (every
+#: production ingress already supplies Decimal), so this is provably behaviour-neutral now and closes
+#: the class of defect for the future strategy/risk/execution callers these types exist for (INT-013).
+StrictDecimal = Annotated[Decimal, Field(strict=True)]
 
 
 class Side(StrEnum):
@@ -88,7 +97,7 @@ class HoldingValuation(_Frozen):
 
     quantity: int
     status: ValuationStatus
-    broker_market_value: Decimal | None
+    broker_market_value: StrictDecimal | None
     mark_available_at: datetime | None
 
     @model_validator(mode="after")
@@ -105,7 +114,7 @@ class StrategyIntent(_Frozen):
     """What a strategy proposes — never an order."""
 
     symbol: str
-    target_weight: Decimal
+    target_weight: StrictDecimal
     rationale: str = ""
 
 
@@ -115,8 +124,8 @@ class RiskPlan(_Frozen):
     symbol: str
     side: Side
     quantity: int
-    stop_price: Decimal
-    est_risk_amount: Decimal
+    stop_price: StrictDecimal
+    est_risk_amount: StrictDecimal
     planner_projection: Any = None
     projection_is_authoritative: bool = False
     context_digest: str = ""
@@ -153,7 +162,7 @@ class Fill(_Frozen):
     symbol: str
     side: Side
     quantity: int
-    price: Decimal
+    price: StrictDecimal
     filled_at: datetime
 
 
@@ -187,10 +196,10 @@ class RiskContext(_MintGuarded):
     _required_authority = ASSEMBLER_AUTHORITY
 
     holdings: Mapping[InstrumentId, HoldingValuation]
-    net_liquidation: Decimal
-    buying_power: Decimal
-    maintenance_margin: Decimal
-    prices: Mapping[InstrumentId, Decimal]
+    net_liquidation: StrictDecimal
+    buying_power: StrictDecimal
+    maintenance_margin: StrictDecimal
+    prices: Mapping[InstrumentId, StrictDecimal]
     price_basis: Mapping[InstrumentId, str]
     data_as_of: Mapping[InstrumentId, datetime]
     account_observed_at: datetime
@@ -272,7 +281,7 @@ class ApprovedOrderIntent(_MintGuarded):
     symbol: str
     side: Side
     quantity: int
-    stop_price: Decimal
+    stop_price: StrictDecimal
     approved_at: datetime
     ledger_ref: str
 

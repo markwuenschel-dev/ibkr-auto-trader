@@ -51,6 +51,20 @@ def test_full_plan_is_locked_and_excludes_integration() -> None:
 
     core_pytest = next(step for step in plan.steps if step.label == "core:pytest")
     assert core_pytest.argv == ("uv.exe", "run", "--locked", "pytest", "-q", "-m", "not integration")
+    # The integration exclusion is a CI-wide policy, not a core-only one: collab:pytest must carry
+    # the same `-m "not integration"` filter so a future integration-marked collab test stays out
+    # of CI by default (INT-033).
+    collab_pytest = next(step for step in plan.steps if step.label == "collab:pytest")
+    assert collab_pytest.argv == (
+        "uv.exe",
+        "run",
+        "--locked",
+        "pytest",
+        "-q",
+        "-m",
+        "not integration",
+        "collab/tests",
+    )
     for step in plan.steps:
         if step.argv is not None and step.argv[:2] == ("uv.exe", "run"):
             assert step.argv[2] == "--locked"
