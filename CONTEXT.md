@@ -113,6 +113,7 @@ The only object an execution adapter may send. It can exist only after Execution
 - Every executable order intent must pass through Risk & Sizing.
 - Every executable order must pass through Execution Control.
 - Execution adapters accept only executable orders.
+- Mint guards (`_MintGuarded`) are **provenance / accidental-bypass** protection, not an in-process security boundary; issuer containment is a deferred LIVE release gate ([ADR-0005](docs/design/adr/0005-mint-guards-provenance-not-security-boundary.md)).
 - Approved risk per trade must be at most 1% of current equity.
 - New opening risk is rejected when the **realized** daily loss reaches `pct_a` of session-start equity E0 (Control 1); strict risk-reducing exits remain eligible.
 - A **session drawdown breaker** on total equity `(NLV−E0)/E0 ≤ −pct_d` de-risks the book (Control 2); it detects+alarms in v1 and enforces once `pct_d` is paper-calibrated.
