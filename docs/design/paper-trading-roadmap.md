@@ -63,7 +63,7 @@ regression-hunt lanes run.
 | **PT-8** | **Mode Controller + kill switch/pause** — PAPER default; LIVE rejected under default config; `KILL_SWITCHED`/`PAUSED` block all submission | safety, bounded-autonomy | PT-1 |
 | **PT-9** | **Execution Gate + adapters (protocol + `simulated`)** — mints `ExecutableOrder`; `ExecutionAdapter` protocol; in-process simulated adapter (the default) returns `Fill`/`Ack` | safety, money | PT-7, PT-8 |
 | **PT-10** | **`paper_ibkr` adapter** — routes `ExecutableOrder`s to an IBKR paper account | money, safety | PT-3, PT-9 |
-| **PT-11** | **`RebalancerStrategy`** — target allocation + drift thresholds; emits `StrategyIntent` only | money | PT-4 |
+| **PT-11** | **`RebalancerStrategy`** — target allocation + drift thresholds; emits `StrategyIntent` only. **Owns the real `StrategyIntent` shape:** it declares only `symbol`/`target_weight`/`rationale` today, but `RiskPlanner.plan` reads ~10 fields off the intent (`instrument_id`, `side`, `stop_price`, `price`, `quantity`, `lot_size`, `multiplier`, …) via duck-typing — so `plan(intent: Any)` stays deliberately untyped until PT-11 defines the contract (deferred **INT-006b**, from INT-006; do not invent it earlier). | money | PT-4 |
 | **PT-12** | **Audit log** — structured JSON + human-readable line for every decision (approve & reject) | audit-completeness, data-integrity | PT-1 |
 | **PT-13** | **App main loop** — orchestration + heartbeat/watchdog + reconnection/rate-limiting; safe pause on stall/disconnect | safety, bounded-autonomy | PT-3, PT-9, PT-12 |
 | **PT-14** | **Telegram alerts** — via the collab-kit bridge: large drift, paper order placed, daily summary, errors | observability | PT-13 |
