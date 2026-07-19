@@ -1,5 +1,21 @@
 # Configuring the four collab seats
 
+## LiteLLM gateway (optional)
+
+Put in [`.env`](./.env) (see [`.env.example`](./.env.example)):
+
+```env
+LITELLM_BASE_URL=http://localhost:4000/v1
+LITELLM_VIRTUAL_KEY=sk-...
+# optional: LITELLM_MODEL=llm-general
+```
+
+When `LITELLM_VIRTUAL_KEY` is set, `openai-compatible-seat` and `openai-repo-seat` default
+to that base URL and key (unless seats.json passes explicit `--base` / `--key-env`). Start the
+gateway stack first. Explicit argv in seats.json still wins over these defaults.
+
+---
+
 Copy [seats.example.json](./seats.example.json) to your local seats.json, set only local paths and credentials, then restart the driver. The config has exactly four logical roles:
 
 > **A v2 catalog is required for autonomous closeout (ADR-0005).** The driver refuses to dispatch any

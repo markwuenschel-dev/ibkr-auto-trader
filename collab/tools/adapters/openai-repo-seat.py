@@ -29,10 +29,13 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 # Directories that are never worth serving to a code reviewer — noise, vendored, or VCS internals.
@@ -51,6 +54,34 @@ _SKIP_DIRS = {
     ".vscode",
 }
 _TEXT_SNIFF_BYTES = 2048  # read this many bytes to decide if a file is text (NUL byte => binary)
+
+# INT-037b: a read_test (--run-checks) seat has no write_file tool, but its allow-listed interpreters
+# (python/uv) CAN write, so it runs against an EPHEMERAL COPY of the working tree — a `git worktree` of
+# HEAD would miss the uncommitted builder edits the judge must review. Writes land in the throwaway; the
+# judged source is untouched. Excludes _SKIP_DIRS (VCS internals, caches, vendored, dist/build) plus a
+# few extra build-artifact dirs. This raises the bar against ordinary/accidental writes (ADR-0006);
+# perfect containment is a container (the deferred end state), and a model that writes a symlink out of
+# the copy is a documented residual, not something this copy stops.
+_COPY_SKIP = _SKIP_DIRS | {".next", ".hypothesis", ".tox", "target", "coverage"}
+
+
+def _isolate_check_root(root: Path) -> tuple[Path, Callable[[], None]]:
+    """Copy ``root``'s working tree to a fresh temp dir; return ``(copy_root, cleanup)``.
+
+    ``cleanup()`` removes the copy unless ``COLLAB_KEEP_CHECK_ROOT=1`` (retain for debugging). The temp
+    dir is created via ``tempfile.mkdtemp`` OUTSIDE ``root`` so the copy is never nested under the judged
+    tree, and uncommitted edits are carried (it is a copy, not a git worktree).
+    """
+    dest = Path(tempfile.mkdtemp(prefix="collab-check-root-"))
+    shutil.copytree(root, dest, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*_COPY_SKIP))
+
+    def _cleanup() -> None:
+        if os.environ.get("COLLAB_KEEP_CHECK_ROOT") == "1":
+            sys.stderr.write(f"openai-repo-seat: keeping isolated check root {dest}\n")
+            return
+        shutil.rmtree(dest, ignore_errors=True)
+
+    return dest, _cleanup
 
 
 def _load_dotenv() -> None:
@@ -589,10 +620,23 @@ def main(argv=None) -> int:
         if _reconf is not None:
             _reconf(encoding="utf-8", errors="replace")
     _load_dotenv()
+    # LiteLLM gateway defaults when LITELLM_VIRTUAL_KEY is set (see openai-compatible-seat).
+    _gw = (os.environ.get("LITELLM_VIRTUAL_KEY") or "").strip().startswith("sk-")
+    _default_base = (
+        os.environ.get("LITELLM_BASE_URL")
+        or os.environ.get("SEAT_API_BASE")
+        or ("http://localhost:4000/v1" if _gw else "https://api.openai.com/v1")
+    )
+    _default_model = (
+        os.environ.get("LITELLM_MODEL")
+        or os.environ.get("SEAT_API_MODEL")
+        or ("llm-general" if _gw else "gpt-5.5")
+    )
+    _default_key_env = "LITELLM_VIRTUAL_KEY" if _gw else "OPENAI_API_KEY"
     p = argparse.ArgumentParser(prog="openai-repo-seat")
-    p.add_argument("--base", default=os.environ.get("SEAT_API_BASE", "https://api.openai.com/v1"))
-    p.add_argument("--model", default=os.environ.get("SEAT_API_MODEL", "gpt-5.5"))
-    p.add_argument("--key-env", default="OPENAI_API_KEY")
+    p.add_argument("--base", default=_default_base)
+    p.add_argument("--model", default=_default_model)
+    p.add_argument("--key-env", default=_default_key_env)
     p.add_argument(
         "--repo-root", required=True, help="repository the model may read (and write with --write)"
     )
@@ -637,6 +681,13 @@ def main(argv=None) -> int:
     if not root.is_dir():
         sys.stderr.write(f"openai-repo-seat: --repo-root {args.repo_root!r} is not a directory\n")
         return 2
+
+    # INT-037b: a read_test seat (--run-checks, not --write) runs against an ephemeral copy of the
+    # working tree so an allow-listed interpreter write cannot mutate the source it is judging (ADR-0006).
+    # --write (builder) seats deliberately operate on the real root.
+    _check_cleanup: Callable[[], None] | None = None
+    if args.run_checks and not args.write:
+        root, _check_cleanup = _isolate_check_root(root)
 
     prompt = sys.stdin.read()
     base = args.base.rstrip("/")
@@ -691,6 +742,9 @@ def main(argv=None) -> int:
     except Exception as e:  # network/timeout/JSON — fail the round, don't emit a partial reply
         sys.stderr.write(f"api call failed: {e}\n")
         return 1
+    finally:
+        if _check_cleanup is not None:
+            _check_cleanup()  # remove the ephemeral check-root copy (INT-037b)
 
     sys.stdout.write(out or "")
     return 0
