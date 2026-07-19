@@ -65,20 +65,51 @@ def _post_json(url: str, key: str, payload: dict, timeout: float) -> dict:
         return json.load(r)
 
 
+def _attribution_metadata(model: str, *, feature: str = "seat") -> dict | None:
+    """Origin fields for LiteLLM → Langfuse when SERVICE_NAME is set or gateway is used."""
+    import uuid
+
+    service = (os.environ.get("SERVICE_NAME") or os.environ.get("LLG_SERVICE") or "").strip()
+    if not service and (os.environ.get("LITELLM_VIRTUAL_KEY") or "").strip().startswith("sk-"):
+        service = "ibkr-auto-trader"
+    if not service:
+        return None
+    environment = (
+        os.environ.get("ENVIRONMENT") or os.environ.get("LLG_ENVIRONMENT") or "development"
+    ).strip()
+    release = (
+        os.environ.get("GIT_SHA")
+        or os.environ.get("RELEASE")
+        or os.environ.get("LLG_RELEASE")
+        or "dev"
+    ).strip()
+    return {
+        "request_id": str(uuid.uuid4()),
+        "service": service,
+        "feature": feature,
+        "environment": environment or "development",
+        "release": release or "dev",
+        "model_alias": model,
+    }
+
+
 def _chat(base: str, model: str, key: str, prompt: str, timeout: float) -> str:
     """Chat Completions API (Grok, Gemini's OpenAI-compat, older OpenAI models, Ollama, ...)."""
-    data = _post_json(
-        f"{base}/chat/completions",
-        key,
-        {"model": model, "messages": [{"role": "user", "content": prompt}]},
-        timeout,
-    )
+    payload: dict = {"model": model, "messages": [{"role": "user", "content": prompt}]}
+    meta = _attribution_metadata(model, feature="compatible-seat")
+    if meta:
+        payload["metadata"] = meta
+    data = _post_json(f"{base}/chat/completions", key, payload, timeout)
     return data["choices"][0]["message"]["content"] or ""
 
 
 def _responses(base: str, model: str, key: str, prompt: str, timeout: float) -> str:
     """Responses API (newer OpenAI models like gpt-5-codex that reject /chat/completions)."""
-    data = _post_json(f"{base}/responses", key, {"model": model, "input": prompt}, timeout)
+    payload: dict = {"model": model, "input": prompt}
+    meta = _attribution_metadata(model, feature="compatible-seat")
+    if meta:
+        payload["metadata"] = meta
+    data = _post_json(f"{base}/responses", key, payload, timeout)
     return _extract_responses_text(data)
 
 

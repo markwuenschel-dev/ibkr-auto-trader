@@ -401,6 +401,41 @@ def _post_json(url: str, key: str, payload: dict, timeout: float) -> dict:
         return json.load(r)
 
 
+def _attribution_metadata(model: str, *, feature: str = "repo-seat") -> dict | None:
+    """Origin fields for LiteLLM → Langfuse when SERVICE_NAME is set or gateway is used."""
+    import uuid
+
+    service = (os.environ.get("SERVICE_NAME") or os.environ.get("LLG_SERVICE") or "").strip()
+    if not service and (os.environ.get("LITELLM_VIRTUAL_KEY") or "").strip().startswith("sk-"):
+        service = "ibkr-auto-trader"
+    if not service:
+        return None
+    environment = (
+        os.environ.get("ENVIRONMENT") or os.environ.get("LLG_ENVIRONMENT") or "development"
+    ).strip()
+    release = (
+        os.environ.get("GIT_SHA")
+        or os.environ.get("RELEASE")
+        or os.environ.get("LLG_RELEASE")
+        or "dev"
+    ).strip()
+    return {
+        "request_id": str(uuid.uuid4()),
+        "service": service,
+        "feature": feature,
+        "environment": environment or "development",
+        "release": release or "dev",
+        "model_alias": model,
+    }
+
+
+def _with_attribution(payload: dict, model: str, *, feature: str = "repo-seat") -> dict:
+    meta = _attribution_metadata(model, feature=feature)
+    if meta:
+        payload = {**payload, "metadata": meta}
+    return payload
+
+
 def _is_gpt54_plus(model: str) -> bool:
     """True for gpt-5.4, gpt-5.5, gpt-5.6-luna, … — the family that rejects tools on /chat/completions."""
     m = re.match(r"^gpt-5\.(\d+)", (model or "").strip().lower())
@@ -484,12 +519,16 @@ def _run_agentic(
     ]
     url = f"{base}/chat/completions"
     for _ in range(max_steps):
-        data = _post_json(
-            url,
-            key,
-            {"model": model, "messages": messages, "tools": tools_spec, "tool_choice": "auto"},
-            timeout,
+        payload = _with_attribution(
+            {
+                "model": model,
+                "messages": messages,
+                "tools": tools_spec,
+                "tool_choice": "auto",
+            },
+            model,
         )
+        data = _post_json(url, key, payload, timeout)
         msg = data["choices"][0]["message"]
         calls = msg.get("tool_calls") or []
         if not calls:
@@ -512,7 +551,9 @@ def _run_agentic(
             "your final review now.",
         }
     )
-    data = _post_json(url, key, {"model": model, "messages": messages}, timeout)
+    data = _post_json(
+        url, key, _with_attribution({"model": model, "messages": messages}, model), timeout
+    )
     return data["choices"][0]["message"].get("content") or ""
 
 
@@ -575,13 +616,16 @@ def _run_agentic_responses(
         data = _post_json(
             url,
             key,
-            {
-                "model": model,
-                "instructions": system_note,
-                "input": input_items,
-                "tools": tools,
-                "tool_choice": "auto",
-            },
+            _with_attribution(
+                {
+                    "model": model,
+                    "instructions": system_note,
+                    "input": input_items,
+                    "tools": tools,
+                    "tool_choice": "auto",
+                },
+                model,
+            ),
             timeout,
         )
         output = data.get("output") or []
@@ -610,7 +654,15 @@ def _run_agentic_responses(
             "content": "You have reached the tool-call budget. Stop and write your final answer now.",
         }
     )
-    data = _post_json(url, key, {"model": model, "instructions": system_note, "input": input_items}, timeout)
+    data = _post_json(
+        url,
+        key,
+        _with_attribution(
+            {"model": model, "instructions": system_note, "input": input_items},
+            model,
+        ),
+        timeout,
+    )
     return _extract_responses_text(data)
 
 

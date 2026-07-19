@@ -7,12 +7,14 @@ Put in [`.env`](./.env) (see [`.env.example`](./.env.example)):
 ```env
 LITELLM_BASE_URL=http://localhost:4000/v1
 LITELLM_VIRTUAL_KEY=sk-...
+SERVICE_NAME=ibkr-auto-trader
 # optional: LITELLM_MODEL=llm-general
 ```
 
 When `LITELLM_VIRTUAL_KEY` is set, `openai-compatible-seat` and `openai-repo-seat` default
-to that base URL and key (unless seats.json passes explicit `--base` / `--key-env`). Start the
-gateway stack first. Explicit argv in seats.json still wins over these defaults.
+to that base URL and key (unless seats.json passes explicit `--base` / `--key-env`) and attach
+`SERVICE_NAME` metadata on every request for Langfuse attribution. Start the gateway stack first.
+Explicit argv in seats.json still wins over these defaults.
 
 ---
 
