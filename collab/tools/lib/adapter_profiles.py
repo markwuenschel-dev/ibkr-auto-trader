@@ -101,6 +101,11 @@ class AdapterProfile:
     # separate from an access policy: an API-only adapter can be read-only but still cannot assess
     # source, run an allowed test, or attest the candidate it was given.
     repository_capable = False
+    # INT-037c: whether the adapter provides its OWN write-containment for a read_test seat (an ephemeral
+    # copy of the repo it operates on). When True the driver must NOT also isolate it (no double-copy);
+    # when False (e.g. the Claude CLI, a black box that writes the driver's cwd) the driver runs the
+    # read_test seat in an ephemeral copy itself. See ADR-0006 (INT-037b self-isolation, INT-037c driver).
+    self_isolates_check_root = False
     # capability flags this adapter owns, by arity, for stripping + foreign detection.
     _zero: frozenset[str] = frozenset()  # store_true flags (no argument)
     _one: frozenset[str] = frozenset()  # flags taking exactly one argument
@@ -156,6 +161,7 @@ class OpenAIRepoAdapter(AdapterProfile):
     id = OPENAI_REPO
     switchable = True
     repository_capable = True
+    self_isolates_check_root = True  # INT-037b: the --run-checks seat copies --repo-root itself
     _zero = frozenset({"--write", "--run-checks"})
 
     def __init__(self, *, run_checks_supported: bool = True) -> None:

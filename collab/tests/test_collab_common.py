@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -477,6 +478,74 @@ class TestLoadDotenv(unittest.TestCase):
                 os.environ.pop("D_KEY", None)
                 cc.load_dotenv()  # no explicit path -> honors $COLLAB_ENV_FILE
                 self.assertEqual(os.environ.get("D_KEY"), "from-override")
+
+
+class TestIsolateTree(unittest.TestCase):
+    """INT-037c: cc.isolate_tree copies the working tree so a driver-isolated read_test seat cannot
+    write the source it judges. Fork-3 invariant: with .git kept, excludes are ignored-noise only, so
+    ``git status`` in the copy shows no phantom deletions."""
+
+    def _tree(self, root: Path) -> None:
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "m.py").write_text("x = 1  # uncommitted edit\n", encoding="utf-8")
+        (root / ".venv").mkdir()
+        (root / ".venv" / "junk").write_text("noise\n", encoding="utf-8")
+
+    def test_copies_edits_excludes_cache_and_is_external(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "judged"
+            root.mkdir()
+            self._tree(root)
+            copy, cleanup = cc.isolate_tree(root, include_git=False)
+            try:
+                self.assertTrue(copy.is_dir())
+                self.assertNotEqual(copy.resolve(), root.resolve())
+                # a COPY (not a git worktree): the uncommitted edit is carried
+                self.assertEqual(
+                    (copy / "src" / "m.py").read_text(encoding="utf-8"), "x = 1  # uncommitted edit\n"
+                )
+                self.assertFalse((copy / ".venv").exists())  # ignored-noise excluded
+                self.assertNotIn(root.resolve(), copy.resolve().parents)  # created OUTSIDE the judged tree
+            finally:
+                cleanup()
+            self.assertFalse(copy.exists())  # cleaned up
+
+    def test_include_git_keeps_git_and_status_is_clean(self) -> None:
+        # The fork-3 correctness rule: excluding only gitignored noise means .git in the copy reports
+        # NO phantom deletions — the reviewer/breaker sees a truthful git status/diff.
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "repo"
+            root.mkdir()
+            self._tree(root)
+            (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+            for argv in (
+                ["init", "-q"],
+                ["add", "-A"],
+                ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "t"],
+            ):
+                subprocess.run(["git", *argv], cwd=str(root), capture_output=True)
+            copy, cleanup = cc.isolate_tree(root, include_git=True)
+            try:
+                self.assertTrue((copy / ".git").is_dir())  # review context preserved
+                st = subprocess.run(
+                    ["git", "status", "--porcelain"], cwd=str(copy), capture_output=True, text=True
+                )
+                self.assertEqual(st.stdout.strip(), "")  # no phantom deletions of the excluded .venv
+            finally:
+                cleanup()
+
+    def test_include_git_false_drops_git(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "repo"
+            root.mkdir()
+            self._tree(root)
+            (root / ".git").mkdir()
+            (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            copy, cleanup = cc.isolate_tree(root, include_git=False)
+            try:
+                self.assertFalse((copy / ".git").exists())
+            finally:
+                cleanup()
 
 
 if __name__ == "__main__":

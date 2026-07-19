@@ -519,7 +519,7 @@ def _fsize(f) -> int:
         return 0
 
 
-def _cli_runner(cmd: list, prompt: str, *, timeout: float, unset_env=None) -> str:
+def _cli_runner(cmd: list, prompt: str, *, timeout: float, unset_env=None, cwd=None) -> str:
     """Run a backend agent CLI with **process-boundary** output caps ([C38]/[C39]).
 
     Deliberately NOT ``subprocess.run(capture_output=True)`` — that buffers the child's entire stdout in
@@ -562,6 +562,7 @@ def _cli_runner(cmd: list, prompt: str, *, timeout: float, unset_env=None) -> st
                 stderr=ferr,
                 shell=False,
                 env=child_env,
+                cwd=str(cwd) if cwd is not None else None,  # INT-037c: read_test copy root
                 creationflags=creationflags,
             )
         except OSError as e:
@@ -591,6 +592,30 @@ def _cli_runner(cmd: list, prompt: str, *, timeout: float, unset_env=None) -> st
     if rc != 0:
         raise cc.CollabError(f"backend {name!r} exited {rc}: {err.decode('utf-8', 'replace').strip()[:500]}")
     return out.decode("utf-8", errors="replace")
+
+
+def _should_isolate(adapter) -> bool:
+    """INT-037c: a read_test seat needs a driver-side ephemeral copy iff its adapter is repo-capable AND
+    does not already self-isolate. The Claude CLI (repo-capable, black box that writes its own cwd) does;
+    the OpenAI --run-checks seat self-isolates (INT-037b); text-only / legacy adapters cannot touch the
+    repo at all. Gating on ``repository_capable`` also keeps fake/legacy test seats out of the copy path."""
+    return bool(getattr(adapter, "repository_capable", False)) and not bool(
+        getattr(adapter, "self_isolates_check_root", False)
+    )
+
+
+def _run_seat(runner, cmd, prompt, *, timeout, unset_env, isolate_root):
+    """Run a seat via ``runner``. When ``isolate_root`` is a path, run inside an ephemeral copy of it so a
+    read_test seat's allow-listed Bash tools cannot write the source it judges (INT-037c); else run as-is.
+    ``cwd`` is passed to ``runner`` ONLY on the isolate path, so a runner without a ``cwd`` kwarg is
+    unaffected on the normal (non-isolated) path."""
+    if isolate_root is None:
+        return runner(cmd, prompt, timeout=timeout, unset_env=unset_env)
+    copy, cleanup = cc.isolate_tree(isolate_root, include_git=True)
+    try:
+        return runner(cmd, prompt, timeout=timeout, unset_env=unset_env, cwd=copy)
+    finally:
+        cleanup()
 
 
 # --------------------------------------------------------------------------- #
@@ -788,8 +813,24 @@ def _dispatch_seat(
     prompt = _build_prompt(cfg.get("system"), transcript)
     t0 = time.monotonic()
     try:
+        # INT-037c: a read_test seat (reviewer) whose adapter does not self-isolate writes the driver's
+        # cwd via its Bash tools — run it in an ephemeral copy of cwd. A builder (write) seat is gated out
+        # by the access check and keeps operating on the real tree.
+        _iso_root = (
+            Path.cwd()
+            if getattr(cfg.get("policy"), "access", None) == adapter_profiles.READ_TEST
+            and _should_isolate(cfg.get("adapter"))
+            else None
+        )
         with _Heartbeat(collab):  # keep updated_ts fresh through a long agentic call (liveness, not deadline)
-            raw = runner(list(cfg["cmd"]), prompt, timeout=timeout_s, unset_env=cfg.get("unset_env"))
+            raw = _run_seat(
+                runner,
+                list(cfg["cmd"]),
+                prompt,
+                timeout=timeout_s,
+                unset_env=cfg.get("unset_env"),
+                isolate_root=_iso_root,
+            )
     except cc.CollabError as e:
         lat_ms = round((time.monotonic() - t0) * 1000, 1)
         print(f"[autopilot] backend for seat {seat!r} failed on {hid}: {e}", file=sys.stderr)

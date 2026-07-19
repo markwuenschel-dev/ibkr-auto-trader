@@ -995,3 +995,49 @@ def test_promote_next_draft_pulls_lowest_in_order(tmp_path):
     assert ap._promote_next_draft(collab) == "031"  # then the next
     assert (pend / "031-c.md").exists()
     assert ap._promote_next_draft(collab) is None  # draft drained
+
+
+class TestReadTestIsolation:
+    """INT-037c: a read_test seat whose adapter doesn't self-isolate runs in an ephemeral copy so its
+    Bash tools cannot write the judged source; builders and self-isolating adapters are not isolated."""
+
+    def test_should_isolate_predicate(self):
+        import adapter_profiles as adp
+
+        assert ap._should_isolate(adp.ClaudeAdapter()) is True  # repo-capable, not self-isolating
+        assert ap._should_isolate(adp.OpenAIRepoAdapter()) is False  # self-isolates (INT-037b)
+        assert ap._should_isolate(adp.LegacyCommandAdapter()) is False  # not repo-capable → test seats safe
+
+    def test_cli_runner_cwd_contains_writes(self, tmp_path):
+        copy = tmp_path / "copy"
+        copy.mkdir()
+        judged = tmp_path / "judged"
+        judged.mkdir()
+        ap._cli_runner(
+            [sys.executable, "-c", "open('evil.txt','w').write('x')"],
+            "",
+            timeout=30.0,
+            cwd=copy,
+        )
+        assert (copy / "evil.txt").exists()
+        assert not (judged / "evil.txt").exists()  # write contained to the copy — INT-037c
+
+    def test_run_seat_isolates_and_cleans_up(self, tmp_path):
+        seen = {}
+
+        def fake_runner(cmd, prompt, *, timeout, unset_env=None, cwd=None):
+            seen["cwd"] = cwd
+            seen["had_file"] = cwd is not None and (Path(cwd) / "f.txt").exists()
+            return "ok"
+
+        root = tmp_path / "r"
+        root.mkdir()
+        (root / "f.txt").write_text("x", encoding="utf-8")
+        # isolate: runner gets a copy cwd carrying the tree; copy removed afterward
+        ap._run_seat(fake_runner, ["x"], "p", timeout=1.0, unset_env=None, isolate_root=root)
+        assert seen["cwd"] is not None and seen["had_file"] is True
+        assert not Path(seen["cwd"]).exists()  # cleaned up in finally
+        # no isolate: runner called WITHOUT cwd (backward-compatible for non-isolated seats)
+        seen.clear()
+        ap._run_seat(fake_runner, ["x"], "p", timeout=1.0, unset_env=None, isolate_root=None)
+        assert seen["cwd"] is None

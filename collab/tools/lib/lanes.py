@@ -175,7 +175,11 @@ def _dispatch(runner, cmd, prompt, *, timeout, unset_env, budget):
     fails), then run the backend. `BudgetExceeded` / `CollabError` propagate to the lane handler."""
     if budget is not None:
         budget.charge(rb.VERIFICATION_CALL)
-    return runner(cmd, prompt, timeout=timeout, unset_env=unset_env)
+    # INT-037c: every lane dispatch is a read_test breaker/verifier seat. A repo-capable, non-self-isolating
+    # adapter (the Claude CLI) would write the driver's cwd via its allow-listed Bash tools — run it in an
+    # ephemeral copy of cwd instead. Self-isolating (OpenAI --run-checks) / text-only adapters run as-is.
+    isolate_root = Path.cwd() if ap._should_isolate(ap.adapter_profiles.adapter_for(list(cmd))) else None
+    return ap._run_seat(runner, cmd, prompt, timeout=timeout, unset_env=unset_env, isolate_root=isolate_root)
 
 
 # --------------------------------------------------------------------------- #
