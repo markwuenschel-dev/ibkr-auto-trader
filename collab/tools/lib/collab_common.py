@@ -38,9 +38,10 @@ import os
 import re
 import shutil
 import socket
+import tempfile
 import time
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,6 +68,55 @@ class LockBroken(CollabError):
     and someone declared us stale) or that a different owner now holds the lock.
     On release this means: we removed nothing that belongs to another owner.
     """
+
+
+# --------------------------------------------------------------------------- #
+# read_test seat isolation (INT-037c)
+# --------------------------------------------------------------------------- #
+
+#: Directories the driver-side copy MAY omit. INVARIANT (ADR-0006 / INT-037c): every entry must be
+#: gitignored / untracked cache-or-vendor noise — NEVER a tracked source path. With ``.git`` present in
+#: the copy (``include_git=True``), excluding a *tracked* path would make ``git status`` in the copy
+#: report mass deletions and poison the reviewer/breaker's context — worse than a slow copy. Keep this
+#: list to well-known ignored noise only; a git-status sanity test guards the invariant.
+_DRIVER_COPY_SKIP = frozenset(
+    {
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".hypothesis",
+        "node_modules",
+        ".tox",
+        ".next",
+    }
+)
+
+
+def isolate_tree(root, *, include_git: bool = False) -> tuple[Path, Callable[[], None]]:
+    """Copy ``root``'s working tree to a fresh temp dir; return ``(copy_root, cleanup)`` (INT-037c).
+
+    The driver runs a read_test seat whose adapter does NOT self-isolate (e.g. the Claude CLI, which
+    writes its own cwd) inside this copy, so the seat's allow-listed Bash tools cannot mutate the source
+    it is judging. It is a COPY, not a ``git worktree`` — uncommitted builder edits the seat must review
+    are carried. ``include_git`` keeps ``.git`` so the seat's ``git status``/``git diff`` review context
+    is real (Claude needs it); the excludes stay ignored-noise only (``_DRIVER_COPY_SKIP``) so ``.git``
+    never reports phantom deletions. ``cleanup()`` removes the copy unless ``COLLAB_KEEP_CHECK_ROOT=1``.
+    ``tempfile.mkdtemp`` is used so the copy is created OUTSIDE ``root``.
+    """
+    dest = Path(tempfile.mkdtemp(prefix="collab-check-root-"))
+    shutil.copytree(root, dest, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*_DRIVER_COPY_SKIP))
+    if not include_git:
+        shutil.rmtree(dest / ".git", ignore_errors=True)
+
+    def _cleanup() -> None:
+        if os.environ.get("COLLAB_KEEP_CHECK_ROOT") == "1":
+            return
+        shutil.rmtree(dest, ignore_errors=True)
+
+    return dest, _cleanup
 
 
 # --------------------------------------------------------------------------- #

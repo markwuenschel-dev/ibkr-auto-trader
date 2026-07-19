@@ -63,3 +63,23 @@ their residuals are recorded here so the next reader does not re-derive them.
 
 - **Claude `read_test` still runs allow-listed Bash on the real root** (`adapter_profiles.py` `_TEST_BASH_TOOLS`). Caller-level isolation for the Claude path is **INT-037c**, not done here.
 - **A model that writes a symlink inside the copy pointing out** could still escape a *write* (reads are already contained by `_safe_path`). This copy raises the bar against ordinary/accidental writes; perfect containment remains a container (the deferred end state).
+
+## Addendum — INT-037c implemented (2026-07-19)
+
+INT-037b contained the OpenAI `--run-checks` seat *inside its own script*. The Claude `read_test` seats
+(reviewer/breaker/verifier) had no equivalent: the CLI is a black box, and `autopilot._cli_runner`
+launched every seat with **no `cwd`**, so a Claude seat's allow-listed Bash tools (`_TEST_BASH_TOOLS`:
+pytest/ruff) ran in the driver's cwd — the real source under review. INT-037c closes that at the
+**caller**, keeping INT-037b's seat-level defense-in-depth (the *layered* model).
+
+| Fork | Decision |
+|---|---|
+| **1 — helper location** | `collab_common.isolate_tree(root, *, include_git)` for the driver; the OpenAI seat keeps its own stdlib `_isolate_check_root`. Standalone adapter vs shared driver lib is a real seam, and the differing `.git` policy makes one-shared-function uglier than small duplication. |
+| **2 — layer, not unify** | `AdapterProfile.self_isolates_check_root` (`OpenAIRepoAdapter=True`, base/`ClaudeAdapter=False`). The driver isolates a read_test seat iff its adapter is **repo-capable AND does not self-isolate** (`autopilot._should_isolate`). No double-copy; text-only/legacy adapters (and fake test seats) never isolate. |
+| **3 — include `.git`, exclude only ignored noise** | The driver copy keeps `.git` so the Claude seat's `git status`/`git diff` review context is real. **Invariant:** excludes (`_DRIVER_COPY_SKIP`) may omit only gitignored cache/vendor dirs, **never tracked source** — else `git status` in the copy reports phantom deletions and poisons review. A git-status test guards this. |
+
+**Mechanism:** `_cli_runner` gained a `cwd` param (default `None` = inherit). The isolate root is the seat's actual target — the **driver's `cwd`** (`Path.cwd()`), which is exactly what a non-`--repo-root` Claude seat writes. Two wiring points: `autopilot` reviewer dispatch (gated on `policy.access == read_test` so the **builder is never isolated**) and `lanes._dispatch` (the single breaker/verifier choke point; all read_test, so the adapter is the only gate). `_run_seat` passes `cwd` only on the isolate path, so runners without a `cwd` kwarg are unaffected.
+
+**Enforceable checks (no Claude/network):** `_cli_runner` with `cwd=copy` contains a `python -c` write to the copy (judged tree unchanged); `isolate_tree` carries uncommitted edits, excludes ignored noise, is external, and — with `.git` — leaves `git status --porcelain` empty (the fork-3 invariant); `_should_isolate` returns True only for Claude, and `_run_seat` isolates+cleans-up only when given a root.
+
+**Residuals:** a model writing a symlink *out* of the copy could still escape a write (reads stay contained by the seat's `_safe_path`); perfect containment remains a container. Keeping `.git` makes the copy heavier — hardlinking `.git/objects` is a later perf optimization, not this slice. With INT-037c, both check-seat adapters are now write-contained; the INT-037 story is complete.
