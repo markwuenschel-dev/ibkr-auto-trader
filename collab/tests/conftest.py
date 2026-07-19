@@ -17,11 +17,31 @@ path simply do not call it.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 import pytest
+
+# HARD COST KILL — collab/.env often has LITELLM_VIRTUAL_KEY=sk-… for seats.
+# Seat adapters load that file via _load_dotenv(); blank every live credential
+# here so pytest never bills the gateway / providers.
+for _cost_env in (
+    "LITELLM_VIRTUAL_KEY",
+    "LITELLM_BASE_URL",
+    "LITELLM_MODEL",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "XAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "SEAT_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+):
+    os.environ[_cost_env] = ""
+os.environ["LLG_HERMETIC"] = "1"
+os.environ["COLLAB_HERMETIC"] = "1"
 
 _KIT = Path(__file__).resolve().parent.parent
 _LIB = _KIT / "tools" / "lib"
@@ -29,6 +49,26 @@ if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 _TEXT_ADAPTER = "C:/repo/collab/tools/adapters/openai-compatible-seat.py"
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_no_live_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Re-blank credentials every test; adapters also refuse under LLG_HERMETIC."""
+    for key in (
+        "LITELLM_VIRTUAL_KEY",
+        "LITELLM_BASE_URL",
+        "LITELLM_MODEL",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "XAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "SEAT_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ):
+        monkeypatch.setenv(key, "")
+    monkeypatch.setenv("LLG_HERMETIC", "1")
+    monkeypatch.setenv("COLLAB_HERMETIC", "1")
 
 
 def v2_seats_document(*, closeout=None) -> dict:

@@ -54,8 +54,23 @@ def _load_dotenv() -> None:
         os.environ.setdefault(key, val.strip().strip('"').strip("'"))
 
 
+def _refuse_live_llm_if_hermetic() -> None:
+    """Fail closed under pytest / explicit hermetic flags — never bill providers in tests."""
+    if (
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or (os.environ.get("LLG_HERMETIC") or "").strip().lower() in {"1", "true", "yes", "on"}
+        or (os.environ.get("COLLAB_HERMETIC") or "").strip().lower() in {"1", "true", "yes", "on"}
+    ):
+        raise RuntimeError(
+            "openai-compatible-seat: refusing live LLM call under hermetic/pytest "
+            "(LLG_HERMETIC / COLLAB_HERMETIC / PYTEST_CURRENT_TEST). "
+            "Unset those only for intentional live seat runs."
+        )
+
+
 def _post_json(url: str, key: str, payload: dict, timeout: float) -> dict:
     """POST JSON with a bearer token; return the parsed response. Raises urllib.error.HTTPError on 4xx/5xx."""
+    _refuse_live_llm_if_hermetic()
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode(),
