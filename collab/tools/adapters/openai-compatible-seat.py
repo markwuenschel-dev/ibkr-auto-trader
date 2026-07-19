@@ -111,10 +111,24 @@ def main(argv=None) -> int:
         if _reconf is not None:
             _reconf(encoding="utf-8", errors="replace")
     _load_dotenv()
+    # LiteLLM gateway: when LITELLM_VIRTUAL_KEY is a real sk-… key, default seats to the proxy
+    # so collab can share one controlled endpoint without raw provider keys in seats.json.
+    _gw = (os.environ.get("LITELLM_VIRTUAL_KEY") or "").strip().startswith("sk-")
+    _default_base = (
+        os.environ.get("LITELLM_BASE_URL")
+        or os.environ.get("SEAT_API_BASE")
+        or ("http://localhost:4000/v1" if _gw else "https://api.x.ai/v1")
+    )
+    _default_model = (
+        os.environ.get("LITELLM_MODEL")
+        or os.environ.get("SEAT_API_MODEL")
+        or ("llm-general" if _gw else "grok-4")
+    )
+    _default_key_env = "LITELLM_VIRTUAL_KEY" if _gw else "SEAT_API_KEY"
     p = argparse.ArgumentParser(prog="openai-compatible-seat")
-    p.add_argument("--base", default=os.environ.get("SEAT_API_BASE", "https://api.x.ai/v1"))
-    p.add_argument("--model", default=os.environ.get("SEAT_API_MODEL", "grok-4"))
-    p.add_argument("--key-env", default="SEAT_API_KEY")
+    p.add_argument("--base", default=_default_base)
+    p.add_argument("--model", default=_default_model)
+    p.add_argument("--key-env", default=_default_key_env)
     p.add_argument(
         "--api",
         choices=("auto", "chat", "responses"),
