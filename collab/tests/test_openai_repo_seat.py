@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import shutil
 import urllib.error
 from pathlib import Path
 
@@ -130,3 +131,53 @@ class TestAutoSelectsResponses:
         )
         assert rc == 0 and cap.out == "recovered"
         assert "retrying /responses" in cap.err
+
+
+class TestCheckRootIsolation:
+    """INT-037b: a --run-checks (read_test) seat runs against an ephemeral working-tree COPY so an
+    allow-listed interpreter write cannot mutate the source it is judging (ADR-0006 enforceable check)."""
+
+    def test_isolate_copies_tree_carries_edits_excludes_vcs_and_is_external(self, tmp_path):
+        judged = tmp_path / "judged"
+        (judged / "src").mkdir(parents=True)
+        (judged / "src" / "m.py").write_text("x = 1  # uncommitted edit\n", encoding="utf-8")
+        (judged / ".git").mkdir()
+        (judged / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+        copy, cleanup = seat._isolate_check_root(judged)
+        try:
+            assert copy.is_dir() and copy.resolve() != judged.resolve()
+            # a COPY, not a git worktree: the uncommitted edit the judge must review is present
+            assert (copy / "src" / "m.py").read_text(encoding="utf-8") == "x = 1  # uncommitted edit\n"
+            assert not (copy / ".git").exists()  # VCS internals excluded (_SKIP_DIRS)
+            # created OUTSIDE the judged tree — never nested under it
+            assert judged.resolve() not in copy.resolve().parents and copy.resolve() != judged.resolve()
+        finally:
+            cleanup()
+        assert not copy.exists()  # cleaned up
+
+    def test_run_command_write_lands_in_copy_not_judged(self, tmp_path):
+        judged = tmp_path / "judged"
+        judged.mkdir()
+        (judged / "keep.py").write_text("x = 1\n", encoding="utf-8")
+
+        copy, cleanup = seat._isolate_check_root(judged)
+        try:
+            # an allow-listed interpreter the read_test seat can invoke tries to write; with cwd=copy it
+            # lands in the throwaway, and the judged source is untouched.
+            seat._tool_run_command(
+                copy, "python -c \"open('evil.txt', 'w').write('x')\"", 100_000, 30.0
+            )
+            assert (copy / "evil.txt").exists()
+            assert not (judged / "evil.txt").exists()  # judged source untouched — the INT-037b contract
+        finally:
+            cleanup()
+
+    def test_keep_env_retains_copy_for_debug(self, tmp_path, monkeypatch):
+        judged = tmp_path / "j"
+        judged.mkdir()
+        monkeypatch.setenv("COLLAB_KEEP_CHECK_ROOT", "1")
+        copy, cleanup = seat._isolate_check_root(judged)
+        cleanup()
+        assert copy.exists()  # retained under COLLAB_KEEP_CHECK_ROOT=1
+        shutil.rmtree(copy, ignore_errors=True)
