@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import urllib.error
 from pathlib import Path
 
@@ -101,3 +102,63 @@ class TestApiSelection:
         monkeypatch.setenv("SEAT_ENV_FILE", str(_ADAPTER.parent / "does-not-exist.env"))
         monkeypatch.setattr(seat.sys, "stdin", io.StringIO("x"))
         assert seat.main(["--key-env", "OPENAI_API_KEY"]) == 2
+
+
+class TestPromptCaching:
+    """Prompt-caching slice (2026-07-20 memo): stable prompt_cache_key on both single-shot payloads
+    plus per-POST usage telemetry (stderr + optional JSONL)."""
+
+    def _run(self, monkeypatch, capsys, argv, post, stdin="PROMPT"):
+        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        monkeypatch.setenv("SEAT_ENV_FILE", str(_ADAPTER.parent / "does-not-exist.env"))
+        monkeypatch.setattr(seat.sys, "stdin", io.StringIO(stdin))
+        monkeypatch.setattr(seat, "_post_json", post)
+        rc = seat.main(argv)
+        return rc, capsys.readouterr()
+
+    def test_chat_carries_cache_key_and_logs_usage(self, monkeypatch, capsys):
+        seen: dict = {}
+
+        def post(url, key, payload, timeout):
+            seen.update(payload)
+            return {
+                "choices": [{"message": {"content": "r"}}],
+                "usage": {"prompt_tokens": 1200, "prompt_tokens_details": {"cached_tokens": 1024}},
+            }
+
+        rc, cap = self._run(monkeypatch, capsys, ["--api", "chat", "--key-env", "OPENAI_API_KEY"], post)
+        assert rc == 0 and cap.out == "r"
+        assert seen["prompt_cache_key"] == seat._PROMPT_CACHE_KEY
+        assert "usage api=chat step=1 prompt_tokens=1200 cached_tokens=1024" in cap.err
+
+    def test_responses_carries_cache_key_and_writes_jsonl(self, monkeypatch, capsys, tmp_path):
+        log = tmp_path / "usage.jsonl"
+        monkeypatch.setenv("COLLAB_USAGE_LOG", str(log))
+
+        def post(url, key, payload, timeout):
+            assert payload["prompt_cache_key"] == seat._PROMPT_CACHE_KEY
+            return {
+                "output_text": "r",
+                "usage": {"input_tokens": 1100, "input_tokens_details": {"cached_tokens": 0}},
+            }
+
+        rc, cap = self._run(
+            monkeypatch, capsys, ["--api", "responses", "--key-env", "OPENAI_API_KEY"], post
+        )
+        assert rc == 0 and cap.out == "r"
+        (rec,) = [json.loads(line) for line in log.read_text("utf-8").splitlines()]
+        assert rec["adapter"] == "compatible-seat" and rec["api"] == "responses"
+        assert rec["cached_tokens"] == 0 and rec["prompt_tokens"] == 1100
+
+    def test_absent_usage_logs_na(self, monkeypatch, capsys):
+        def post(url, key, payload, timeout):
+            return {"choices": [{"message": {"content": "r"}}]}
+
+        rc, cap = self._run(monkeypatch, capsys, ["--api", "chat", "--key-env", "OPENAI_API_KEY"], post)
+        assert rc == 0
+        assert "prompt_tokens=n/a cached_tokens=n/a cache_write_tokens=n/a" in cap.err
+
+    def test_xai_sticky_header_only_on_xai_hosts(self):
+        h = seat._request_headers("https://api.x.ai/v1/chat/completions", "k")
+        assert h["x-grok-conv-id"] == seat._PROMPT_CACHE_KEY
+        assert "x-grok-conv-id" not in seat._request_headers("https://api.openai.com/v1/responses", "k")

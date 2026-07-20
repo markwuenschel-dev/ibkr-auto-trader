@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import shutil
 import urllib.error
 from pathlib import Path
@@ -131,6 +132,224 @@ class TestAutoSelectsResponses:
         )
         assert rc == 0 and cap.out == "recovered"
         assert "retrying /responses" in cap.err
+
+
+_TOOL_CALL = {"id": "c1", "function": {"name": "list_dir", "arguments": "{}"}}
+
+
+class TestPromptCaching:
+    """Prompt-caching slice (2026-07-20 memo): a stable prompt_cache_key on EVERY POST (including
+    the budget-exhausted final call), per-step usage telemetry, reasoning_content replay for xAI
+    reasoning models, and a prefix-preserving budget-final payload (tools kept, tool_choice none)."""
+
+    def test_chat_loop_key_on_every_post_and_usage_logged(self, monkeypatch, capsys, tmp_path):
+        captured: list[dict] = []
+        replies = [
+            {
+                "choices": [{"message": {"content": None, "tool_calls": [_TOOL_CALL]}}],
+                "usage": {"prompt_tokens": 2000, "prompt_tokens_details": {"cached_tokens": 0}},
+            },
+            {
+                "choices": [{"message": {"content": "done"}}],
+                "usage": {"prompt_tokens": 2600, "prompt_tokens_details": {"cached_tokens": 2048}},
+            },
+        ]
+
+        def post(url, key, payload, timeout):
+            captured.append(payload)
+            return replies[len(captured) - 1]
+
+        monkeypatch.setattr(seat, "_post_json", post)
+        out = seat._run_agentic(
+            "https://api.x.ai/v1", "grok-4.5", "k", "PROMPT", tmp_path,
+            timeout=5, max_steps=5, max_bytes=1000,
+        )
+        assert out == "done"
+        assert len(captured) == 2
+        assert {p["prompt_cache_key"] for p in captured} == {seat._PROMPT_CACHE_KEY}
+        err = capsys.readouterr().err
+        assert "usage api=chat step=1 prompt_tokens=2000 cached_tokens=0" in err
+        assert "usage api=chat step=2 prompt_tokens=2600 cached_tokens=2048" in err
+
+    def test_chat_budget_final_keeps_tools_and_key_and_absent_usage_is_na(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        captured: list[dict] = []
+
+        def post(url, key, payload, timeout):
+            captured.append(payload)
+            if len(captured) == 1:  # burn the single step on a tool call → forces the final POST
+                return {"choices": [{"message": {"content": None, "tool_calls": [_TOOL_CALL]}}]}
+            return {"choices": [{"message": {"content": "forced final"}}]}
+
+        monkeypatch.setattr(seat, "_post_json", post)
+        out = seat._run_agentic(
+            "https://api.x.ai/v1", "grok-4.5", "k", "P", tmp_path,
+            timeout=5, max_steps=1, max_bytes=1000,
+        )
+        assert out == "forced final"
+        final = captured[-1]
+        assert final["tools"] == captured[0]["tools"]  # prefix preserved: tools NOT dropped
+        assert final["tool_choice"] == "none"
+        assert all(p["prompt_cache_key"] == seat._PROMPT_CACHE_KEY for p in captured)
+        # no usage object in the fake replies → n/a, never a fabricated 0
+        assert "cached_tokens=n/a" in capsys.readouterr().err
+
+    def test_responses_loop_and_budget_final_carry_key_and_tools(self, monkeypatch, capsys, tmp_path):
+        captured: list[dict] = []
+
+        def post(url, key, payload, timeout):
+            captured.append(payload)
+            if len(captured) == 1:
+                return {
+                    "output": [
+                        {"type": "function_call", "call_id": "c1", "name": "list_dir", "arguments": "{}"}
+                    ],
+                    "usage": {"input_tokens": 1500, "input_tokens_details": {"cached_tokens": 0}},
+                }
+            return {
+                "output_text": "final",
+                "usage": {"input_tokens": 1900, "input_tokens_details": {"cached_tokens": 1408}},
+            }
+
+        monkeypatch.setattr(seat, "_post_json", post)
+        out = seat._run_agentic_responses(
+            "https://api.openai.com/v1", "gpt-5.6-luna", "k", "PROMPT", tmp_path,
+            timeout=5, max_steps=1, max_bytes=1000,
+        )
+        assert out == "final"
+        assert len(captured) == 2  # one step + the budget-exhausted final call
+        final = captured[-1]
+        assert final["tools"] == captured[0]["tools"] and final["tool_choice"] == "none"
+        assert all(p["prompt_cache_key"] == seat._PROMPT_CACHE_KEY for p in captured)
+        err = capsys.readouterr().err
+        assert "usage api=responses step=1 prompt_tokens=1500 cached_tokens=0" in err
+        assert "usage api=responses step=2 prompt_tokens=1900 cached_tokens=1408" in err
+
+    def test_reasoning_content_replayed_when_present(self, monkeypatch, tmp_path):
+        captured: list[dict] = []
+
+        def post(url, key, payload, timeout):
+            captured.append(payload)
+            if len(captured) == 1:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "reasoning_content": "thinking...",
+                                "tool_calls": [_TOOL_CALL],
+                            }
+                        }
+                    ]
+                }
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        monkeypatch.setattr(seat, "_post_json", post)
+        out = seat._run_agentic(
+            "https://api.x.ai/v1", "grok-4.5", "k", "P", tmp_path,
+            timeout=5, max_steps=3, max_bytes=1000,
+        )
+        assert out == "ok"
+        replayed = [m for m in captured[1]["messages"] if m.get("role") == "assistant"]
+        assert replayed and replayed[0]["reasoning_content"] == "thinking..."
+
+    def test_reasoning_content_absent_stays_absent(self, monkeypatch, tmp_path):
+        captured: list[dict] = []
+
+        def post(url, key, payload, timeout):
+            captured.append(payload)
+            if len(captured) == 1:
+                return {"choices": [{"message": {"content": None, "tool_calls": [_TOOL_CALL]}}]}
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        monkeypatch.setattr(seat, "_post_json", post)
+        seat._run_agentic(
+            "https://api.x.ai/v1", "grok-4.5", "k", "P", tmp_path,
+            timeout=5, max_steps=3, max_bytes=1000,
+        )
+        replayed = [m for m in captured[1]["messages"] if m.get("role") == "assistant"]
+        assert replayed and "reasoning_content" not in replayed[0]
+
+
+class TestXaiStickyHeader:
+    """Mission 2.1: xAI's per-server cache needs the x-grok-conv-id sticky-routing header on
+    *.x.ai hosts, keyed identically to prompt_cache_key. Other providers must never see it."""
+
+    def test_xai_host_gets_conv_id_header(self):
+        h = seat._request_headers("https://api.x.ai/v1/chat/completions", "k")
+        assert h["x-grok-conv-id"] == seat._PROMPT_CACHE_KEY
+        assert h["Authorization"] == "Bearer k"
+
+    def test_non_xai_hosts_do_not(self):
+        for url in (
+            "https://api.openai.com/v1/responses",
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            "http://localhost:4000/v1/chat/completions",
+            "https://fakex.ai/v1/chat/completions",  # hostname suffix lookalike, not *.x.ai
+        ):
+            assert "x-grok-conv-id" not in seat._request_headers(url, "k"), url
+
+    def test_cache_write_tokens_in_stderr_line(self, monkeypatch, capsys, tmp_path):
+        def post(url, key, payload, timeout):
+            return {
+                "choices": [{"message": {"content": "done"}}],
+                "usage": {
+                    "prompt_tokens": 3000,
+                    "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 2900},
+                },
+            }
+
+        monkeypatch.setattr(seat, "_post_json", post)
+        seat._run_agentic(
+            "https://api.openai.com/v1", "gpt-5.5", "k", "P", tmp_path,
+            timeout=5, max_steps=2, max_bytes=1000,
+        )
+        # a write-heavy miss (1.25x billed on gpt-5.6+) must be visible mid-run, not only in JSONL
+        assert "cached_tokens=0 cache_write_tokens=2900" in capsys.readouterr().err
+
+
+class TestUsageJsonl:
+    def test_jsonl_written_when_env_set(self, monkeypatch, tmp_path):
+        log = tmp_path / "usage.jsonl"
+        monkeypatch.setenv("COLLAB_USAGE_LOG", str(log))
+        captured: list[dict] = []
+        replies = [
+            {
+                "choices": [{"message": {"content": None, "tool_calls": [_TOOL_CALL]}}],
+                "usage": {"prompt_tokens": 2000, "prompt_tokens_details": {"cached_tokens": 0}},
+            },
+            {
+                "choices": [{"message": {"content": "done"}}],
+                "usage": {"prompt_tokens": 2600, "prompt_tokens_details": {"cached_tokens": 2048}},
+            },
+        ]
+
+        def post(url, key, payload, timeout):
+            captured.append(payload)
+            return replies[len(captured) - 1]
+
+        monkeypatch.setattr(seat, "_post_json", post)
+        seat._run_agentic(
+            "https://api.x.ai/v1", "grok-4.5", "k", "P", tmp_path,
+            timeout=5, max_steps=5, max_bytes=1000,
+        )
+        recs = [json.loads(line) for line in log.read_text("utf-8").splitlines()]
+        assert [r["step"] for r in recs] == [1, 2]
+        assert recs[0]["api"] == "chat" and recs[0]["adapter"] == "repo-seat"
+        assert recs[1]["cached_tokens"] == 2048 and recs[1]["prompt_tokens"] == 2600
+        assert all(r["prompt_cache_key"] == seat._PROMPT_CACHE_KEY for r in recs)
+
+    def test_default_path_is_off_under_pytest(self, monkeypatch):
+        # Hermetic guarantee: with the env unset, PYTEST_CURRENT_TEST keeps the default kit-root
+        # JSONL OFF so no test can dirty collab/logs/ by forgetting the env var.
+        monkeypatch.delenv("COLLAB_USAGE_LOG", raising=False)
+        assert seat._usage_log_path() is None
+
+    def test_disable_values(self, monkeypatch):
+        for val in ("", "off", "OFF", "0", "false", "none"):
+            monkeypatch.setenv("COLLAB_USAGE_LOG", val)
+            assert seat._usage_log_path() is None, val
 
 
 class TestCheckRootIsolation:

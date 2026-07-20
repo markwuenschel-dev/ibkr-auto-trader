@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Prompt-Caching Decision Memo — 2026-07-20</title>
+<style>
+  :root { color-scheme: dark; }
+  body { background:#12151a; color:#d7dce2; font:15px/1.55 "Segoe UI",system-ui,sans-serif; margin:0; padding:2rem 3rem 4rem; max-width:1180px; }
+  h1 { font-size:1.6rem; color:#fff; margin-bottom:.2rem; }
+  h2 { font-size:1.15rem; color:#8ecbff; border-bottom:1px solid #2a3340; padding-bottom:.3rem; margin-top:2.2rem; }
+  h3 { font-size:1rem; color:#c8d4e0; }
+  .sub { color:#8a94a3; font-size:.9rem; }
+  code, .mono { font-family:Consolas,monospace; font-size:.86em; background:#1c2230; padding:1px 5px; border-radius:3px; color:#a8d8ff; }
+  table { border-collapse:collapse; width:100%; margin:.8rem 0 1.2rem; font-size:.88rem; }
+  th { text-align:left; background:#1a2130; color:#9fb6cc; padding:7px 10px; border:1px solid #2a3340; }
+  td { padding:7px 10px; border:1px solid #232b38; vertical-align:top; }
+  tr:nth-child(even) td { background:#161b23; }
+  .settled { border-left:4px solid #3fb56b; background:#14201a; padding:.7rem 1rem; margin:.7rem 0; border-radius:0 6px 6px 0; }
+  .open    { border-left:4px dashed #e0a93e; background:#241e12; padding:.7rem 1rem; margin:.7rem 0; border-radius:0 6px 6px 0; }
+  .settled::before { content:"SETTLED"; font-weight:700; color:#3fb56b; font-size:.72rem; letter-spacing:1px; display:block; margin-bottom:.25rem;}
+  .open::before    { content:"OPEN"; font-weight:700; color:#e0a93e; font-size:.72rem; letter-spacing:1px; display:block; margin-bottom:.25rem;}
+  .defect { color:#ff8484; font-weight:600; }
+  .good   { color:#5fd08a; font-weight:600; }
+  .unk    { color:#e0a93e; font-weight:600; }
+  .tag { display:inline-block; font-size:.7rem; padding:1px 7px; border-radius:9px; font-weight:700; letter-spacing:.5px; vertical-align:2px; }
+  .tag.v  { background:#1d3a28; color:#5fd08a; }
+  .tag.l  { background:#1d2c3f; color:#7fb8ff; }
+  .tag.i  { background:#3a2f1d; color:#e0c05e; }
+  .flow { display:flex; gap:14px; flex-wrap:wrap; margin:1rem 0 1.4rem; }
+  .seat { flex:1 1 240px; border:1px solid #2e3948; border-radius:8px; background:#171d27; padding:.8rem 1rem; }
+  .seat h4 { margin:.1rem 0 .4rem; color:#fff; font-size:.95rem; }
+  .seat .prov { font-size:.78rem; color:#8a94a3; }
+  .seat .verdict { margin-top:.55rem; font-size:.85rem; }
+  .bar { height:6px; border-radius:3px; margin-top:.6rem; background:#2a3340; overflow:hidden; }
+  .bar > div { height:100%; }
+  a { color:#6db3f2; text-decoration:none; } a:hover { text-decoration:underline; }
+  .prio { font-weight:800; color:#fff; background:#31518a; border-radius:4px; padding:1px 8px; margin-right:6px; font-size:.8rem;}
+  .lede { font-size:1.02rem; background:#171d27; border:1px solid #2e3948; border-radius:8px; padding: .9rem 1.2rem; }
+  ul { margin:.4rem 0 .9rem; } li { margin:.25rem 0; }
+  .small { font-size:.82rem; color:#8a94a3; }
+</style>
+</head>
+<body>
+
+<h1>Prompt caching for all seat providers — decision memo</h1>
+<p class="sub">Mission 1 (Research swarm) deliverable · 2026-07-20 · 6 lanes: OpenAI, xAI, Gemini-compat, Claude CLI, LiteLLM, repo feasibility ·
+Epistemic tags: <span class="tag v">[verified]</span> read/traced in-repo this session &nbsp;<span class="tag l">[lane]</span> lane-reported with current-doc citation &nbsp;<span class="tag i">[inferred]</span> derived, chain shown</p>
+
+<div class="lede">
+<b>Bottom line:</b> every live remote provider already caches automatically — nothing needs to be "turned on."
+The work is (1) an <b>observability instrument</b> (capture the <code>usage</code> object all six POST sites currently discard),
+(2) a <b>routing key</b> (<code>prompt_cache_key</code> — documented as <i>required for reliable matching</i> on the gpt-5.6 builder model),
+and (3) fixing <b>two prefix-breaking defects</b> already in the adapters. Claude seats need <b>zero code</b>.
+No savings claim is made anywhere in this memo — Mission 1 verified mechanisms only; the instrument in P0 is what makes savings measurable.
+</div>
+
+<h2>1 · The live board, one screen</h2>
+<p class="small">Live seats from <code>collab\seats.json</code> <span class="tag v">[verified]</span>. Bar = cached-input discount per provider docs <span class="tag l">[lane]</span>.</p>
+<div class="flow">
+  <div class="seat">
+    <h4>builder — gpt-5.6-luna</h4>
+    <div class="prov">OpenAI · /responses agentic loop · openai-repo-seat.py</div>
+    <div class="verdict">Auto-caches ≥1024 tok. <span class="good">prompt_cache_key required for reliable matching (5.6 family)</span>. Cache writes now billed 1.25×.</div>
+    <div class="bar"><div style="width:90%;background:#3fb56b"></div></div>
+    <div class="small">cached input 90% off ($1.00 → $0.10 /1M)</div>
+  </div>
+  <div class="seat">
+    <h4>reviewer — grok-4.5</h4>
+    <div class="prov">xAI · /chat/completions agentic loop · openai-repo-seat.py</div>
+    <div class="verdict">Auto-caches. <span class="defect">Defect: replay omits reasoning_content — xAI's documented #1 cause of cache misses.</span></div>
+    <div class="bar"><div style="width:85%;background:#3fb56b"></div></div>
+    <div class="small">cached input 85% off ($2.00 → $0.30 /1M)</div>
+  </div>
+  <div class="seat">
+    <h4>verifier — gemini-3.5-flash</h4>
+    <div class="prov">Google · OpenAI-compat endpoint · openai-repo-seat.py</div>
+    <div class="verdict">Implicit caching default-on, ≥4096 tok; works via compat per field evidence. <span class="unk">Usage reporting via compat: inconsistent/undocumented.</span></div>
+    <div class="bar"><div style="width:90%;background:#3fb56b"></div></div>
+    <div class="small">cached input 90% off ($1.50 → $0.15 /1M)</div>
+  </div>
+  <div class="seat">
+    <h4>breaker — haiku-4.5</h4>
+    <div class="prov">Anthropic · <code>claude -p</code> CLI · Max subscription OAuth</div>
+    <div class="verdict"><span class="good">CLI caches automatically, no knobs.</span> Since 2026-06-15 Max <code>-p</code> use bills from a credit pool at API rates → caching does save real money. <span class="unk">Hit observability from -p: UNKNOWN.</span></div>
+    <div class="bar"><div style="width:90%;background:#3fb56b"></div></div>
+    <div class="small">cache reads 0.1× input rate</div>
+  </div>
+</div>
+
+<h2>2 · Per-provider mechanism table</h2>
+<table>
+<tr><th>Provider (live seat)</th><th>Caching</th><th>Min prefix</th><th>Cache field to send</th><th>Cached-usage field</th><th>Provider-specific gotchas</th></tr>
+<tr>
+  <td><b>OpenAI</b> gpt-5.6-luna / -terra / gpt-5.5<br><span class="small">builder; both API shapes</span></td>
+  <td>Automatic, both /chat and /responses <span class="tag l">[lane]</span></td>
+  <td>1024 tok; hits in 128-tok increments</td>
+  <td><code>prompt_cache_key</code> — accepted both APIs; <b>required for reliable matching on 5.6</b>; one stable key per seat run (~15 req/min/key cap, irrelevant here)</td>
+  <td>chat: <code>usage.prompt_tokens_details.cached_tokens</code><br>responses: <code>usage.input_tokens_details.cached_tokens</code><br>5.6+: also <code>cache_write_tokens</code> (1.25× billed)</td>
+  <td>Hash covers messages + <b>tools</b> + schema + instructions (+ reasoning effort). Top-level <code>metadata</code> is <b>excluded</b> from the hash — the per-step UUID is harmless. Reasoning items must be replayed in tool loops — <span class="good">our /responses loop already does</span> (<code>openai-repo-seat.py:655-657</code>) <span class="tag v">[verified]</span>. <code>metadata</code> on chat may be store-gated <span class="unk">UNKNOWN</span>.</td>
+</tr>
+<tr>
+  <td><b>xAI</b> grok-4.5<br><span class="small">reviewer; /chat/completions</span></td>
+  <td>Automatic; per-server cache, eviction any time <span class="tag l">[lane]</span></td>
+  <td class="unk">UNKNOWN (undocumented); TTL also UNKNOWN</td>
+  <td><code>prompt_cache_key</code> accepted (documented as identical to the <code>x-grok-conv-id</code> sticky-routing header)</td>
+  <td><code>usage.prompt_tokens_details.cached_tokens</code></td>
+  <td>Prefix = leading <b>messages array</b> incl. system + tool results. <span class="defect">Reasoning models MUST have <code>reasoning_content</code> replayed — "omitting it is the top cause of cache misses"</span>, and our chat replay sends only <code>{content, tool_calls}</code> (<code>openai-repo-seat.py:552</code>) <span class="tag v">[verified]</span>. <code>metadata</code> is not a documented chat param.</td>
+</tr>
+<tr>
+  <td><b>Google</b> gemini-3.5-flash<br><span class="small">verifier; OpenAI-compat endpoint</span></td>
+  <td>Implicit caching default-on (2.5+); observed working through compat, staff-described as "can be inconsistent" <span class="tag l">[lane]</span></td>
+  <td>4096 tok (3.5-flash)</td>
+  <td>None — prefix-keyed, not key-keyed; unknown params on the compat layer follow a silently-ignored pattern</td>
+  <td class="unk">UNKNOWN via compat — field evidence contradictory; native API reports <code>usage_metadata.cached_content_token_count</code></td>
+  <td>P0 logger must treat <code>cached_tokens</code> as optional-per-provider: log "not reported", never crash or assume 0. Explicit caching (cachedContents) is native-API-managed — out of scope.</td>
+</tr>
+<tr>
+  <td><b>Anthropic</b> haiku-4.5 (+opus/sonnet)<br><span class="small">breaker; claude -p, Max OAuth</span></td>
+  <td>Claude Code caches automatically unless disabled by env <span class="tag l">[lane]</span></td>
+  <td>n/a (CLI-owned)</td>
+  <td>None — no user-facing knob</td>
+  <td class="unk">UNKNOWN from -p output</td>
+  <td>Billing basis changed 2026-06-15: Max <code>-p</code> agentic use draws from a monthly credit pool at standard API rates <span class="tag l">[lane — primary-source check recommended before relying on it]</span>, so cache reads (0.1×) have real $ leverage. <b>No repo change either way.</b></td>
+</tr>
+<tr>
+  <td><b>LiteLLM gateway</b><br><span class="small">configured in .env, bypassed by live seats today <span class="tag v">[verified]</span></span></td>
+  <td colspan="5">Forward-compat verdict: <b>SAFE conditionally</b> — <code>prompt_cache_key</code> forwarded on /chat (UNKNOWN-leaning-yes on /responses); cached usage normalized into the OpenAI shape; <code>cache_control_injection_points</code> confirmed proxy-side config (gateway repo, not this one). Recorded hazards: <code>modify_params:true</code> mutates messages; multi-deployment routing can defeat prefix affinity; history of cached-token billing bugs. Post-switch smoke: assert <code>cached_tokens &gt; 0</code> survives the proxy. <span class="tag l">[lane]</span></td>
+</tr>
+</table>
+
+<h2>3 · Prefix-stability audit of our payloads <span class="tag v">[verified]</span></h2>
+<table>
+<tr><th>Payload element</th><th>Varies per step?</th><th>Cache impact</th></tr>
+<tr><td>System note / instructions, tools spec, tool_choice</td><td>No — module constants, chosen once per run</td><td class="good">Stable — good</td></tr>
+<tr><td>Conversation growth (chat :552-560; responses :655-665)</td><td>Append-only; earlier items never rewritten; truncation applied once at append time</td><td class="good">Prefix-stable by construction</td></tr>
+<tr><td><code>metadata.request_id</code> — fresh uuid4 <b>every POST</b> (<code>:438</code> via <code>:447-451</code>; both adapters)</td><td>Yes</td><td class="good">Harmless on OpenAI (metadata excluded from hash). Not a documented param on xAI/Gemini-compat. No change needed for caching.</td></tr>
+<tr><td class="defect">Chat-loop assistant replay omits <code>reasoning_content</code> (<code>openai-repo-seat.py:552</code>)</td><td>—</td><td class="defect">xAI-documented top cause of cache misses for reasoning models (grok-4.5 reviewer seat) → fix is P1</td></tr>
+<tr><td class="defect">Budget-exhausted final POSTs rebuild payload <b>without tools</b> (<code>:569-571</code>, <code>:672-680</code>)</td><td>Once per run, only when max-steps exhausts</td><td class="defect">OpenAI hashes tools → that one call misses. Fix (P2): keep <code>tools</code> + <code>tool_choice:"none"</code>. Also: these are POST sites #5 and #6 — the ones an implementer will miss.</td></tr>
+<tr><td>Cross-run reuse</td><td>User prompt (handoff transcript) differs per round</td><td>Cross-run hits limited to the sub-1024-token shared head → <b>within-run caching is the whole prize</b>, which is fine: 50-step loops resend the full history each step</td></tr>
+</table>
+
+<h2>4 · Observability — the finding that changes the design <span class="tag v">[verified]</span></h2>
+<div class="settled">
+Seat stderr is <b>dropped on success</b>. <code>autopilot.py:522-594</code> (<code>_cli_runner</code>, used by driver rounds and lanes alike) captures stderr to a <code>TemporaryFile</code>, kills the seat past 64&nbsp;KiB, and on exit&nbsp;0 never reads it again; on failure only 500 chars survive into telemetry. Therefore stderr usage lines are a dev/pytest aid only — <b>not</b> run telemetry.
+</div>
+<div class="open">
+<b>Fork 1 of 1 — where does durable cache telemetry live?</b><br><br>
+<b>My lean — (A) adapter-side JSONL side-channel:</b> adapters append one line per POST (<code>ts, adapter, api, model, step, prompt_tokens, cached_tokens, cache_write_tokens?</code>) to a file named by env <code>COLLAB_USAGE_LOG</code> (loaded from <code>collab/.env</code>, which the adapters already read; unset → stderr only). Adapters-only change, no driver surgery, works for manual runs too, hermetic-testable with <code>tmp_path</code>.<br><br>
+<b>Counter-argument — (B) driver persists stderr tail:</b> put the 64&nbsp;KiB tail into the round record in <code>_cli_runner</code>, making ALL seat stderr durable (useful beyond caching) and dashboard-surfaceable. Costs a driver/lanes touch (higher blast radius: every seat execution path), and 500-char failure snippets already exist there. (A) and (B) are not exclusive; (B) can be its own later handoff.
+</div>
+
+<h2>5 · Mission-2 implementation contract (ranked)</h2>
+<p class="small">Scope: <code>collab\tools\adapters\openai-repo-seat.py</code>, <code>collab\tools\adapters\openai-compatible-seat.py</code>, their two test files, <code>collab\.env.example</code>. All <b>six</b> POST sites: repo-seat chat :537-545 &amp; :569-571, responses :634-643 &amp; :672-679; compat :113 &amp; :123.</p>
+<table>
+<tr><th></th><th>Change</th><th>Detail</th></tr>
+<tr><td><span class="prio">P0</span></td><td><b>Usage instrument</b> (all 6 sites)</td><td>Capture <code>data.get("usage") or {}</code> at each call site (NOT inside <code>_post_json</code> — tests monkeypatch that symbol wholesale); tolerate chat vs responses shapes and absent fields (Gemini-compat); short fixed-format ASCII stderr line per step (64&nbsp;KiB cap: ~50 short lines ≪ cap) + JSONL side-channel per Fork resolution. Step ordinals must carry which loop/API emitted them (the auto chat→responses fallback restarts step numbering).</td></tr>
+<tr><td><span class="prio">P0</span></td><td><b><code>prompt_cache_key</code></b> (all 6 sites)</td><td>One <code>uuid4</code> minted per process at startup, e.g. <code>seat-{uuid}</code>; sent on OpenAI (required-for-reliable-matching on 5.6) and xAI (sticky routing); silently ignored by Gemini-compat per its documented pattern for unknown params. Add to the payload dict literals — <code>_with_attribution</code> aliases its input when metadata is off, so never mutate its return.</td></tr>
+<tr><td><span class="prio">P1</span></td><td><b>Replay <code>reasoning_content</code></b> in the chat loop</td><td>At <code>openai-repo-seat.py:552</code>, carry <code>reasoning_content</code> through when present on the assistant message (xAI requirement; unknown-key risk on strict providers → include only when the response contained it).</td></tr>
+<tr><td><span class="prio">P2</span></td><td><b>Prefix-preserving final POST</b></td><td>Budget-exhausted calls keep <code>tools</code> + <code>tool_choice:"none"</code> so the last call still prefix-matches (sites :569-571, :672-679).</td></tr>
+<tr><td><span class="prio">P3</span></td><td><b>Optional / separate handoffs</b></td><td>(B) driver persists stderr tail into round records; primary-source re-verification of the Max credit-pool billing claim; post-gateway-switch smoke (<code>cached_tokens &gt; 0</code> through LiteLLM). Claude seats: <b>no change</b>.</td></tr>
+</table>
+
+<h3>Tests (hermetic — existing pattern: monkeypatch <code>_post_json</code>, <code>SEAT_ENV_FILE</code> → nonexistent)</h3>
+<ul>
+<li>Fake <code>post</code> records every <code>(url, payload)</code>; multi-step script (tool-call response, then final). Assert <code>prompt_cache_key</code> present and <b>identical</b> in every captured payload, including a <code>max_steps=1</code> exhaustion case covering the two budget-final sites.</li>
+<li>Fake usage objects in both API shapes (+ one with usage absent) → assert one stderr line per POST with the right step ordinal and cached-token count; absent-usage case logs "not reported" and exits 0.</li>
+<li>Chat replay test: response carrying <code>reasoning_content</code> → next request's assistant message includes it; response without → key absent.</li>
+<li>JSONL side-channel (if Fork = A): <code>COLLAB_USAGE_LOG=tmp_path</code> → valid JSONL, one record per POST; unset → file untouched.</li>
+</ul>
+
+<h3>Verification (free, seconds)</h3>
+<p class="mono">uv run --locked python scripts/verify.py --python-only --fail-fast<br>
+uv run --locked python -m pytest collab/tests/test_openai_repo_seat.py collab/tests/test_openai_adapter.py -q</p>
+<p class="small"><b>DoD honesty line:</b> Mission 2 done = tests green + payloads verified hermetically. <b>Savings remain unverified until one live run shows <code>cached_tokens &gt; 0</code></b> — live probe (user-authorized spend, one seat round): run any repo-seat manually with a prompt &gt;1024 tokens and read the new usage lines/JSONL.</p>
+
+<h3>Failure codes</h3>
+<p class="small">FAIL-FAKE-GREEN (savings claimed without the counter) · FAIL-STALE-DOCS (mechanism claim without current citation) · FAIL-SCOPE-CREEP (gateway/driver edits under an adapters-only approval) · FAIL-UNVERIFIED-RUNTIME (asserting a hit rate never observed) · FAIL-PREFIX-REGRESSION (new field varies per step — must be constant per run).</p>
+
+<h2>6 · Unknowns (explicit)</h2>
+<ul>
+<li>xAI: min prefix size, TTL, unknown-param policy (400 vs ignore) — undocumented.</li>
+<li>Gemini-compat: cached-token reporting presence/shape; whether tools/system count toward its prefix.</li>
+<li>OpenAI: <code>metadata</code> store-gating on chat; whether replayed reasoning items count inside <code>cached_tokens</code>; <code>safety_identifier</code> role in routing hash.</li>
+<li>Claude -p: cache-hit observability; Max credit-pool billing rests partly on a news citation — verify at platform.claude.com before treating as fact.</li>
+<li>LiteLLM /responses <code>prompt_cache_key</code> forwarding.</li>
+</ul>
+
+<h2>7 · Sources (lane citations)</h2>
+<p class="small">
+OpenAI: developers.openai.com prompt-caching guide · cookbook "prompt_caching_201" · cookbook "reasoning_items" · api pricing · "your data" guide.<br>
+xAI: docs.x.ai prompt-caching (overview / how-it-works / best-practices / multi-turn / usage-and-pricing / maximizing-cache-hits) · REST reference (chat) · pricing.<br>
+Google: ai.google.dev caching · generate-content/caching · openai compatibility · pricing · discuss.ai.google.dev threads 82872, 98760.<br>
+Anthropic: code.claude.com prompt-caching · platform.claude.com pricing · (news: techtimes 2026-06-02 — secondary, re-verify).<br>
+LiteLLM: docs.litellm.ai prompt_caching / response_api / custom_pricing / tutorials/prompt_caching · github issues 18219, 19681, 17990, 19923, 19755.
+</p>
+
+<h2>8 · Live validation addendum (2026-07-20, post-implementation)</h2>
+<div class="settled">
+Mission 2 + 2.1 shipped (Fork A′) and <b>live-probed by the user</b> — records in <code>collab/logs/seat-usage.jsonl</code>:
+builder gpt-5.6-luna /responses step 2 read <b>cached_tokens=7190</b> of the 7,262-token step-1 prefix (→ no explicit 5.6 breakpoints needed);
+reviewer grok-4.5 chat steps 2–3 hit <b>7808/8324</b> and <b>8320/13658</b> with <code>reasoning_content</code> replay + the <code>x-grok-conv-id</code> header. xAI reports no cache-write field (null).
+Empirical note (one run, hypothesis): the budget-final <code>tool_choice</code> flip auto→none dropped xAI to cached=128 while OpenAI still hit — xAI's cache key may cover <code>tool_choice</code>; not worth chasing (fires only on max-steps exhaustion).
+</div>
+
+<p class="sub">Swarm report: 6 lanes launched, 6 completed, 0 conflicts unresolved. Read-only mission — no repo files changed except this memo. Next recommended command: approve Mission 2 (state Fork choice A/B), then implementation proceeds as one handoff-sized slice. <b>Superseded by §8: Missions 2 and 2.1 are implemented and live-validated.</b></p>
+
+</body>
+</html>
