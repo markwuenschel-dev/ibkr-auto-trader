@@ -25,10 +25,11 @@ sys.path.insert(0, str(_LIB))
 
 import autopilot as ap  # noqa: E402
 import collab_common as cc  # noqa: E402
-import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
 import dashboard_core as dc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import run_history as rh  # noqa: E402
+
+import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
 
 _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "events_sample.jsonl"
 
