@@ -18,7 +18,6 @@ _LIB = Path(__file__).resolve().parent.parent / "tools" / "lib"
 sys.path.insert(0, str(_LIB))
 
 import autopilot as ap  # noqa: E402
-import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
 import escalation  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
@@ -27,6 +26,8 @@ import run_budget as rb  # noqa: E402
 # The gate fixture lives with the driver tests: one definition of "a source tree with a real
 # authoritative gate", so both suites exercise the same discovered-and-canonical path.
 from test_autopilot import _gate_repo  # noqa: E402
+
+import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
 
 _BLOCKER = {
     "id": "b1",

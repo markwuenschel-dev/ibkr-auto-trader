@@ -34,8 +34,11 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Directories that are never worth serving to a code reviewer — noise, vendored, or VCS internals.
@@ -405,12 +408,24 @@ def _refuse_live_llm_if_hermetic() -> None:
         )
 
 
+def _request_headers(url: str, key: str) -> dict:
+    """Auth + content-type, plus xAI's sticky-routing header on *.x.ai hosts only: per xAI's
+    caching best practices, ``x-grok-conv-id`` routes same-conversation requests to the same
+    server (their cache is per-server). Keyed with the same per-process value as
+    ``prompt_cache_key``; other providers never see the header."""
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if host == "x.ai" or host.endswith(".x.ai"):
+        headers["x-grok-conv-id"] = _PROMPT_CACHE_KEY
+    return headers
+
+
 def _post_json(url: str, key: str, payload: dict, timeout: float) -> dict:
     _refuse_live_llm_if_hermetic()
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode(),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        headers=_request_headers(url, key),
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
@@ -418,8 +433,6 @@ def _post_json(url: str, key: str, payload: dict, timeout: float) -> dict:
 
 def _attribution_metadata(model: str, *, feature: str = "repo-seat") -> dict | None:
     """Origin fields for LiteLLM → Langfuse when SERVICE_NAME is set or gateway is used."""
-    import uuid
-
     service = (os.environ.get("SERVICE_NAME") or os.environ.get("LLG_SERVICE") or "").strip()
     if not service and (os.environ.get("LITELLM_VIRTUAL_KEY") or "").strip().startswith("sk-"):
         service = "ibkr-auto-trader"
@@ -449,6 +462,70 @@ def _with_attribution(payload: dict, model: str, *, feature: str = "repo-seat") 
     if meta:
         payload = {**payload, "metadata": meta}
     return payload
+
+
+# One stable cache key per seat process: every POST of one run shares it so the provider routes all
+# steps to the same cache (OpenAI: documented as required for reliable matching on gpt-5.6+; xAI:
+# same semantics as the x-grok-conv-id sticky-routing header; Gemini's OpenAI-compat layer ignores
+# unknown params). Must NEVER vary within a run — a per-step value would defeat prefix caching.
+_PROMPT_CACHE_KEY = "seat-" + uuid.uuid4().hex
+
+
+def _usage_log_path() -> Path | None:
+    """Where per-POST usage telemetry JSONL goes. ``COLLAB_USAGE_LOG`` wins (empty/off/0/false/none
+    disables); unset defaults to ``<kit-root>/logs/seat-usage.jsonl`` (gitignored) — except under
+    pytest, where the default stays OFF so hermetic tests never write into the repo tree unless
+    they point ``COLLAB_USAGE_LOG`` at a tmp_path."""
+    raw = os.environ.get("COLLAB_USAGE_LOG")
+    if raw is not None:
+        val = raw.strip()
+        if val.lower() in {"", "off", "0", "false", "none"}:
+            return None
+        return Path(val)
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return None
+    return Path(__file__).resolve().parents[2] / "logs" / "seat-usage.jsonl"
+
+
+def _log_usage(api: str, model: str, step: int, data: dict, *, adapter: str = "repo-seat") -> None:
+    """Per-POST cache telemetry: one short stderr line + one JSONL record. Never raises.
+
+    ``cached_tokens`` is optional-per-provider (Gemini's OpenAI-compat layer may omit the details
+    object entirely) — absence is logged as ``n/a``, never coerced to 0.
+    """
+    usage = data.get("usage") if isinstance(data, dict) else None
+    usage = usage if isinstance(usage, dict) else {}
+    details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+    cached = details.get("cached_tokens")
+    written = details.get("cache_write_tokens")
+    sys.stderr.write(
+        f"usage api={api} step={step} "
+        f"prompt_tokens={'n/a' if prompt_tokens is None else prompt_tokens} "
+        f"cached_tokens={'n/a' if cached is None else cached} "
+        f"cache_write_tokens={'n/a' if written is None else written}\n"
+    )
+    path = _usage_log_path()
+    if path is None:
+        return
+    rec = {
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+        "adapter": adapter,
+        "api": api,
+        "model": model,
+        "step": step,
+        "prompt_cache_key": _PROMPT_CACHE_KEY,
+        "prompt_tokens": prompt_tokens,
+        "cached_tokens": cached,
+        "cache_write_tokens": written,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, sort_keys=True) + "\n")
+    except OSError as e:
+        sys.stderr.write(f"usage log write failed: {e}\n")
 
 
 def _is_gpt54_plus(model: str) -> bool:
@@ -533,23 +610,30 @@ def _run_agentic(
         {"role": "user", "content": prompt},
     ]
     url = f"{base}/chat/completions"
-    for _ in range(max_steps):
+    for step in range(1, max_steps + 1):
         payload = _with_attribution(
             {
                 "model": model,
                 "messages": messages,
                 "tools": tools_spec,
                 "tool_choice": "auto",
+                "prompt_cache_key": _PROMPT_CACHE_KEY,
             },
             model,
         )
         data = _post_json(url, key, payload, timeout)
+        _log_usage("chat", model, step, data)
         msg = data["choices"][0]["message"]
         calls = msg.get("tool_calls") or []
         if not calls:
             return msg.get("content") or ""
         # Echo the assistant turn (with its tool_calls) then answer each call with real file bytes.
-        messages.append({"role": "assistant", "content": msg.get("content"), "tool_calls": calls})
+        assistant_turn: dict = {"role": "assistant", "content": msg.get("content"), "tool_calls": calls}
+        if msg.get("reasoning_content") is not None:
+            # xAI reasoning models (grok-4.5) REQUIRE reasoning_content replayed with its turn —
+            # omitting it is their documented top cause of prompt-cache misses.
+            assistant_turn["reasoning_content"] = msg["reasoning_content"]
+        messages.append(assistant_turn)
         for call in calls:
             fn = call.get("function", {})
             try:
@@ -567,8 +651,24 @@ def _run_agentic(
         }
     )
     data = _post_json(
-        url, key, _with_attribution({"model": model, "messages": messages}, model), timeout
+        url,
+        key,
+        _with_attribution(
+            {
+                "model": model,
+                "messages": messages,
+                # Keep tools in the payload (tool_choice "none" forbids calling them) so this last
+                # request still prefix-matches the loop's cached steps — dropping tools changes the
+                # provider's cache hash (OpenAI hashes the tools list).
+                "tools": tools_spec,
+                "tool_choice": "none",
+                "prompt_cache_key": _PROMPT_CACHE_KEY,
+            },
+            model,
+        ),
+        timeout,
     )
+    _log_usage("chat", model, max_steps + 1, data)
     return data["choices"][0]["message"].get("content") or ""
 
 
@@ -627,7 +727,7 @@ def _run_agentic_responses(
     tools = _to_responses_tools(tools_spec if tools_spec is not None else _TOOLS_SPEC)
     url = f"{base}/responses"
     input_items = [{"role": "user", "content": prompt}]
-    for _ in range(max_steps):
+    for step in range(1, max_steps + 1):
         data = _post_json(
             url,
             key,
@@ -638,11 +738,13 @@ def _run_agentic_responses(
                     "input": input_items,
                     "tools": tools,
                     "tool_choice": "auto",
+                    "prompt_cache_key": _PROMPT_CACHE_KEY,
                 },
                 model,
             ),
             timeout,
         )
+        _log_usage("responses", model, step, data)
         output = data.get("output") or []
         calls = [it for it in output if isinstance(it, dict) and it.get("type") == "function_call"]
         if not calls:
@@ -673,11 +775,21 @@ def _run_agentic_responses(
         url,
         key,
         _with_attribution(
-            {"model": model, "instructions": system_note, "input": input_items},
+            {
+                "model": model,
+                "instructions": system_note,
+                "input": input_items,
+                # Keep tools (tool_choice "none") so this last request still prefix-matches the
+                # loop's cached steps — see the chat-loop budget-final note.
+                "tools": tools,
+                "tool_choice": "none",
+                "prompt_cache_key": _PROMPT_CACHE_KEY,
+            },
             model,
         ),
         timeout,
     )
+    _log_usage("responses", model, max_steps + 1, data)
     return _extract_responses_text(data)
 
 

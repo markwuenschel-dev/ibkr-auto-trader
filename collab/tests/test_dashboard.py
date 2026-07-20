@@ -20,11 +20,12 @@ sys.path.insert(0, str(_LIB))
 
 import autopilot as ap  # noqa: E402
 import collab_common as cc  # noqa: E402
-import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
 import dashboard_core as dc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
 import transitions as tr  # noqa: E402
+
+import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
 
 
 def _cli(seat_names):
