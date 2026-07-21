@@ -12,13 +12,17 @@ surface must render it as text ([C38])."""
 
 from __future__ import annotations
 
+import json
+import re
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 import collab_common as cc  # noqa: E402
+import operational_state as ops  # noqa: E402
 
 _START = "<!-- escalation:{hid} -->"
 _END = "<!-- /escalation:{hid} -->"
@@ -52,6 +56,21 @@ def render(
     """
     n = len(blockers or [])
     L = [_START.format(hid=hid)]
+    L.append(
+        "<!-- escalation-meta:"
+        + json.dumps(
+            {
+                "schema_version": "1.0",
+                "reason": reason or "escalated",
+                "severity": "warning",
+                "run_uid": run_uid,
+                "attempts": attempts,
+                "required_action": "retry_or_adopt",
+            },
+            separators=(",", ":"),
+        )
+        + " -->"
+    )
     if n:
         head = f"# ⚠ Verified defect — needs a terminal fix: {hid}"
     elif reason == "infrastructure_blocked":
@@ -133,13 +152,62 @@ def write(
         p,
         render(hid, blockers, attempts=attempts, title=title, run_uid=run_uid, reason=reason, cause=cause),
     )
+    timestamp = (
+        datetime.fromtimestamp(p.stat().st_mtime, UTC)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+    ops.record_transition(
+        collab,
+        hid,
+        ops.OperationalState.ESCALATED,
+        reason=reason or "escalated",
+        source="escalation_store",
+        actor="autopilot",
+        run_id=run_uid,
+        event_ts=timestamp,
+        conditions=("parked",),
+        escalation_severity="warning",
+        escalation_reason=reason or "escalated",
+        escalation_ts=timestamp,
+        required_action="retry_or_adopt",
+    )
     return p
 
 
 def read(collab, hid: str) -> dict | None:
-    """``{"hid", "markdown"}`` for an open escalation, or ``None`` if there is none."""
+    """Structured metadata + markdown for an open escalation, else ``None``."""
     try:
-        return {"hid": hid, "markdown": _path(collab, hid).read_text("utf-8")}
+        path = _path(collab, hid)
+        markdown = path.read_text("utf-8")
+        meta: dict = {}
+        meta_match = re.search(r"<!-- escalation-meta:(\{[^\n]*\}) -->", markdown)
+        metadata_status = "legacy"
+        if meta_match:
+            try:
+                parsed = json.loads(meta_match.group(1))
+                if isinstance(parsed, dict) and parsed.get("schema_version") == "1.0":
+                    meta = parsed
+                    metadata_status = "healthy"
+                else:
+                    metadata_status = "malformed"
+            except ValueError:
+                metadata_status = "malformed"
+        reason_match = re.search(r"\[([a-z][a-z0-9_]+)\]", markdown)
+        run_match = re.search(r"_Run:\s*([^._\s]+)", markdown)
+        timestamp = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
+        return {
+            "hid": hid,
+            "markdown": markdown,
+            "reason": meta.get("reason") or (reason_match.group(1) if reason_match else "escalated"),
+            "severity": meta.get("severity") or "warning",
+            "timestamp": timestamp,
+            "run_uid": meta.get("run_uid") or (run_match.group(1) if run_match else None),
+            "required_action": meta.get("required_action") or "retry_or_adopt",
+            "metadata_status": metadata_status,
+        }
     except OSError:
         return None
 
@@ -156,6 +224,15 @@ def clear(collab, hid: str) -> bool:
     """Remove the escalation once the defect is fixed. Returns True if a file was removed."""
     try:
         _path(collab, hid).unlink()
+        ops.record_transition(
+            collab,
+            hid,
+            ops.OperationalState.RETRYING,
+            reason="escalation_cleared",
+            source="escalation_store",
+            actor="operator",
+            required_action="start_driver",
+        )
         return True
     except OSError:
         return False

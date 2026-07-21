@@ -18,11 +18,17 @@ Security posture (this is a single-operator LOCAL tool, not a multi-user server)
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import re
 import secrets
 import sys
+import threading
+import time
 import urllib.parse
+import uuid
+from collections import deque
 from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,6 +46,95 @@ import dashboard_core as dc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 
 _DEFAULT_PORT = 8787
+
+
+def _material_snapshot(snapshot: dict) -> dict:
+    """Remove render-clock fields so the stream advances only for source changes."""
+    material = copy.deepcopy(snapshot)
+    material.pop("ts", None)
+    material.pop("freshness", None)
+    material.pop("stream", None)
+    for record in (material.get("health") or {}).values():
+        if isinstance(record, dict):
+            record.pop("updated_ts", None)
+    for item in material.get("items") or []:
+        if isinstance(item, dict):
+            item.pop("freshness", None)
+    for rows in (material.get("board") or {}).values():
+        for item in rows if isinstance(rows, list) else []:
+            if isinstance(item, dict):
+                item.pop("freshness", None)
+    for item in material.get("open") or []:
+        if isinstance(item, dict):
+            item.pop("freshness", None)
+    return material
+
+
+class _SnapshotBroker:
+    """Bounded, resumable stream of authoritative full snapshots."""
+
+    def __init__(self, snapshot_fn, *, instance_id: str | None = None, capacity: int = 512):
+        self._snapshot_fn = snapshot_fn
+        self.instance_id = instance_id or uuid.uuid4().hex
+        self._events: deque[dict] = deque(maxlen=capacity)
+        self._sequence = 0
+        self._digest: str | None = None
+        self._lock = threading.Lock()
+
+    def refresh(self) -> dict:
+        snapshot = self._snapshot_fn()
+        encoded = json.dumps(_material_snapshot(snapshot), sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        with self._lock:
+            if digest == self._digest and self._events:
+                return self._events[-1]
+            self._digest = digest
+            self._sequence += 1
+            generated_ts = snapshot.get("ts") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            snapshot["stream"] = {
+                "status": "connected",
+                "instance_id": self.instance_id,
+                "sequence": self._sequence,
+                "generated_ts": generated_ts,
+            }
+            snapshot.setdefault("health", {})["stream"] = {
+                "status": "healthy",
+                "updated_ts": generated_ts,
+                "reason": None,
+            }
+            event = {
+                "id": f"{self.instance_id}:{self._sequence}",
+                "instance_id": self.instance_id,
+                "sequence": self._sequence,
+                "type": "snapshot",
+                "data": snapshot,
+            }
+            self._events.append(event)
+            return event
+
+    def events_after(self, cursor: str | None) -> list[dict]:
+        with self._lock:
+            if not self._events:
+                return []
+            current = self._events[-1]
+            if not cursor:
+                return [current]
+            try:
+                instance, raw_sequence = cursor.rsplit(":", 1)
+                sequence = int(raw_sequence)
+            except (ValueError, AttributeError):
+                sequence = -1
+                instance = ""
+            oldest = self._events[0]["sequence"]
+            if instance != self.instance_id or sequence > current["sequence"] or sequence < oldest - 1:
+                reconciled = dict(current)
+                reconciled["type"] = "reconcile"
+                return [reconciled]
+            return [event for event in self._events if event["sequence"] > sequence]
+
+
+class _DashboardServer(ThreadingHTTPServer):
+    daemon_threads = True
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -65,6 +160,48 @@ class _Handler(BaseHTTPRequestHandler):
     def _json(self, code: int, obj) -> None:
         self._send(code, json.dumps(obj).encode("utf-8"), "application/json")
 
+    def _broker(self) -> _SnapshotBroker:
+        broker = getattr(self.server, "broker", None)
+        if broker is None:
+            collab = self.server.collab  # type: ignore[attr-defined]
+            home = self.server.home  # type: ignore[attr-defined]
+            broker = _SnapshotBroker(lambda: dc.snapshot(collab, home))
+            self.server.broker = broker  # type: ignore[attr-defined]
+        return broker
+
+    def _stream(self, cursor: str | None) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        try:
+            self.wfile.write(b"retry: 1000\n\n")
+            self.wfile.flush()
+            keepalive_at = time.monotonic()
+            while True:
+                broker = self._broker()
+                broker.refresh()
+                events = broker.events_after(cursor)
+                for event in events:
+                    payload = json.dumps(event["data"], separators=(",", ":"))
+                    frame = (
+                        f"id: {event['id']}\n"
+                        f"event: {event['type']}\n"
+                        f"data: {payload}\n\n"
+                    ).encode()
+                    self.wfile.write(frame)
+                    self.wfile.flush()
+                    cursor = event["id"]
+                    keepalive_at = time.monotonic()
+                if not events and time.monotonic() - keepalive_at >= 10.0:
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    keepalive_at = time.monotonic()
+                time.sleep(0.5)
+        except (BrokenPipeError, ConnectionError, OSError):
+            self.close_connection = True
+
     # --- routes ------------------------------------------------------------ #
     def do_GET(self):
         if not self._host_ok():
@@ -76,6 +213,25 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, page.encode("utf-8"), "text/html; charset=utf-8")
         if parts.path == "/api/state":
             return self._json(200, dc.snapshot(collab, self.server.home))  # type: ignore[attr-defined]
+        if parts.path == "/api/stream":
+            query_cursor = (urllib.parse.parse_qs(parts.query).get("cursor") or [None])[0]
+            cursor = self.headers.get("Last-Event-ID") or query_cursor
+            return self._stream(cursor)
+        if parts.path == "/api/operational":
+            query = urllib.parse.parse_qs(parts.query)
+            hid = (query.get("hid") or [""])[0].strip()
+            if not _HID_RE.fullmatch(hid):
+                return self._json(400, {"error": "bad hid"})
+            try:
+                cursor_raw = (query.get("cursor") or [None])[0]
+                limit_raw = (query.get("limit") or ["100"])[0]
+                cursor = int(cursor_raw) if cursor_raw not in (None, "") else None
+                limit = int(limit_raw)
+                return self._json(200, dc.operational_detail(collab, hid, cursor=cursor, limit=limit))
+            except ValueError as e:
+                return self._json(400, {"error": str(e)})
+            except hc.HandoffNotFound as e:
+                return self._json(404, {"error": str(e)})
         if parts.path == "/api/handoff":
             # read-only + host-checked (no token, like /api/state). hid is validated and resolved via
             # the state machine — never joined into a path.
@@ -220,10 +376,11 @@ class _Handler(BaseHTTPRequestHandler):
 
 def serve(collab, home=None, port: int = _DEFAULT_PORT) -> int:
     """Start the local dashboard server (blocking). Ctrl-C to stop."""
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+    httpd = _DashboardServer(("127.0.0.1", port), _Handler)
     httpd.collab = str(collab)  # type: ignore[attr-defined]
     httpd.home = home  # type: ignore[attr-defined]
     httpd.token = secrets.token_urlsafe(16)  # type: ignore[attr-defined]
+    httpd.broker = _SnapshotBroker(lambda: dc.snapshot(httpd.collab, httpd.home))  # type: ignore[attr-defined]
     url = f"http://127.0.0.1:{port}/"
     print(f"[dashboard] serving {Path(str(collab)).name} at {url}", flush=True)
     print(f"[dashboard] control token: {httpd.token}  (embedded in the page; POSTs require it)", flush=True)
@@ -515,6 +672,12 @@ _PAGE = r"""<!doctype html>
   .toast{ background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--accent);
     border-radius:8px; padding:9px 13px; font-size:12.5px; max-width:340px; box-shadow:var(--shadow); }
   .toast.ok{ border-left-color:var(--ok); } .toast.err{ border-left-color:var(--crit); }
+  .opcounts,.healthgrid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:7px; }
+  .opchip,.healthitem{ border:1px solid var(--border); border-radius:8px; padding:7px 9px; background:rgba(128,128,128,.04); }
+  .opchip button{ width:100%; text-align:left; background:none; border:0; color:inherit; padding:0; }
+  .healthitem b,.opchip b{ display:block; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  .healthitem span,.opchip span{ display:block; margin-top:3px; font-size:11px; color:var(--muted); }
+  .opmeta{ display:block; margin-top:5px; font-size:10.5px; color:var(--muted); line-height:1.35; }
   @media (prefers-reduced-motion:reduce){ *{ animation:none!important; transition:none!important; } }
 </style></head>
 <body>
@@ -557,6 +720,12 @@ _PAGE = r"""<!doctype html>
   <div id="empty" style="display:none">Driver not running — start autopilot to see live activity.</div>
 
   <div class="grid">
+    <section class="card full" id="operationsCard"><h2>Operational state
+      <span class="r" id="transportState">RECONNECTING</span></h2>
+      <div class="opcounts" id="opcounts"></div>
+      <h2 style="margin-top:14px">Health <span class="r">separate evidence dimensions</span></h2>
+      <div class="healthgrid" id="healthgrid"></div></section>
+
     <section class="card full" id="narrCard" style="display:none"><h2>What happened
       <span class="r"><span id="narrMeta"></span>
       <button class="iconbtn ghost" id="narrToggle" aria-label="Collapse" aria-expanded="true"
@@ -609,6 +778,9 @@ _PAGE = r"""<!doctype html>
 <script>
 const TOKEN="__TOKEN__";
 let last=null, connected=true;
+let stream=null, streamState="RECONNECTING", streamInstance=null, streamSequence=0, streamCursor="";
+let reconnectAttempt=0, reconcileBusy=false;
+const RECONNECT_DELAYS=[1000,2000,4000,8000,16000,30000];
 let narrHid=null, narrData=null;   // the handoff the "What happened" card is showing + its fetched narrative
 let narrSigLast=null;              // last work-signature we fetched for -> refetch when the story actually moves
 const $=id=>document.getElementById(id);
@@ -722,13 +894,25 @@ async function openHandoff(hid){
   viewerOpener=document.activeElement;
   $("v-title").textContent="handoff "+hid; $("v-fm").textContent=""; $("v-reply").style.display="none";
   $("v-body").textContent="loading…"; $("viewer").style.display="flex"; $("viewer").querySelector("button").focus();
-  try{ const r=await fetch("/api/handoff?hid="+encodeURIComponent(hid)); const j=await r.json();
-    if(!r.ok){ $("v-body").textContent=j.error||("error "+r.status); return; }
-    $("v-title").textContent="handoff "+j.id+" · "+esc(j.state); $("v-reply").style.display=j.is_reply?"inline-block":"none";
+  try{ const [handoffResponse,operationalResponse]=await Promise.all([
+      fetch("/api/handoff?hid="+encodeURIComponent(hid)),
+      fetch("/api/operational?hid="+encodeURIComponent(hid)+"&limit=100")]);
+    const j=await handoffResponse.json(), op=await operationalResponse.json();
+    if(!handoffResponse.ok){ $("v-body").textContent=j.error||("error "+handoffResponse.status); return; }
+    const item=op.item||{};
+    $("v-title").textContent="handoff "+j.id+" · "+esc(item.operational_state||j.state); $("v-reply").style.display=j.is_reply?"inline-block":"none";
     const fm=j.frontmatter||{}, fmbox=$("v-fm"); fmbox.textContent="";
     ["from","to","title","priority","date","status"].forEach(k=>{ if(fm[k]!=null){ const s=el("span");
       s.appendChild(el("b",null,k+": ")); s.appendChild(document.createTextNode(esc(fm[k]))); fmbox.appendChild(s); }});
-    $("v-body").textContent = j.body_text&&j.body_text.trim()? j.body_text : "(no body)";
+    ["operational_state","state_reason","state_source","state_ts","owner","actor","required_action","run_id","correlation_id","trace_id"].forEach(k=>{
+      if(item[k]!=null){ const s=el("span"); s.appendChild(el("b",null,k+": ")); s.appendChild(document.createTextNode(esc(item[k]))); fmbox.appendChild(s); }});
+    const escalation=item.escalation||{}, history=(op.history||{}).events||[];
+    let detail="";
+    if(escalation.reason) detail+="ESCALATION\nseverity: "+esc(escalation.severity)+"\nreason: "+esc(escalation.reason)+"\ntimestamp: "+esc(escalation.timestamp)+"\nrequired action: "+esc(escalation.required_action)+"\n\n";
+    if((item.conflicts||[]).length) detail+="CONFLICTS\n"+(item.conflicts||[]).map(c=>"- "+c.kind+": "+c.message).join("\n")+"\n\n";
+    detail+="LIFECYCLE HISTORY\n"+history.map(e=>"- "+esc(e.event_ts)+" · "+esc(e.new_state)+" · "+esc(e.reason)+" · "+esc(e.source)).join("\n")+"\n\n";
+    detail+="SOURCE EVIDENCE (redacted)\n"+JSON.stringify(op.source_evidence||{},null,2)+"\n\nHANDOFF BODY\n";
+    $("v-body").textContent = detail+(j.body_text&&j.body_text.trim()? j.body_text : "(no body)");
   }catch(e){ $("v-body").textContent="failed to load: "+e; }
 }
 function closeViewer(){ $("viewer").style.display="none"; if(viewerOpener&&viewerOpener.focus) viewerOpener.focus(); }
@@ -770,7 +954,7 @@ function render(s){
   setFav(PHASECOL[ph]||"#5c6675"); document.title=(s.status?"● ":"")+phaseLabel(ph)+" · autopilot";
   $("empty").style.display = (!s.status && !(s.events&&s.events.length))? "block":"none";
 
-  renderNarrative(s); renderHero(s); renderSeats(s); renderLanes(s); renderPipe(s); renderFeed(s); renderRuns(s); syncTurns(s);
+  renderOperational(s); renderNarrative(s); renderHero(s); renderSeats(s); renderLanes(s); renderPipe(s); renderFeed(s); renderRuns(s); syncTurns(s);
   const cn=s.counts||{};
   const foot=$("foot"); foot.textContent="";
   [["pending",cn.pending],["claimed",cn.claimed],["done",cn.done],["archive",cn.archive]].forEach(([k,v])=>{
@@ -1080,7 +1264,7 @@ function renderSeats(s){
   });
 }
 
-let laneOpen=new Set();  // lane names the user expanded — persists across the 1s poll re-render so detail stays open
+let laneOpen=new Set();  // lane names the user expanded — persists across live snapshot renders
 function renderLanes(s){
   const L=s.lanes; const card=$("lanesCard"), box=$("lanes"), head=$("lanehead");
   const st=s.status||{}, ph=s.paused?"paused":(st.phase||"");
@@ -1158,23 +1342,47 @@ function renderLanes(s){
   });
 }
 
+const OPERATIONAL_STATES=["queued","claimed","running","awaiting","paused","capped","blocked","parked","escalated","retrying","failed","cancelled","superseded","completed"];
+const HEALTH_DIMENSIONS=["source_reads","reconciliation","history_persistence","schema_compatibility","freshness","stream","gateway","langfuse"];
+let activeOpFilter=null;
+function renderOperational(s){
+  const counts=s.state_counts||{}, countBox=$("opcounts"); countBox.textContent="";
+  OPERATIONAL_STATES.forEach(state=>{ const cell=el("div","opchip"+(activeOpFilter===state?" selected":""));
+    const button=el("button",null); button.setAttribute("aria-pressed",activeOpFilter===state?"true":"false");
+    button.appendChild(el("b",null,state)); button.appendChild(el("span",null,String(counts[state]||0)+" item"+((counts[state]||0)===1?"":"s")));
+    button.onclick=()=>{ activeOpFilter=activeOpFilter===state?null:state; renderOperational(last); renderPipe(last); };
+    cell.appendChild(button); countBox.appendChild(cell); });
+  const health=s.health||{}, healthBox=$("healthgrid"); healthBox.textContent="";
+  HEALTH_DIMENSIONS.forEach(name=>{ const record=health[name]||{status:"unknown",reason:"not reported"};
+    const cell=el("div","healthitem health-"+esc(record.status));
+    cell.appendChild(el("b",null,name.replace(/_/g," ")+" · "+String(record.status||"unknown").toUpperCase()));
+    cell.appendChild(el("span",null,record.reason||("updated "+fmtET(record.updated_ts)))); healthBox.appendChild(cell); });
+  $("transportState").textContent=streamState;
+}
+
 function renderPipe(s){
   const board=s.board||{}, box=$("pipe"); box.textContent="";
   const meta={pending:{},claimed:{},done:{color:"var(--ok)"},archive:{}};
   ["pending","claimed","done","archive"].forEach(state=>{
-    const rows=board[state]||[]; const st=el("div","stage");
+    const rows=(board[state]||[]).filter(h=>!activeOpFilter||h.operational_state===activeOpFilter); const st=el("div","stage");
     const sh=el("div","sh"); const n=el("span","n num",String(rows.length)); if(meta[state].color)n.style.color=meta[state].color;
     sh.appendChild(n); sh.appendChild(el("span","l",state)); st.appendChild(sh);
     const showChips = state==="pending"||state==="claimed";
     if(showChips){ rows.slice(0,4).forEach(h=>{ const ch=el("div","hchip"); ch.onclick=()=>openHandoff(h.id);
       ch.appendChild(el("span","id mono",h.id));
       ch.appendChild(el("span",null,(h.slug||"").replace(/-/g," ").slice(0,22)));
+      ch.appendChild(el("span","opmeta",String(h.operational_state||h.state)+" · "+String(h.state_reason||"reason unknown")));
+      ch.appendChild(el("span","opmeta","owner "+String(h.owner||"unknown")+" · "+(h.state_ts?fmtET(h.state_ts):"time unknown")));
+      if(h.required_action) ch.appendChild(el("span","opmeta","action: "+h.required_action));
+      if(h.escalation) ch.appendChild(el("span","opmeta","escalation "+String(h.escalation.severity||"unknown")+" · "+String(h.escalation.reason||"reason unknown")));
+      if((h.conflicts||[]).length) ch.appendChild(el("span","opmeta","WARNING: "+h.conflicts.length+" retained conflict(s)"));
       const rt=el("span","rt"); const f=el("span",seatVCls(h.from),h.from||"?");
       rt.appendChild(f); rt.appendChild(document.createTextNode("→")); rt.appendChild(el("span",seatVCls(h.to),h.to||"?"));
       ch.appendChild(rt); st.appendChild(ch); });
       if(!rows.length) st.appendChild(el("div","more","empty"));
     } else { if(rows.length){ const h=rows[rows.length-1]; const ch=el("div","hchip"); ch.onclick=()=>openHandoff(h.id);
         ch.appendChild(el("span","id mono",h.id)); ch.appendChild(el("span",null,(h.slug||"").replace(/-/g," ").slice(0,20)));
+        ch.appendChild(el("span","opmeta",String(h.operational_state||h.state)+" · "+String(h.state_reason||"reason unknown")));
         st.appendChild(ch); if(rows.length>1) st.appendChild(el("div","more","+ "+(rows.length-1)+" earlier")); }
       else st.appendChild(el("div","more","—")); }
     box.appendChild(st);
@@ -1379,12 +1587,42 @@ async function doCompare(){
   }catch(e){ body.textContent="failed to load: "+e; }
 }
 
-async function refresh(){ let s;
-  try{ s=await(await fetch("/api/state")).json(); connected=true; last=s; }
-  catch(e){ connected=false; document.body.classList.add("disconnected"); if(last) render(last); return; }
-  document.body.classList.remove("disconnected");
-  render(s);
+function setTransport(state){
+  streamState=state; connected=state==="CONNECTED";
+  document.body.classList.toggle("disconnected",state==="DISCONNECTED");
+  if($("transportState")) $("transportState").textContent=state;
+  if(last) render(last);
 }
+function applyStreamEvent(event,kind){
+  let s; try{s=JSON.parse(event.data);}catch(e){return;}
+  const info=s.stream||{}, instance=info.instance_id||String(event.lastEventId||"").split(":")[0];
+  const sequence=Number(info.sequence||String(event.lastEventId||"").split(":")[1]||0);
+  if(kind!=="reconcile"&&streamInstance===instance&&sequence<=streamSequence) return;
+  if(kind!=="reconcile"&&streamInstance===instance&&streamSequence&&sequence>streamSequence+1){ reconcileState(); return; }
+  streamInstance=instance||streamInstance; streamSequence=sequence||streamSequence;
+  streamCursor=event.lastEventId||streamCursor; last=s; reconnectAttempt=0;
+  setTransport("CONNECTED"); render(s);
+}
+function connectStream(){
+  if(stream) stream.close();
+  const suffix=streamCursor?("?cursor="+encodeURIComponent(streamCursor)):"";
+  stream=new EventSource("/api/stream"+suffix);
+  stream.onopen=()=>{ reconnectAttempt=0; setTransport("CONNECTED"); };
+  stream.addEventListener("snapshot",event=>applyStreamEvent(event,"snapshot"));
+  stream.addEventListener("reconcile",event=>applyStreamEvent(event,"reconcile"));
+  stream.onerror=()=>{ stream.close(); stream=null;
+    const delay=RECONNECT_DELAYS[Math.min(reconnectAttempt,RECONNECT_DELAYS.length-1)];
+    setTransport(reconnectAttempt>=RECONNECT_DELAYS.length?"DISCONNECTED":last?"STALE":"RECONNECTING");
+    reconnectAttempt++; setTimeout(connectStream,delay); };
+}
+async function reconcileState(){
+  if(reconcileBusy) return; reconcileBusy=true;
+  try{ const response=await fetch("/api/state"); if(!response.ok) throw new Error("state "+response.status);
+    const s=await response.json(); last=s; if(streamState!=="DISCONNECTED") connected=true; render(s);
+  }catch(e){ if(!stream) setTransport(last?"STALE":"DISCONNECTED"); }
+  finally{ reconcileBusy=false; }
+}
+async function refresh(){ return reconcileState(); }
 document.addEventListener("keydown",e=>{ const tag=(e.target.tagName||"").toLowerCase();
   if(tag==="input"||tag==="textarea"||tag==="select") return;
   if($("viewer").style.display==="flex"||$("rviewer").style.display==="flex") return;
@@ -1393,7 +1631,7 @@ document.addEventListener("keydown",e=>{ const tag=(e.target.tagName||"").toLowe
   else if(e.key==="s"){ doStop(); } });
 syncThemeIcon();
 matchMedia('(prefers-color-scheme: light)').addEventListener('change',syncThemeIcon);
-refresh(); setInterval(refresh,2000);
+reconcileState(); connectStream(); setInterval(reconcileState,30000);
 setInterval(()=>{ if(last) render(last); },1000);
 </script>
 </body></html>

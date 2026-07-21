@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""openai-repo-seat — a REPO-AWARE collab-kit autopilot backend for an OpenAI-compatible chat API.
+"""openai-repo-seat — a REPO-AWARE, LiteLLM-gateway-only autopilot backend.
 
 Same backend contract as ``openai-compatible-seat.py`` (prompt on STDIN -> reply on STDOUT, non-zero on
 failure), and the model still runs remotely (e.g. gpt-5.5 on OpenAI) so the two-vendor / cross-vendor
@@ -15,9 +15,9 @@ Read-only by default (list_dir/read_file/search) — a review seat inspects but 
 BUILDER seat on ANY model (not just Claude) can implement a handoff and run the checks. Stdlib only (no pip
 / no openai SDK) — function-calling is done over raw POST /chat/completions.
 
-  --base <url>        API base, e.g. https://api.openai.com/v1
-  --model <name>      e.g. gpt-5.5
-  --key-env <VAR>     env var holding the bearer token (e.g. OPENAI_API_KEY)
+  --base <url>        optional LiteLLM base override (default: LITELLM_BASE_URL)
+  --model <name>      gateway model alias
+  --key-env <VAR>     compatibility flag; only LITELLM_VIRTUAL_KEY is accepted
   --repo-root <dir>   repository the model may read (REQUIRED — enables tool mode)
   --timeout <secs>    per-HTTP-call timeout (default 180); the driver's seat timeout bounds the whole loop
   --max-steps <n>     max tool round-trips before we force a final answer (default 50)
@@ -40,6 +40,11 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+
+_LIB = str(Path(__file__).resolve().parents[1] / "lib")
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+import llm_gateway as gateway  # noqa: E402
 
 # Directories that are never worth serving to a code reviewer — noise, vendored, or VCS internals.
 _SKIP_DIRS = {
@@ -409,52 +414,17 @@ def _refuse_live_llm_if_hermetic() -> None:
 
 
 def _request_headers(url: str, key: str) -> dict:
-    """Auth + content-type, plus xAI's sticky-routing header on *.x.ai hosts only: per xAI's
-    caching best practices, ``x-grok-conv-id`` routes same-conversation requests to the same
-    server (their cache is per-server). Keyed with the same per-process value as
-    ``prompt_cache_key``; other providers never see the header."""
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    host = urllib.parse.urlsplit(url).hostname or ""
-    if host == "x.ai" or host.endswith(".x.ai"):
-        headers["x-grok-conv-id"] = _PROMPT_CACHE_KEY
-    return headers
+    """Gateway auth headers; provider-specific routing headers are intentionally absent."""
+    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
 def _post_json(url: str, key: str, payload: dict, timeout: float) -> dict:
     _refuse_live_llm_if_hermetic()
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers=_request_headers(url, key),
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+    return gateway.post_json(url, key, payload, timeout)
 
 
-def _attribution_metadata(model: str, *, feature: str = "repo-seat") -> dict | None:
-    """Origin fields for LiteLLM → Langfuse when SERVICE_NAME is set or gateway is used."""
-    service = (os.environ.get("SERVICE_NAME") or os.environ.get("LLG_SERVICE") or "").strip()
-    if not service and (os.environ.get("LITELLM_VIRTUAL_KEY") or "").strip().startswith("sk-"):
-        service = "ibkr-auto-trader"
-    if not service:
-        return None
-    environment = (
-        os.environ.get("ENVIRONMENT") or os.environ.get("LLG_ENVIRONMENT") or "development"
-    ).strip()
-    release = (
-        os.environ.get("GIT_SHA")
-        or os.environ.get("RELEASE")
-        or os.environ.get("LLG_RELEASE")
-        or "dev"
-    ).strip()
-    return {
-        "request_id": str(uuid.uuid4()),
-        "service": service,
-        "feature": feature,
-        "environment": environment or "development",
-        "release": release or "dev",
-        "model_alias": model,
-    }
+def _attribution_metadata(model: str, *, feature: str = "repo-seat") -> dict:
+    return gateway.request_metadata(model, feature=feature)
 
 
 def _with_attribution(payload: dict, model: str, *, feature: str = "repo-seat") -> dict:
@@ -799,23 +769,12 @@ def main(argv=None) -> int:
         if _reconf is not None:
             _reconf(encoding="utf-8", errors="replace")
     _load_dotenv()
-    # LiteLLM gateway defaults when LITELLM_VIRTUAL_KEY is set (see openai-compatible-seat).
-    _gw = (os.environ.get("LITELLM_VIRTUAL_KEY") or "").strip().startswith("sk-")
-    _default_base = (
-        os.environ.get("LITELLM_BASE_URL")
-        or os.environ.get("SEAT_API_BASE")
-        or ("http://localhost:4000/v1" if _gw else "https://api.openai.com/v1")
-    )
-    _default_model = (
-        os.environ.get("LITELLM_MODEL")
-        or os.environ.get("SEAT_API_MODEL")
-        or ("llm-general" if _gw else "gpt-5.5")
-    )
-    _default_key_env = "LITELLM_VIRTUAL_KEY" if _gw else "OPENAI_API_KEY"
+    _default_base = os.environ.get("LITELLM_BASE_URL") or ""
+    _default_model = os.environ.get("LITELLM_MODEL") or "llm-general"
     p = argparse.ArgumentParser(prog="openai-repo-seat")
     p.add_argument("--base", default=_default_base)
     p.add_argument("--model", default=_default_model)
-    p.add_argument("--key-env", default=_default_key_env)
+    p.add_argument("--key-env", default="LITELLM_VIRTUAL_KEY")
     p.add_argument(
         "--repo-root", required=True, help="repository the model may read (and write with --write)"
     )
@@ -852,10 +811,12 @@ def main(argv=None) -> int:
     )
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
 
-    key = os.environ.get(args.key_env)
-    if not key:
-        sys.stderr.write(f"openai-repo-seat: env var {args.key_env} (API key) is not set\n")
+    try:
+        config = gateway.GatewayConfig.from_env(base_url=args.base or None, key_env=args.key_env)
+    except gateway.GatewayConfigError as exc:
+        sys.stderr.write(f"openai-repo-seat: {exc}\n")
         return 2
+    key = config.virtual_key
     root = Path(args.repo_root)
     if not root.is_dir():
         sys.stderr.write(f"openai-repo-seat: --repo-root {args.repo_root!r} is not a directory\n")
@@ -869,7 +830,7 @@ def main(argv=None) -> int:
         root, _check_cleanup = _isolate_check_root(root)
 
     prompt = sys.stdin.read()
-    base = args.base.rstrip("/")
+    base = config.base_url
     try:
         if args.write:
             tools_spec = _TOOLS_SPEC + _WRITE_TOOLS_SPEC  # write_file + run_command

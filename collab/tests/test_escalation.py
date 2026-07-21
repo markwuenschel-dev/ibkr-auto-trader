@@ -212,9 +212,9 @@ class TestLoopPolicy:
                 return conftest.conformance_reply(prompt, source="src/gateway.py:1")
             # The resolved v2 baseline pair speaks the bounded BATCH protocol (ADR-0004 D3); both
             # executors are the claude CLI, so dispatch is told apart by MODEL, not seat name.
-            if "opus-4.8" in argv:  # breaker always finds the persistent defect
+            if "gemini-3.5-flash" in argv:  # breaker always finds the persistent defect
                 return "FINDING: F1 | src/gateway.py:233 | tz-aware/naive TypeError | gates the snapshot read"
-            if "sonnet-5" in argv:  # verifier confirms it
+            if "anthropic-general" in argv:  # verifier confirms it
                 return "VERDICT: CONFIRMED F1 | src/gateway.py:233 skew"
             return "ok"
 
@@ -287,7 +287,7 @@ class TestOperatorRetry:
                 return "verified\n[[SIGNOFF]]" if phase["sign"] else "not yet — keep going"
             if conftest.is_conformance_prompt(prompt):
                 return conftest.conformance_reply(prompt, source="src/gateway.py:1")
-            if "opus-4.8" in " ".join(cmd):  # v2 baseline breaker finds nothing -> clean lanes
+            if "gemini-3.5-flash" in " ".join(cmd):  # v2 baseline breaker finds nothing -> clean lanes
                 return "NO-FINDING"
             return "ok"
 
@@ -325,7 +325,7 @@ class TestOperatorRetry:
                 return "verified\n[[SIGNOFF]]"
             if conftest.is_conformance_prompt(prompt):
                 return conftest.conformance_reply(prompt, source="src/gateway.py:1")
-            if "opus-4.8" in " ".join(cmd):  # v2 baseline breaker
+            if "gemini-3.5-flash" in " ".join(cmd):  # v2 baseline breaker
                 return "NO-FINDING"
             return "ok"
 

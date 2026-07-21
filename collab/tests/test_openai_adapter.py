@@ -48,7 +48,8 @@ class TestResponsesParsing:
 
 class TestApiSelection:
     def _run(self, monkeypatch, capsys, argv, post, stdin="PROMPT"):
-        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        monkeypatch.setenv("LITELLM_VIRTUAL_KEY", "sk-virtual")
+        monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:4000/v1")
         monkeypatch.setenv("SEAT_ENV_FILE", str(_ADAPTER.parent / "does-not-exist.env"))  # skip the real .env
         monkeypatch.setattr(seat.sys, "stdin", io.StringIO(stdin))
         monkeypatch.setattr(seat, "_post_json", post)
@@ -67,7 +68,7 @@ class TestApiSelection:
         rc, cap = self._run(
             monkeypatch,
             capsys,
-            ["--base", "https://api.openai.com/v1", "--model", "gpt-5-codex", "--key-env", "OPENAI_API_KEY"],
+            ["--model", "gpt-5-codex"],
             post,
         )
         assert rc == 0 and cap.out == "from responses"
@@ -77,7 +78,7 @@ class TestApiSelection:
             assert url.endswith("/chat/completions")
             return {"choices": [{"message": {"content": "chat reply"}}]}
 
-        rc, cap = self._run(monkeypatch, capsys, ["--api", "chat", "--key-env", "OPENAI_API_KEY"], post)
+        rc, cap = self._run(monkeypatch, capsys, ["--api", "chat"], post)
         assert rc == 0 and cap.out == "chat reply"
 
     def test_responses_mode_explicit(self, monkeypatch, capsys):
@@ -87,21 +88,22 @@ class TestApiSelection:
                 "output": [{"type": "message", "content": [{"type": "output_text", "text": "resp reply"}]}]
             }
 
-        rc, cap = self._run(monkeypatch, capsys, ["--api", "responses", "--key-env", "OPENAI_API_KEY"], post)
+        rc, cap = self._run(monkeypatch, capsys, ["--api", "responses"], post)
         assert rc == 0 and cap.out == "resp reply"
 
     def test_non_responses_404_does_not_fall_back(self, monkeypatch, capsys):
         def post(url, key, payload, timeout):
             raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b"no such model"))
 
-        rc, cap = self._run(monkeypatch, capsys, ["--key-env", "OPENAI_API_KEY"], post)
+        rc, cap = self._run(monkeypatch, capsys, [], post)
         assert rc == 1 and "api error 404" in cap.err
 
     def test_missing_key_returns_2(self, monkeypatch, capsys):
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("LITELLM_VIRTUAL_KEY", raising=False)
+        monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:4000/v1")
         monkeypatch.setenv("SEAT_ENV_FILE", str(_ADAPTER.parent / "does-not-exist.env"))
         monkeypatch.setattr(seat.sys, "stdin", io.StringIO("x"))
-        assert seat.main(["--key-env", "OPENAI_API_KEY"]) == 2
+        assert seat.main([]) == 2
 
 
 class TestPromptCaching:
@@ -109,7 +111,8 @@ class TestPromptCaching:
     plus per-POST usage telemetry (stderr + optional JSONL)."""
 
     def _run(self, monkeypatch, capsys, argv, post, stdin="PROMPT"):
-        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        monkeypatch.setenv("LITELLM_VIRTUAL_KEY", "sk-virtual")
+        monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:4000/v1")
         monkeypatch.setenv("SEAT_ENV_FILE", str(_ADAPTER.parent / "does-not-exist.env"))
         monkeypatch.setattr(seat.sys, "stdin", io.StringIO(stdin))
         monkeypatch.setattr(seat, "_post_json", post)
@@ -126,7 +129,7 @@ class TestPromptCaching:
                 "usage": {"prompt_tokens": 1200, "prompt_tokens_details": {"cached_tokens": 1024}},
             }
 
-        rc, cap = self._run(monkeypatch, capsys, ["--api", "chat", "--key-env", "OPENAI_API_KEY"], post)
+        rc, cap = self._run(monkeypatch, capsys, ["--api", "chat"], post)
         assert rc == 0 and cap.out == "r"
         assert seen["prompt_cache_key"] == seat._PROMPT_CACHE_KEY
         assert "usage api=chat step=1 prompt_tokens=1200 cached_tokens=1024" in cap.err
@@ -143,7 +146,7 @@ class TestPromptCaching:
             }
 
         rc, cap = self._run(
-            monkeypatch, capsys, ["--api", "responses", "--key-env", "OPENAI_API_KEY"], post
+            monkeypatch, capsys, ["--api", "responses"], post
         )
         assert rc == 0 and cap.out == "r"
         (rec,) = [json.loads(line) for line in log.read_text("utf-8").splitlines()]
@@ -154,11 +157,11 @@ class TestPromptCaching:
         def post(url, key, payload, timeout):
             return {"choices": [{"message": {"content": "r"}}]}
 
-        rc, cap = self._run(monkeypatch, capsys, ["--api", "chat", "--key-env", "OPENAI_API_KEY"], post)
+        rc, cap = self._run(monkeypatch, capsys, ["--api", "chat"], post)
         assert rc == 0
         assert "prompt_tokens=n/a cached_tokens=n/a cache_write_tokens=n/a" in cap.err
 
-    def test_xai_sticky_header_only_on_xai_hosts(self):
+    def test_gateway_transport_never_emits_provider_specific_sticky_headers(self):
         h = seat._request_headers("https://api.x.ai/v1/chat/completions", "k")
-        assert h["x-grok-conv-id"] == seat._PROMPT_CACHE_KEY
+        assert "x-grok-conv-id" not in h
         assert "x-grok-conv-id" not in seat._request_headers("https://api.openai.com/v1/responses", "k")

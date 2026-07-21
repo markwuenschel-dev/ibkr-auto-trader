@@ -1,5 +1,10 @@
 # IBKR Trader — Observability Dashboard
 
+> This Next.js dashboard renders trading telemetry. The separate local **collab mission-control** web/TUI
+> is served by `collab/tools/lib/dashboard_web.py` and documented in
+> `../docs/design/dashboard-operational-state.md`; it owns handoff lifecycle, escalation, agent-run, gateway,
+> and Langfuse operational evidence.
+
 The §8 telemetry dashboard for the paper-trading loop. Reads the append-only
 `../logs/telemetry.jsonl` the Python side writes and renders run stats + a live event view.
 

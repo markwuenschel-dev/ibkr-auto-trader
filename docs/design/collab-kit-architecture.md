@@ -331,3 +331,18 @@ through its own process. Suggested slice order, smallest-reviewable-first:
 
 - `done → archive`: manual (assumed) vs. automatic cadence sweep.
 - Whether `watch-all-handoffs.py` should also emit OS-native notifications or Telegram-only.
+
+---
+
+## 15. Canonical mission-control state
+
+The dashboard no longer infers operator meaning from board directories in each renderer. The physical
+handoff directory remains the CAS truth, while `tools/lib/operational_state.py` owns effective lifecycle,
+append-only per-handoff replay, reconciliation, conflicts, escalation/parked semantics, and action fields.
+`dashboard_core.snapshot()` is the one projection used by web and TUI. Web delivery is a resumable,
+instance-scoped SSE full-snapshot stream with bounded replay and snapshot reconciliation.
+
+OpenAI-shaped seats are LiteLLM-gateway-only and attach the native Langfuse metadata projection. The proxy
+owns generation export; the application retains only redacted per-attempt operational telemetry. See
+[`dashboard-operational-state.md`](./dashboard-operational-state.md) for the complete schema, precedence,
+health, recovery, privacy, and runbook contract.

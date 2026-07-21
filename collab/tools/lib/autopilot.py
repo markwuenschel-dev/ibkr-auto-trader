@@ -53,6 +53,7 @@ import contracts  # noqa: E402
 import escalation as esc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
+import operational_state as _ops  # noqa: E402
 import operator_requests as opreq  # noqa: E402
 import run_budget as rb  # noqa: E402
 import transitions as _transitions  # noqa: E402
@@ -144,13 +145,56 @@ def _write_status(collab, **fields) -> None:
                 cur = {}
         except OSError, ValueError:
             cur = {}
+        before = dict(cur)
         cur.setdefault("schema_version", "0.1")
         cur.update(fields)
         cur["collab"] = str(collab)
         cur["updated_ts"] = _now_utc()
         cc.safe_write(p, json.dumps(cur, separators=(",", ":")) + "\n")
+        _record_status_transition(collab, before=before, current=cur, changed=fields)
     except Exception as e:  # observability must never break the loop ([C15])
         print(f"[autopilot] status write failed: {e}", file=sys.stderr)
+
+
+def _record_status_transition(collab, *, before: dict, current: dict, changed: dict) -> None:
+    """Retain item-bound phase changes while leaving pure heartbeats as liveness only."""
+    meaningful = {"phase", "stage", "active_seat"}
+    if not meaningful.intersection(changed):
+        return
+    if all(before.get(key) == current.get(key) for key in meaningful):
+        return
+    hid = current.get("current_hid") or before.get("current_hid")
+    if not isinstance(hid, str) or not hid.isdigit():
+        return
+    phase = current.get("phase")
+    state: _ops.OperationalState | None = None
+    reason: str | None = None
+    conditions: tuple[str, ...] = ()
+    if phase == "thinking":
+        state = _ops.OperationalState.RUNNING
+        detail = current.get("stage") or current.get("active_seat") or "thinking"
+        reason = f"driver_{detail}"
+        seat = current.get("active_seat")
+        if isinstance(seat, str) and seat:
+            conditions = (f"seat:{seat}",)
+    elif phase == "paused":
+        state = _ops.OperationalState.PAUSED
+        reason = "driver_paused"
+    elif phase == "capped":
+        state = _ops.OperationalState.CAPPED
+        reason = "driver_capped"
+    if state is None or reason is None:
+        return
+    _ops.record_transition(
+        collab,
+        hid,
+        state,
+        reason=reason,
+        source="autopilot_status",
+        actor="autopilot",
+        run_id=current.get("run_uid") if isinstance(current.get("run_uid"), str) else None,
+        conditions=conditions,
+    )
 
 
 _HEARTBEAT_S = (
@@ -519,7 +563,7 @@ def _fsize(f) -> int:
         return 0
 
 
-def _cli_runner(cmd: list, prompt: str, *, timeout: float, unset_env=None, cwd=None) -> str:
+def _cli_runner(cmd: list, prompt: str, *, timeout: float, unset_env=None, cwd=None, env_add=None) -> str:
     """Run a backend agent CLI with **process-boundary** output caps ([C38]/[C39]).
 
     Deliberately NOT ``subprocess.run(capture_output=True)`` — that buffers the child's entire stdout in
@@ -537,9 +581,10 @@ def _cli_runner(cmd: list, prompt: str, *, timeout: float, unset_env=None, cwd=N
     """
     name = cmd[0] if cmd else "<empty>"
     child_env = None
-    if unset_env:
-        drop = {str(k) for k in unset_env}
+    if unset_env or env_add:
+        drop = {str(k) for k in (unset_env or ())}
         child_env = {k: v for k, v in os.environ.items() if k not in drop}
+        child_env.update({str(k): str(v) for k, v in (env_add or {}).items() if v is not None})
     capture = ExitStack()
     try:
         fout = capture.enter_context(tempfile.TemporaryFile())  # noqa: SIM115 - ExitStack owns it below
@@ -604,16 +649,17 @@ def _should_isolate(adapter) -> bool:
     )
 
 
-def _run_seat(runner, cmd, prompt, *, timeout, unset_env, isolate_root):
+def _run_seat(runner, cmd, prompt, *, timeout, unset_env, isolate_root, env_add=None):
     """Run a seat via ``runner``. When ``isolate_root`` is a path, run inside an ephemeral copy of it so a
     read_test seat's allow-listed Bash tools cannot write the source it judges (INT-037c); else run as-is.
     ``cwd`` is passed to ``runner`` ONLY on the isolate path, so a runner without a ``cwd`` kwarg is
     unaffected on the normal (non-isolated) path."""
+    extra = {"env_add": env_add} if runner is _cli_runner else {}
     if isolate_root is None:
-        return runner(cmd, prompt, timeout=timeout, unset_env=unset_env)
+        return runner(cmd, prompt, timeout=timeout, unset_env=unset_env, **extra)
     copy, cleanup = cc.isolate_tree(isolate_root, include_git=True)
     try:
-        return runner(cmd, prompt, timeout=timeout, unset_env=unset_env, cwd=copy)
+        return runner(cmd, prompt, timeout=timeout, unset_env=unset_env, cwd=copy, **extra)
     finally:
         cleanup()
 
@@ -830,6 +876,13 @@ def _dispatch_seat(
                 timeout=timeout_s,
                 unset_env=cfg.get("unset_env"),
                 isolate_root=_iso_root,
+                env_add={
+                    "COLLAB_DIR": str(collab),
+                    "COLLAB_HANDOFF_ID": hid,
+                    "COLLAB_RUN_UID": rid,
+                    "COLLAB_SEAT": seat,
+                    "COLLAB_MODEL_CALL_LOG": str(Path(collab) / "autopilot" / "model-calls.jsonl"),
+                },
             )
     except cc.CollabError as e:
         lat_ms = round((time.monotonic() - t0) * 1000, 1)
