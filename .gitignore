@@ -46,3 +46,6 @@ _autopilot-backup-*/
 
 # local scratch architecture notes (not the tracked design docs under docs/)
 ARCHITECTURE.md
+
+# one-off codebase-integrity audit snapshots (local design output, not the tracked design ledger)
+docs/design/codebase-integrity-audit-*.html
