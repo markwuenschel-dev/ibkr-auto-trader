@@ -37,6 +37,7 @@ import adapter_profiles as adapter_profiles  # noqa: E402
 import autopilot as ap  # noqa: E402
 import collab_common as cc  # noqa: E402
 import contracts  # noqa: E402
+import escalation as esc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
 import operator_requests as opreq  # noqa: E402
@@ -243,13 +244,26 @@ def run_stats(events: list[dict], *, series_n: int = 40) -> dict:
     }
 
 
+def _escalation_reason(rec: dict | None) -> str | None:
+    """The short reason tag (e.g. ``verification_incomplete``) pulled from an escalation record's H1,
+    or ``None`` when there is no escalation. Falls back to ``"escalated"`` when the file has no tag."""
+    if not rec:
+        return None
+    m = re.search(r"\[([a-z][a-z0-9_]+)\]", rec.get("markdown", ""))
+    return m.group(1) if m else "escalated"
+
+
 def _row(collab, h: dict) -> dict:
-    """One board row: id/slug/state plus routing (to/from), age in seconds, and — for a closed
-    handoff — HOW it closed.
+    """One board row: id/slug/state plus routing (to/from), age in seconds, whether it is PARKED behind
+    an escalation, and — for a closed handoff — HOW it closed.
 
     A row in ``done`` says nothing about authority on its own: the file is byte-identical whether the
     contract closed it or a human clicked through. ``closed_by``/``closed_label`` carry the persisted
     transition kind so the panel can render a human override as an override.
+
+    ``escalated``/``escalation_reason`` come from the on-disk escalation store (``autopilot/escalations``):
+    a pending/claimed handoff with an escalation is AWAITING A HUMAN — a driver refuses to auto-run it, so
+    a Start that finds only such work idles silently. The panel needs this to say so instead of going blank.
     """
     to, frm = ap._to_from(Path(h["path"]))
     try:
@@ -257,6 +271,10 @@ def _row(collab, h: dict) -> dict:
     except OSError:
         age = None
     tr = _transitions.read(collab, h["id"]) if h["state"] in ("done", "archive") else None
+    try:
+        esc_rec = esc.read(collab, h["id"]) if h["state"] in ("pending", "claimed") else None
+    except Exception:
+        esc_rec = None  # an unreadable escalation store must never crash the board
     return {
         "id": h["id"],
         "slug": h["slug"],
@@ -264,6 +282,8 @@ def _row(collab, h: dict) -> dict:
         "to": to or None,
         "from": frm or None,
         "age_s": age,
+        "escalated": esc_rec is not None,
+        "escalation_reason": _escalation_reason(esc_rec),
         "closed_by": (tr or {}).get("kind"),
         "closed_label": _transitions.label_of(tr) if h["state"] in ("done", "archive") else None,
         "closed_actor": (tr or {}).get("actor"),

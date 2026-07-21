@@ -897,8 +897,20 @@ function renderHero(s){
   // nothing live to draw and we must not invent it from the last run's leftovers. Say what ended, say
   // what is queued, and offer the one useful action — Start. The board below is durable and stays.
   if(!s.status){
-    stripe.style.background="var(--faint)";
     const lr=s.last_run||null, pend=((s.board||{}).pending||[]), claimed=((s.board||{}).claimed||[]);
+    // PARKED behind an escalation: a driver refuses to auto-run it, so pressing ▶ Start spawns a watcher
+    // that finds nothing and idles — looking like "Start did nothing". Say it loudly instead of blank.
+    const escRow=claimed.filter(h=>h.escalated).slice(-1)[0]||(pend.filter(h=>h.escalated)[0])||null;
+    if(escRow){
+      stripe.style.background="var(--warn)";
+      eb.textContent="⚠ escalation · awaiting you";
+      ti.textContent=escRow.id+" is parked in escalation"+(escRow.escalation_reason?(" ("+escRow.escalation_reason+")"):"");
+      sub.textContent="A driver will NOT auto-run an escalated handoff — ▶ Start alone spawns a watcher that idles. Open it to read why it stopped, or Re-run/adopt to clear the escalation and drive it.";
+      const bo=el("button","primary","Open "+escRow.id); bo.onclick=()=>openHandoff(escRow.id); cta.appendChild(bo);
+      const br=el("button","warn ghost","↻ Re-run / adopt "+escRow.id); br.onclick=()=>reopen(escRow.id); cta.appendChild(br);
+      return;
+    }
+    stripe.style.background="var(--faint)";
     eb.textContent="no run active";
     const next=pend.length?String(pend[0].id):(claimed.length?String(claimed[claimed.length-1].id):null);
     if(pend.length){ ti.textContent=next+" is queued — press ▶ Start to run it"; }
