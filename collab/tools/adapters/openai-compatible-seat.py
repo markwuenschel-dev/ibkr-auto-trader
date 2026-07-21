@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
-"""openai-compatible-seat — a collab-kit autopilot backend for ANY OpenAI-compatible chat API.
+"""openai-compatible-seat — a gateway-only collab-kit OpenAI-shaped backend.
 
-Works with xAI/Grok, OpenAI/Codex, Gemini's OpenAI-compat endpoint, local Ollama, etc. — anything that
-speaks POST /chat/completions. Stdlib only (no pip install), so it drops straight into seats.json.
+All application traffic goes through the configured LiteLLM ``/v1`` endpoint using a virtual key.
+Provider hosts, provider keys, master keys, and silent direct fallbacks are refused.
 
 The autopilot backend contract is exactly: read the prompt on STDIN, write the reply to STDOUT, exit 0.
 This wrapper does that; on any failure it writes to stderr and exits non-zero, so the driver's CollabError
 path fires and the round fails safely (inbound stays claimed).
 
-Per-seat config comes from argv (so two seats can use different models); only the secret comes from env:
-  --base <url>       API base, e.g. https://api.x.ai/v1  (default env SEAT_API_BASE, else xAI)
-  --model <name>     e.g. grok-4 / gpt-5-codex / gemini-2.5-pro
-  --key-env <VAR>    name of the env var holding the bearer token (default: SEAT_API_KEY)
+Per-seat config comes from argv (so two seats can use different aliases); routing/auth come from env:
+  --base <url>       optional LiteLLM base override (default: LITELLM_BASE_URL)
+  --model <name>     a gateway alias
+  --key-env <VAR>    retained for config compatibility; only LITELLM_VIRTUAL_KEY is accepted
   --timeout <secs>   HTTP timeout (default 120)
 
 Example seats.json cmd (one entry per seat):
   ["python", "C:\\\\Users\\\\Nalakram\\\\Documents\\\\GitHub\\\\collab-kit\\\\tools\\\\adapters\\\\"
-   "openai-compatible-seat.py",
-   "--base", "https://api.x.ai/v1", "--model", "grok-4", "--key-env", "XAI_API_KEY"]
+   "openai-compatible-seat.py", "--model", "grok-4.5"]
 """
 
 import argparse
@@ -30,6 +29,11 @@ import urllib.request
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+
+_LIB = str(Path(__file__).resolve().parents[1] / "lib")
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+import llm_gateway as gateway  # noqa: E402
 
 
 def _load_dotenv() -> None:
@@ -72,52 +76,18 @@ def _refuse_live_llm_if_hermetic() -> None:
 
 
 def _request_headers(url: str, key: str) -> dict:
-    """Auth + content-type, plus xAI's sticky-routing header on *.x.ai hosts only (see
-    openai-repo-seat for the contract; identical). Keyed with the same per-process value as
-    ``prompt_cache_key``."""
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    host = urllib.parse.urlsplit(url).hostname or ""
-    if host == "x.ai" or host.endswith(".x.ai"):
-        headers["x-grok-conv-id"] = _PROMPT_CACHE_KEY
-    return headers
+    """Gateway auth headers; provider-specific routing headers are intentionally absent."""
+    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
 def _post_json(url: str, key: str, payload: dict, timeout: float) -> dict:
-    """POST JSON with a bearer token; return the parsed response. Raises urllib.error.HTTPError on 4xx/5xx."""
+    """POST through the validated gateway and record one redacted attempt."""
     _refuse_live_llm_if_hermetic()
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers=_request_headers(url, key),
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+    return gateway.post_json(url, key, payload, timeout)
 
 
-def _attribution_metadata(model: str, *, feature: str = "seat") -> dict | None:
-    """Origin fields for LiteLLM → Langfuse when SERVICE_NAME is set or gateway is used."""
-    service = (os.environ.get("SERVICE_NAME") or os.environ.get("LLG_SERVICE") or "").strip()
-    if not service and (os.environ.get("LITELLM_VIRTUAL_KEY") or "").strip().startswith("sk-"):
-        service = "ibkr-auto-trader"
-    if not service:
-        return None
-    environment = (
-        os.environ.get("ENVIRONMENT") or os.environ.get("LLG_ENVIRONMENT") or "development"
-    ).strip()
-    release = (
-        os.environ.get("GIT_SHA")
-        or os.environ.get("RELEASE")
-        or os.environ.get("LLG_RELEASE")
-        or "dev"
-    ).strip()
-    return {
-        "request_id": str(uuid.uuid4()),
-        "service": service,
-        "feature": feature,
-        "environment": environment or "development",
-        "release": release or "dev",
-        "model_alias": model,
-    }
+def _attribution_metadata(model: str, *, feature: str = "seat") -> dict:
+    return gateway.request_metadata(model, feature=feature)
 
 
 # One stable cache key per seat process (same contract as openai-repo-seat: never varies within a
@@ -238,24 +208,12 @@ def main(argv=None) -> int:
         if _reconf is not None:
             _reconf(encoding="utf-8", errors="replace")
     _load_dotenv()
-    # LiteLLM gateway: when LITELLM_VIRTUAL_KEY is a real sk-… key, default seats to the proxy
-    # so collab can share one controlled endpoint without raw provider keys in seats.json.
-    _gw = (os.environ.get("LITELLM_VIRTUAL_KEY") or "").strip().startswith("sk-")
-    _default_base = (
-        os.environ.get("LITELLM_BASE_URL")
-        or os.environ.get("SEAT_API_BASE")
-        or ("http://localhost:4000/v1" if _gw else "https://api.x.ai/v1")
-    )
-    _default_model = (
-        os.environ.get("LITELLM_MODEL")
-        or os.environ.get("SEAT_API_MODEL")
-        or ("llm-general" if _gw else "grok-4")
-    )
-    _default_key_env = "LITELLM_VIRTUAL_KEY" if _gw else "SEAT_API_KEY"
+    _default_base = os.environ.get("LITELLM_BASE_URL") or ""
+    _default_model = os.environ.get("LITELLM_MODEL") or "llm-general"
     p = argparse.ArgumentParser(prog="openai-compatible-seat")
     p.add_argument("--base", default=_default_base)
     p.add_argument("--model", default=_default_model)
-    p.add_argument("--key-env", default=_default_key_env)
+    p.add_argument("--key-env", default="LITELLM_VIRTUAL_KEY")
     p.add_argument(
         "--api",
         choices=("auto", "chat", "responses"),
@@ -265,13 +223,15 @@ def main(argv=None) -> int:
     p.add_argument("--timeout", type=float, default=float(os.environ.get("SEAT_API_TIMEOUT", "120")))
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
 
-    key = os.environ.get(args.key_env)
-    if not key:
-        sys.stderr.write(f"openai-compatible-seat: env var {args.key_env} (API key) is not set\n")
+    try:
+        config = gateway.GatewayConfig.from_env(base_url=args.base or None, key_env=args.key_env)
+    except gateway.GatewayConfigError as exc:
+        sys.stderr.write(f"openai-compatible-seat: {exc}\n")
         return 2
+    key = config.virtual_key
 
     prompt = sys.stdin.read()  # the whole prompt (seat system + inbound handoff content) arrives here
-    base = args.base.rstrip("/")
+    base = config.base_url
     try:
         if args.api == "responses":
             out = _responses(base, args.model, key, prompt, args.timeout)

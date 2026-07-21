@@ -124,11 +124,11 @@ def _scripted_runner(inject: str):
     the resolved v2 lane pairs are routed by MODEL, since both executors are the same claude CLI.
     ``confirmed-finding`` makes the breaker report a defect the verifier CONFIRMS."""
 
-    # The example catalog's baseline pair is opus-4.8 -> sonnet-5; its high-risk pair (data-integrity
+    # The example catalog's baseline pair is Gemini -> Anthropic through LiteLLM; its high-risk pair
     # is a high-risk guardrail) is gpt-5.6-luna -> grok-4.5. Breakers/verifiers speak the bounded batch
     # protocol (ADR-0004 D3): 'FINDING: F<n> | path | trigger | impact' and one verdict per finding id.
-    _BREAKERS = ("opus-4.8", "gpt-5.6-luna")
-    _VERIFIERS = ("sonnet-5", "grok-4.5")
+    _BREAKERS = ("gemini-3.5-flash", "gpt-5.6-luna")
+    _VERIFIERS = ("anthropic-general", "grok-4.5")
 
     def run(cmd, prompt, *, timeout, **kw):
         who = cmd[0]

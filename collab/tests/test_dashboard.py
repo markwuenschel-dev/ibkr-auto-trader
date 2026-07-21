@@ -21,8 +21,10 @@ sys.path.insert(0, str(_LIB))
 import autopilot as ap  # noqa: E402
 import collab_common as cc  # noqa: E402
 import dashboard_core as dc  # noqa: E402
+import escalation as esc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
+import operational_state as ops  # noqa: E402
 import transitions as tr  # noqa: E402
 
 import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
@@ -199,7 +201,7 @@ class TestStatusAndControl:
             # ever reaches the round cap.
             if conftest.is_conformance_prompt(prompt):
                 return conftest.conformance_reply(prompt)
-            return "NO-FINDING" if "claude" in cmd[0] else "ok"
+            return "NO-FINDING" if "BREAKER" in prompt else "ok"
 
         monkeypatch.setattr(ap.time, "sleep", lambda _s: (_ for _ in ()).throw(_Slept()))
         with pytest.raises(_Slept):
@@ -248,6 +250,105 @@ class TestSnapshotAndActions:
         assert snap["seats"]["builder"]["model"] == "opus"  # the chosen catalog id surfaces
         assert "secret" not in json.dumps(snap["seats"])  # never the full argv ([C38])
         assert snap["paused"] is False
+
+    def test_snapshot_projects_full_escalated_parked_operational_item_without_live_run(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hid = hc.create(collab, to="reviewer", from_="builder", title="x", body="y")["id"]
+        hc.claim(collab, hid)
+        esc.write(
+            collab,
+            hid,
+            [],
+            attempts=2,
+            run_uid="run-7",
+            reason="verification_incomplete",
+        )
+
+        snap = dc.snapshot(collab)
+        row = snap["items"][0]
+        assert snap["schema_version"] == "1.0"
+        assert snap["live"] is False
+        assert row["state"] == "claimed"  # physical CAS state remains available
+        assert row["operational_state"] == "escalated"
+        assert row["state_reason"] == "verification_incomplete"
+        assert row["state_source"] == "escalation_store"
+        assert row["owner"] == "reviewer"
+        assert row["run_id"] == "run-7"
+        assert row["required_action"] == "retry_or_adopt"
+        assert "parked" in row["conditions"]
+        assert row["escalation"]["severity"] == "warning"
+        assert row["escalation"]["timestamp"].endswith("Z")
+        assert snap["state_counts"]["escalated"] == 1
+        assert [item["id"] for item in snap["open"]] == [hid]
+        assert snap["health"]["history_persistence"]["status"] == "healthy"
+
+    def test_snapshot_bootstraps_legacy_handoff_with_one_reconciliation_event(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hid = hc.create(collab, to="reviewer", from_="builder", title="x", body="y")["id"]
+        history = Path(collab) / "autopilot" / "lifecycle" / f"{hid}.jsonl"
+        history.unlink()  # simulate a handoff created before lifecycle history existed
+
+        first = dc.snapshot(collab)
+        second = dc.snapshot(collab)
+        events = ops.read_history(collab, hid).events
+        assert first["items"][0]["operational_state"] == "queued"
+        assert second["items"][0]["operational_state"] == "queued"
+        assert len(events) == 1
+        assert events[0].source == "reconciliation"
+        assert events[0].reason == "legacy_source_reconstruction"
+
+    def test_snapshot_surfaces_malformed_escalation_and_history_conflict_as_degraded(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hid = hc.create(collab, to="reviewer", from_="builder", title="x", body="y")["id"]
+        escalation_path = Path(collab) / "autopilot" / "escalations" / f"{hid}.md"
+        escalation_path.parent.mkdir(parents=True, exist_ok=True)
+        escalation_path.write_text("<!-- escalation-meta:{not-json} -->\n# stopped\n", encoding="utf-8")
+        ops.append_event(
+            collab,
+            ops.OperationalEvent(
+                event_id="bad-jump",
+                entity_id=hid,
+                previous_state=ops.OperationalState.QUEUED,
+                new_state=ops.OperationalState.FAILED,
+                reason="backend_failed",
+                source="test",
+                actor="tester",
+                run_id=None,
+                event_ts="2026-07-21T20:00:00Z",
+                ingested_ts="2026-07-21T20:00:01Z",
+                correlation_id=None,
+                trace_id=None,
+            ),
+        )
+
+        snap = dc.snapshot(collab)
+        row = snap["items"][0]
+        assert row["operational_state"] == "escalated"
+        assert row["escalation"]["metadata_status"] == "malformed"
+        assert {conflict["kind"] for conflict in row["conflicts"]} >= {"invalid_transition"}
+        assert snap["health"]["source_reads"]["status"] == "degraded"
+        assert snap["health"]["reconciliation"]["status"] == "degraded"
+
+    def test_operational_detail_pages_history_and_retains_source_evidence(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hid = hc.create(collab, to="reviewer", from_="builder", title="x", body="y")["id"]
+        hc.claim(collab, hid)
+        ap._write_status(
+            collab,
+            run_uid="run-9",
+            current_hid=hid,
+            phase="thinking",
+            stage="verify",
+            active_seat="verify",
+        )
+
+        page1 = dc.operational_detail(collab, hid, limit=2)
+        page2 = dc.operational_detail(collab, hid, cursor=page1["history"]["next_cursor"], limit=2)
+        assert page1["item"]["operational_state"] == "running"
+        assert [event["new_state"] for event in page1["history"]["events"]] == ["queued", "claimed"]
+        assert [event["new_state"] for event in page2["history"]["events"]] == ["running"]
+        assert page1["source_evidence"]["board_state"] == "claimed"
+        assert page1["item"]["run_id"] == "run-9"
 
     def test_snapshot_events_tail_is_ordered_and_limited(self, tmp_path):
         collab = str(tmp_path / "c")
@@ -397,7 +498,7 @@ class TestSeatModelControl:
             dc.set_seat_model(str(tmp_path), "breaker", "gpt-5.6-luna")
 
         persisted = json.loads(target.read_text(encoding="utf-8"))
-        assert persisted["seats"]["breaker"]["model"] == "opus-4.8"
+        assert persisted["seats"]["breaker"]["model"] == "gemini-3.5-flash"
 
 
 class TestRiskTieredLaneEvidence:

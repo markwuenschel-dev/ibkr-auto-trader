@@ -607,7 +607,7 @@ class TestAssuranceActivationFailsClosed:
             )
         )
         assert led["verification_plan_digest"].startswith("plan:")
-        assert led["verification_plan"]["passes"][0]["profile"]["breaker"]["model"] == "opus-4.8"
+        assert led["verification_plan"]["passes"][0]["profile"]["breaker"]["model"] == "gemini-3.5-flash"
 
 
 class TestCandidateClose:
@@ -630,7 +630,7 @@ class TestCandidateClose:
             # The conformance pair reuses the baseline profile's cmd, so route on the PROMPT.
             if conftest.is_conformance_prompt(prompt):
                 return conftest.conformance_reply(prompt)
-            return "NO-FINDING"  # the resolved v2 baseline pair (opus-4.8 breaker) finds nothing
+            return "NO-FINDING"  # the resolved v2 baseline pair finds nothing
 
         ap.run(collab, seats=_closeout_seats(), runner=runner, home=str(home))
         assert hc.state_of(collab, "001") == "done"  # self-closed, contract satisfied
@@ -679,7 +679,7 @@ class TestCandidateClose:
         assert len(ledgers) == 1
         ledger = json.loads(ledgers[0].read_text(encoding="utf-8"))
         assert [entry["pass"] for entry in ledger["lanes"]] == ["baseline", "high-risk-diverse"]
-        assert ledger["verification_plan"]["passes"][0]["profile"]["breaker"]["model"] == "opus-4.8"
+        assert ledger["verification_plan"]["passes"][0]["profile"]["breaker"]["model"] == "gemini-3.5-flash"
         assert ledger["verification_plan"]["passes"][1]["profile"]["breaker"]["model"] == "gpt-5.6-luna"
         budget = json.loads((Path(collab) / "autopilot" / "budget" / "001.json").read_text(encoding="utf-8"))
         # Three passes now: the two defect pairs plus the always-on conformance pair (ADR-0005 D2),
@@ -788,9 +788,9 @@ class TestRepairLoop:
             bad = "BUG" in (src.read_text("utf-8") if src.exists() else "")
             # The resolved v2 baseline pair speaks the bounded BATCH protocol (ADR-0004 D3) and is
             # dispatched by MODEL, not seat name — both executors are the claude CLI.
-            if "opus-4.8" in argv:  # baseline breaker
+            if "gemini-3.5-flash" in argv:  # baseline breaker
                 return "FINDING: F1 | src/m.py:1 | x is unchecked | data loss" if bad else "NO-FINDING"
-            if "sonnet-5" in argv:  # baseline verifier — one verdict per finding id
+            if "anthropic-general" in argv:  # baseline verifier — one verdict per finding id
                 return "VERDICT: CONFIRMED F1 | x unchecked" if bad else "VERDICT: REFUTED F1"
             return "ok"
 
@@ -831,9 +831,9 @@ class TestRepairLoop:
                 return "Conformance: all met.\n[[SIGNOFF]]"
             if conftest.is_conformance_prompt(prompt):
                 return conftest.conformance_reply(prompt)  # the persistent LANE defect is the point
-            if "opus-4.8" in argv:  # v2 baseline breaker (batch protocol, ADR-0004 D3)
+            if "gemini-3.5-flash" in argv:  # v2 baseline breaker (batch protocol, ADR-0004 D3)
                 return "FINDING: F1 | src/m.py:1 | unchecked | data loss"
-            if "sonnet-5" in argv:  # v2 baseline verifier
+            if "anthropic-general" in argv:  # v2 baseline verifier
                 return "VERDICT: CONFIRMED F1 | unchecked"
             return "ok"
 

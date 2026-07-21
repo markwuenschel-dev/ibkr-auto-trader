@@ -151,8 +151,8 @@ class TestLaneConfiguration:
         root = Path(__file__).resolve().parent.parent
         seats = json.loads((root / "seats.example.json").read_text(encoding="utf-8"))
         plan = vp.resolve_verification_plan(_lanes_document(), seats, guardrails=["money"])
-        assert plan.baseline.profile.breaker_model == "opus-4.8"
-        assert plan.baseline.profile.verifier_model == "sonnet-5"
+        assert plan.baseline.profile.breaker_model == "gemini-3.5-flash"
+        assert plan.baseline.profile.verifier_model == "anthropic-general"
         assert plan.high_risk is not None
         assert plan.high_risk.profile.breaker_model == "gpt-5.6-luna"
         assert plan.high_risk.profile.verifier_model == "grok-4.5"

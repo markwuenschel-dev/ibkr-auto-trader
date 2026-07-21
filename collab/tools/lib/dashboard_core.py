@@ -40,6 +40,7 @@ import contracts  # noqa: E402
 import escalation as esc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
+import operational_state as ops  # noqa: E402
 import operator_requests as opreq  # noqa: E402
 import registry  # noqa: E402
 import transitions as _transitions  # noqa: E402
@@ -253,55 +254,61 @@ def _escalation_reason(rec: dict | None) -> str | None:
     return m.group(1) if m else "escalated"
 
 
-def _row(collab, h: dict) -> dict:
-    """One board row: id/slug/state plus routing (to/from), age in seconds, whether it is PARKED behind
-    an escalation, and — for a closed handoff — HOW it closed.
-
-    A row in ``done`` says nothing about authority on its own: the file is byte-identical whether the
-    contract closed it or a human clicked through. ``closed_by``/``closed_label`` carry the persisted
-    transition kind so the panel can render a human override as an override.
-
-    ``escalated``/``escalation_reason`` come from the on-disk escalation store (``autopilot/escalations``):
-    a pending/claimed handoff with an escalation is AWAITING A HUMAN — a driver refuses to auto-run it, so
-    a Start that finds only such work idles silently. The panel needs this to say so instead of going blank.
-    """
+def _row(
+    collab,
+    h: dict,
+    *,
+    status: dict | None = None,
+    live: bool = False,
+    request: dict | None = None,
+) -> dict:
+    """Project one authoritative board record through the canonical operational contract."""
     to, frm = ap._to_from(Path(h["path"]))
-    try:
-        age = round(time.time() - os.path.getmtime(h["path"]), 1)
-    except OSError:
-        age = None
-    tr = _transitions.read(collab, h["id"]) if h["state"] in ("done", "archive") else None
     try:
         esc_rec = esc.read(collab, h["id"]) if h["state"] in ("pending", "claimed") else None
     except Exception:
         esc_rec = None  # an unreadable escalation store must never crash the board
-    return {
-        "id": h["id"],
-        "slug": h["slug"],
-        "state": h["state"],
-        "to": to or None,
-        "from": frm or None,
-        "age_s": age,
-        "escalated": esc_rec is not None,
-        "escalation_reason": _escalation_reason(esc_rec),
-        "closed_by": (tr or {}).get("kind"),
-        "closed_label": _transitions.label_of(tr) if h["state"] in ("done", "archive") else None,
-        "closed_actor": (tr or {}).get("actor"),
-        "closed_reason": (tr or {}).get("reason"),
-        "closed_autonomously": _transitions.is_autonomous(tr),
-    }
+    tr = _transitions.read(collab, h["id"]) if h["state"] in ("done", "archive") else None
+    source = dict(h)
+    source.update({"to": to or None, "from": frm or None})
+    return ops.reconcile_item(
+        collab,
+        source,
+        status=status,
+        live=live,
+        escalation_record=esc_rec,
+        request=request,
+        transition_record=tr,
+    ).to_dict()
 
 
-def board(collab) -> dict:
+def board(
+    collab,
+    *,
+    status: dict | None = None,
+    live: bool = False,
+    requests: list[dict] | None = None,
+) -> dict:
     """Handoffs grouped by state: ``{"pending":[row...], "claimed":[...], "done":[...], "archive":[...]}``.
 
     Rows within a state are sorted by id. Uses the authoritative directory view
     (:func:`handoff_core.list_handoffs`, which dedups transition-crash residuals).
     """
     grouped: dict[str, list] = {s: [] for s in hc.STATES}
+    request_by_hid = {
+        str(item.get("hid")): item for item in (requests or []) if isinstance(item, dict) and item.get("hid")
+    }
     try:
         for h in hc.list_handoffs(collab):
-            grouped.setdefault(h["state"], []).append(_row(collab, h))
+            grouped.setdefault(h["state"], []).append(
+                _row(
+                    collab,
+                    h,
+                    status=status,
+                    live=live,
+                    request=request_by_hid.get(str(h["id"])),
+                )
+            )
     except cc.CollabError:
         pass  # unreadable/absent collab -> empty board, never a crash
     for rows in grouped.values():
@@ -309,9 +316,9 @@ def board(collab) -> dict:
     return grouped
 
 
-def open_handoffs(collab) -> list[dict]:
+def open_handoffs(collab, board_snapshot: dict | None = None) -> list[dict]:
     """Flat, id-sorted list of the actionable (pending+claimed) handoffs — the selection surface."""
-    b = board(collab)
+    b = board_snapshot if board_snapshot is not None else board(collab)
     return sorted(b.get("pending", []) + b.get("claimed", []), key=lambda r: r["id"])
 
 
@@ -752,6 +759,115 @@ def _last_run(status: dict | None, collab=None) -> dict | None:
     }
 
 
+def _health_record(status: str, *, ts: str, reason: str | None) -> dict:
+    return {"status": status, "updated_ts": ts, "reason": reason}
+
+
+def read_model_telemetry(collab, *, hid: str | None = None, limit: int = 100) -> list[dict]:
+    """Read a bounded redacted tail; adapter telemetry contains no prompt/completion/header bodies."""
+    path = Path(collab) / "autopilot" / "model-calls.jsonl"
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - 1_048_576))
+            raw = stream.read(1_048_576).decode("utf-8", "replace")
+    except OSError:
+        return []
+    lines = raw.splitlines()
+    if size > 1_048_576 and lines:
+        lines = lines[1:]  # the bounded seek may begin inside a JSON record
+    records: list[dict] = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or (hid is not None and str(record.get("handoff_id")) != str(hid)):
+            continue
+        records.append(record)
+    return records[-max(1, min(int(limit), 500)) :]
+
+
+def _snapshot_health(collab, *, items: list[dict], live: bool, ts: str) -> dict:
+    source_states = {item.get("source_read_status") for item in items}
+    if "unavailable" in source_states:
+        source_status, source_reason = "unavailable", "one or more source records are incompatible"
+    elif "degraded" in source_states:
+        source_status, source_reason = "degraded", "one or more source records are legacy or malformed"
+    else:
+        source_status, source_reason = "healthy", None
+    conflicts = sum(len(item.get("conflicts") or []) for item in items)
+    incompatible = any(
+        any(conflict.get("kind") == "schema_incompatible" for conflict in item.get("conflicts") or [])
+        for item in items
+    )
+    if live:
+        freshness_values = {((item.get("freshness") or {}).get("live_status")) for item in items}
+        if "stale" in freshness_values:
+            freshness_status, freshness_reason = "degraded", "the active item heartbeat is stale"
+        elif "fresh" in freshness_values:
+            freshness_status, freshness_reason = "healthy", None
+        else:
+            freshness_status, freshness_reason = "unknown", "no item-bound live heartbeat is available"
+    else:
+        freshness_status, freshness_reason = "unknown", "no driver currently holds the board lease"
+    persistence = ops.read_history_health(collab)
+    persistence_status = persistence.get("status")
+    if persistence_status not in ("healthy", "degraded", "unavailable", "unknown"):
+        persistence_status = "unknown"
+    calls = read_model_telemetry(collab, limit=100)
+    last_call = next(
+        (record for record in reversed(calls) if record.get("record_type") != "langfuse_verification"),
+        None,
+    )
+    if last_call is None:
+        gateway_status, gateway_reason, gateway_ts = "unknown", "no model attempt has been recorded", ts
+        langfuse_status, langfuse_reason = "unknown", "no verified export evidence is available"
+    else:
+        outcome = last_call.get("outcome")
+        gateway_status = "healthy" if outcome == "success" else "degraded"
+        gateway_reason = None if outcome == "success" else f"latest model attempt: {outcome or 'unknown'}"
+        gateway_ts = str(last_call.get("ended_ts") or ts)
+        verification = next(
+            (
+                record
+                for record in reversed(calls)
+                if record.get("record_type") == "langfuse_verification"
+                and record.get("request_id") == last_call.get("request_id")
+            ),
+            None,
+        )
+        export = (verification or last_call).get("langfuse_export")
+        langfuse_status = (
+            "healthy" if export == "verified" else "unavailable" if export == "rejected" else "unknown"
+        )
+        langfuse_reason = None if export == "verified" else f"latest export evidence: {export or 'unknown'}"
+    return {
+        "source_reads": _health_record(source_status, ts=ts, reason=source_reason),
+        "reconciliation": _health_record(
+            "degraded" if conflicts else "healthy",
+            ts=ts,
+            reason=f"{conflicts} retained source/history conflict(s)" if conflicts else None,
+        ),
+        "history_persistence": _health_record(
+            persistence_status,
+            ts=str(persistence.get("updated_ts") or ts),
+            reason=persistence.get("reason"),
+        ),
+        "schema_compatibility": _health_record(
+            "unavailable" if incompatible else "healthy",
+            ts=ts,
+            reason="incompatible lifecycle records are present" if incompatible else None,
+        ),
+        "freshness": _health_record(freshness_status, ts=ts, reason=freshness_reason),
+        # Populated by later transport/gateway layers. Unknown is deliberate: absence is not green.
+        "stream": _health_record("unknown", ts=ts, reason="stream transport has not reported yet"),
+        "gateway": _health_record(gateway_status, ts=gateway_ts, reason=gateway_reason),
+        "langfuse": _health_record(langfuse_status, ts=gateway_ts, reason=langfuse_reason),
+    }
+
+
 def snapshot(collab, home=None) -> dict:
     """The single poll call both readers use — a self-contained view of the run right now.
 
@@ -772,8 +888,6 @@ def snapshot(collab, home=None) -> dict:
     live = holder is not None
     status = read_status(collab)
     run_uid = (status or {}).get("run_uid") if live else None
-    b = board(collab)
-    counts = {s: len(rows) for s, rows in b.items()}
     ctrl = read_control(collab)
     evs = read_events(collab) if live else []  # one read feeds both the feed tail and the stats aggregation
     try:
@@ -788,9 +902,18 @@ def snapshot(collab, home=None) -> dict:
         requests = opreq.pending(collab)  # durable operator retry/adopt requests awaiting the driver
     except Exception:
         requests = []
+    b = board(collab, status=status, live=live, requests=requests)
+    counts = {s: len(rows) for s, rows in b.items()}
+    items = sorted((row for rows in b.values() for row in rows), key=lambda row: row["id"])
+    state_counts = {state.value: 0 for state in ops.OperationalState}
+    for item in items:
+        state_counts[item["operational_state"]] += 1
+    snapshot_ts = ap._now_utc()
+    health = _snapshot_health(collab, items=items, live=live, ts=snapshot_ts)
     return {
+        "schema_version": "1.0",
         "collab": str(collab),
-        "ts": ap._now_utc(),
+        "ts": snapshot_ts,
         # --- run-scoped: present ONLY while a driver holds a live lease ---
         "live": live,
         "run_uid": run_uid,
@@ -807,13 +930,42 @@ def snapshot(collab, home=None) -> dict:
         "stop": bool(ctrl.get("stop")),
         "requests": requests,
         "driver_running": live,
+        "items": items,
         "board": b,
         "counts": counts,
-        "open": open_handoffs(collab),
+        "state_counts": state_counts,
+        "health": health,
+        "freshness": health["freshness"],
+        "stream": health["stream"],
+        "open": open_handoffs(collab, b),
         "seats": _seat_models(home),
         "models_catalog": catalog,
         "rollup": rollup,
         "runs": list_runs(collab)[:25],  # newest ~25 for the history/compare UI (best-effort; kept cheap)
+    }
+
+
+def operational_detail(collab, hid: str, *, cursor: int | None = None, limit: int = 100) -> dict:
+    """Return one canonical item plus a bounded page of its immutable lifecycle history."""
+    found = next((item for item in hc.list_handoffs(collab) if str(item.get("id")) == str(hid)), None)
+    if found is None:
+        raise hc.HandoffNotFound(f"handoff {hid} not found")
+    status = read_status(collab)
+    live = driver_running(collab) is not None
+    request = opreq.get(collab, str(hid))
+    row = _row(collab, found, status=status, live=live, request=request)
+    page = ops.read_history(collab, str(hid), after=cursor, limit=limit)
+    return {
+        "schema_version": "1.0",
+        "item": row,
+        "history": {
+            "events": [event.to_dict() for event in page.events],
+            "next_cursor": page.next_cursor,
+            "rejected_count": page.rejected_count,
+            "schema_incompatible": page.schema_incompatible,
+        },
+        "source_evidence": row["source_evidence"],
+        "model_telemetry": read_model_telemetry(collab, hid=str(hid), limit=100),
     }
 
 

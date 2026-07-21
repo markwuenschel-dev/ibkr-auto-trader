@@ -82,11 +82,12 @@ class TestChatRejectClassifier:
 
 class TestAutoSelectsResponses:
     def _run(self, monkeypatch, capsys, argv, post, tmp_path, stdin="PROMPT"):
-        monkeypatch.setenv("OPENAI_API_KEY", "k")
+        monkeypatch.setenv("LITELLM_VIRTUAL_KEY", "sk-virtual")
+        monkeypatch.setenv("LITELLM_BASE_URL", "http://127.0.0.1:4000/v1")
         monkeypatch.setenv("SEAT_ENV_FILE", str(tmp_path / "no.env"))
         monkeypatch.setattr(seat.sys, "stdin", io.StringIO(stdin))
         monkeypatch.setattr(seat, "_post_json", post)
-        rc = seat.main(["--repo-root", str(tmp_path), "--key-env", "OPENAI_API_KEY", *argv])
+        rc = seat.main(["--repo-root", str(tmp_path), *argv])
         return rc, capsys.readouterr()
 
     def test_auto_luna_run_checks_never_hits_chat(self, monkeypatch, capsys, tmp_path):
@@ -272,13 +273,12 @@ class TestPromptCaching:
         assert replayed and "reasoning_content" not in replayed[0]
 
 
-class TestXaiStickyHeader:
-    """Mission 2.1: xAI's per-server cache needs the x-grok-conv-id sticky-routing header on
-    *.x.ai hosts, keyed identically to prompt_cache_key. Other providers must never see it."""
+class TestGatewayHeaders:
+    """Provider-specific sticky headers do not cross the LiteLLM boundary."""
 
-    def test_xai_host_gets_conv_id_header(self):
+    def test_provider_specific_conv_id_is_omitted(self):
         h = seat._request_headers("https://api.x.ai/v1/chat/completions", "k")
-        assert h["x-grok-conv-id"] == seat._PROMPT_CACHE_KEY
+        assert "x-grok-conv-id" not in h
         assert h["Authorization"] == "Bearer k"
 
     def test_non_xai_hosts_do_not(self):

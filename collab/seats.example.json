@@ -8,37 +8,27 @@
       "cmd": [
         "python",
         "tools/adapters/openai-repo-seat.py",
-        "--base",
-        "https://api.openai.com/v1",
         "--model",
         "gpt-5.6-terra",
-        "--key-env",
-        "OPENAI_API_KEY",
         "--repo-root",
         "."
       ]
     },
-    "opus-4.8": {
-      "provider": "anthropic",
-      "cmd": ["claude", "-p", "--model", "opus-4.8"],
-      "unset_env": ["ANTHROPIC_API_KEY"]
+    "gemini-3.5-flash": {
+      "provider": "google",
+      "cmd": ["python", "tools/adapters/openai-repo-seat.py", "--model", "gemini-3.5-flash", "--repo-root", "."]
     },
-    "sonnet-5": {
+    "anthropic-general": {
       "provider": "anthropic",
-      "cmd": ["claude", "-p", "--model", "sonnet-5"],
-      "unset_env": ["ANTHROPIC_API_KEY"]
+      "cmd": ["python", "tools/adapters/openai-repo-seat.py", "--model", "anthropic-general", "--repo-root", "."]
     },
     "gpt-5.6-luna": {
       "provider": "openai",
       "cmd": [
         "python",
         "tools/adapters/openai-repo-seat.py",
-        "--base",
-        "https://api.openai.com/v1",
         "--model",
         "gpt-5.6-luna",
-        "--key-env",
-        "OPENAI_API_KEY",
         "--repo-root",
         "."
       ]
@@ -48,12 +38,8 @@
       "cmd": [
         "python",
         "tools/adapters/openai-repo-seat.py",
-        "--base",
-        "https://api.x.ai/v1",
         "--model",
         "grok-4.5",
-        "--key-env",
-        "XAI_API_KEY",
         "--repo-root",
         "."
       ]
@@ -82,7 +68,7 @@
       "backend": "cli",
       "role": "breaker",
       "access": "read_test",
-      "model": "opus-4.8",
+      "model": "gemini-3.5-flash",
       "system": "You are the adversarial BREAKER. Inspect the repository and allowed tests, but never edit source. Report only concrete, reproducible findings.",
       "timeout": 900
     },
@@ -90,7 +76,7 @@
       "backend": "cli",
       "role": "verifier",
       "access": "read_test",
-      "model": "sonnet-5",
+      "model": "anthropic-general",
       "system": "You are the independent VERIFIER. Inspect the repository and allowed tests, but never edit source. Confirm only evidence-backed findings.",
       "timeout": 900
     }

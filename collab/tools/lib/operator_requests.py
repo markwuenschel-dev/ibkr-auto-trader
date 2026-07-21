@@ -24,6 +24,7 @@ _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 import collab_common as cc  # noqa: E402
+import operational_state as ops  # noqa: E402
 
 # Request actions (ADR-0003): re-drive a paused handoff (fresh builder attempt, new budget epoch), or adopt
 # the current on-disk source as the candidate (no builder attempt — the operator vouches for it; the
@@ -84,6 +85,17 @@ def write(
     p = _path(collab, hid)
     p.parent.mkdir(parents=True, exist_ok=True)
     cc.safe_write(p, json.dumps(rec, separators=(",", ":")) + "\n")
+    ops.record_transition(
+        collab,
+        hid,
+        ops.OperationalState.RETRYING if action == RETRY else ops.OperationalState.AWAITING,
+        reason=f"operator_{action}_requested",
+        source="operator_request",
+        actor=by,
+        event_ts=rec["requested_ts"],
+        conditions=(f"request:{action}",),
+        required_action="start_driver",
+    )
     return rec
 
 

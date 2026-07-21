@@ -49,6 +49,10 @@ The core design keeps the highest-risk concerns explicit and separate:
 | [`docs/design/`](./docs/design/) | System design, ADRs, domain glossary, and the paper-trading roadmap. |
 | [`handoffs/`](./handoffs/) | Reviewable work slices and evidence of the builder → reviewer → verification workflow. |
 
+The collab subsystem also includes a local Python mission-control dashboard. Its canonical operational
+state/history, resumable live transport, separate health dimensions, and LiteLLM/Langfuse routing contract
+are documented in [`docs/design/dashboard-operational-state.md`](./docs/design/dashboard-operational-state.md).
+
 ## Quick start
 
 This project targets **Python 3.14+** and uses [uv](https://docs.astral.sh/uv/) for Python dependency management.

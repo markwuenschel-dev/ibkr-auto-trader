@@ -174,16 +174,38 @@ def render(snap: dict, selected: int, confirm: str | None, notice: str | None) -
     counts = snap.get("counts") or {}
     csum = "  ".join(f"{s} {counts.get(s, 0)}" for s in ("pending", "claimed", "done", "archive"))
     L.append(_c("BOARD", "bold") + f"   {csum}")
+    state_counts = snap.get("state_counts") or {}
+    active_counts = "  ".join(f"{state} {count}" for state, count in state_counts.items() if count)
+    L.append(_c("  operational: ", "dim") + (active_counts or "none"))
     openh = snap.get("open") or []
     if openh:
         for i, r in enumerate(openh):
             sel = i == selected
             cur = _c(">", "bold", "green") if sel else " "
             route = f"{r.get('from') or '?'}→{r.get('to') or '?'}"
-            line = f"  {cur} {r['id']:<5} {r['state']:<8} {route:<22} {_fmt_age(r.get('age_s')):>4}"
+            opstate = r.get("operational_state") or r["state"]
+            line = f"  {cur} {r['id']:<5} {opstate:<10} {route:<22} {_fmt_age(r.get('age_s')):>4}"
             L.append(_c(line, "inv") if sel else line)
+            detail = (
+                f"      {r.get('state_reason') or 'reason unknown'} · "
+                f"owner {r.get('owner') or 'unknown'}"
+            )
+            if r.get("required_action"):
+                detail += f" · ACTION {r['required_action']}"
+            if r.get("conditions"):
+                detail += f" · {','.join(r['conditions'])}"
+            L.append(_c(detail, "yellow" if r.get("conflicts") else "dim"))
     else:
         L.append(_c("  (no open handoffs)", "dim"))
+    L.append("")
+
+    # Separate health dimensions: never collapse unknown/degraded sources into one green light.
+    L.append(_c("HEALTH", "bold"))
+    for name, record in (snap.get("health") or {}).items():
+        status = (record or {}).get("status") or "unknown"
+        color = "green" if status == "healthy" else "yellow" if status in ("degraded", "unknown") else "red"
+        reason = (record or {}).get("reason")
+        L.append(f"  {name:<22} {_c(status.upper(), color)}" + (f" · {reason}" if reason else ""))
     L.append("")
 
     # event feed

@@ -41,6 +41,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import collab_common as cc
+import operational_state as _ops
 import transitions as _transitions
 
 STATES = ("pending", "claimed", "done", "archive")
@@ -303,6 +304,14 @@ def create(
                 break  # [C5] the reservation already committed -> do NOT retry
             continue  # broken before any commit -> safe to retry
 
+    _ops.record_transition(
+        collab,
+        committed["id"],
+        _ops.OperationalState.QUEUED,
+        reason="created",
+        source="handoff_directory",
+        actor=str(from_),
+    )
     return committed
 
 
@@ -400,7 +409,11 @@ def _transition(collab, hid, action) -> dict:
 
 
 def claim(collab, hid) -> dict:
-    return _transition(collab, hid, "claim")
+    out = _transition(collab, hid, "claim")
+    _ops.record_transition(
+        collab, str(hid), _ops.OperationalState.CLAIMED, reason="claimed", source="handoff_directory"
+    )
+    return out
 
 
 def reclaim(collab, hid) -> dict:
@@ -415,7 +428,16 @@ def reclaim(collab, hid) -> dict:
     This is a mechanical move with NO policy: it does not know whether the handoff is genuinely orphaned
     or deliberately parked for a human. The caller owns that judgement (``autopilot._reclaim_orphans``).
     """
-    return _transition(collab, hid, "reclaim")
+    out = _transition(collab, hid, "reclaim")
+    _ops.record_transition(
+        collab,
+        str(hid),
+        _ops.OperationalState.QUEUED,
+        reason="orphan_reclaimed",
+        source="handoff_directory",
+        actor="autopilot",
+    )
+    return out
 
 
 def done(collab, hid, *, kind, actor, reason=None, receipt=None, candidate_id=None) -> dict:
@@ -441,11 +463,29 @@ def done(collab, hid, *, kind, actor, reason=None, receipt=None, candidate_id=No
     _transitions.write(
         collab, hid, kind=kind, actor=actor, reason=reason, receipt=receipt, candidate_id=candidate_id
     )
+    _ops.record_transition(
+        collab,
+        str(hid),
+        _ops.OperationalState.COMPLETED,
+        reason=str(reason or kind),
+        source="handoff_directory",
+        actor=str(actor),
+        correlation_id=str(candidate_id) if candidate_id else None,
+    )
     return out
 
 
 def archive(collab, hid) -> dict:
-    return _transition(collab, hid, "archive")
+    out = _transition(collab, hid, "archive")
+    _ops.record_transition(
+        collab,
+        str(hid),
+        _ops.OperationalState.COMPLETED,
+        reason="archived",
+        source="handoff_directory",
+        conditions=("archived",),
+    )
+    return out
 
 
 # --------------------------------------------------------------------------- #
