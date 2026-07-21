@@ -35,14 +35,9 @@ handoffs/.idlock/
 # one-off backup snapshot
 _autopilot-backup-*/
 
-# harness state
-.claude/*
-# ...except the enforcement gates. These are not local preferences — they are the repo's guardrails
-# (see CLAUDE.md, "Incident 2026-07-15"). A gate that does not survive a clone is not a gate.
-!.claude/settings.json
-!.claude/hooks/
-.claude/hooks/*
-!.claude/hooks/*.py
+# harness state — untracked per owner request (2026-07-21): kept on local disk, out of the repo.
+.claude/
+CLAUDE.md
 
 # local scratch architecture notes (not the tracked design docs under docs/)
 ARCHITECTURE.md
