@@ -15,6 +15,7 @@ import pytest
 _LIB = Path(__file__).resolve().parent.parent / "tools" / "lib"
 sys.path.insert(0, str(_LIB))
 
+import autopilot as ap  # noqa: E402
 import collab_common as cc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
@@ -59,6 +60,38 @@ class TestRequiredLanes:
 
 
 class TestRunLane:
+    def test_breaker_and_verifier_receive_active_run_correlation(self, tmp_path, monkeypatch):
+        collab = str(tmp_path / "c")
+        _handoff(collab)
+        ap._write_status(collab, run_uid="run-9")
+        captured = []
+
+        def fake(cmd, prompt, *, timeout, **kwargs):
+            captured.append(dict(kwargs["env_add"]))
+            return "FINDING: x -> trigger" if cmd[0] == "fake-b" else "VERDICT: REFUTED"
+
+        monkeypatch.setattr(ap, "_cli_runner", fake)
+
+        lanes.run_lane(
+            collab,
+            "001",
+            "path-pointer-safety",
+            seats=_seats(["b", "v"]),
+            breaker_seat="b",
+            verifier_seat="v",
+            builder_seat="builder",
+            runner=ap._cli_runner,
+            candidate_id="candidate-7",
+        )
+        assert [item["COLLAB_SEAT"] for item in captured] == ["b", "v"]
+        for item in captured:
+            assert item["COLLAB_RUN_UID"] == "run-9"
+            assert item["COLLAB_HANDOFF_ID"] == "001"
+            assert item["COLLAB_CANDIDATE_ID"] == "candidate-7"
+            assert item["COLLAB_EXECUTION_ID"]
+            assert item["COLLAB_ATTEMPT_NUMBER"] == "1"
+            assert item["COLLAB_MODEL_EVENT_LOG"].endswith("model-events.jsonl")
+
     def test_clean_lane_when_breaker_finds_nothing(self, tmp_path):
         collab = str(tmp_path / "c")
         _handoff(collab)

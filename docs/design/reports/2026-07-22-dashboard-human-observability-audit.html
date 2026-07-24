@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dashboard human-observability integrity audit — 2026-07-22</title>
+  <style>
+    :root { color-scheme:light; --ink:#172033; --muted:#5b6475; --paper:#f6f8fc; --card:#fff; --line:#d9e0ec; --red:#b42318; --amber:#9a6700; --green:#067647; --blue:#175cd3; --violet:#6941c6; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--paper); color:var(--ink); font:15px/1.55 Inter,Segoe UI,Arial,sans-serif; }
+    main { max-width:1180px; margin:auto; padding:42px 24px 72px; } h1 { margin:0 0 6px; font-size:32px; line-height:1.15; } h2 { margin:40px 0 12px; font-size:22px; } h3 { margin:0 0 8px; font-size:17px; } p { margin:8px 0; } code { font:12px/1.4 ui-monospace,Consolas,monospace; background:#eef2f7; padding:1px 4px; border-radius:4px; overflow-wrap:anywhere; }
+    .muted,.subtitle { color:var(--muted); } .card { margin:12px 0; padding:19px; background:var(--card); border:1px solid var(--line); border-radius:12px; box-shadow:0 2px 5px rgb(23 32 51 / 4%); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; } .metric { padding:14px; border-radius:10px; background:#eef3fa; } .metric b { display:block; font-size:25px; }
+    .grade { color:var(--red); font-size:42px; font-weight:800; line-height:1; } .tag { display:inline-block; margin:2px 4px 2px 0; padding:2px 8px; border-radius:99px; background:#eaf1ff; color:var(--blue); font-size:12px; font-weight:650; }
+    .high { background:#ffebe9; color:var(--red); } .warn { background:#fff4e5; color:var(--amber); } .ok { background:#e8f7ee; color:var(--green); } .violet { background:#f1ecff; color:var(--violet); }
+    table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); } th,td { padding:10px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line); } th { background:#eef3fa; font-size:13px; } tr:last-child td { border-bottom:0; }
+    ul,ol { margin:8px 0; padding-left:22px; } .callout { padding:10px 14px; border-left:4px solid var(--amber); background:#fff9ed; } .score { font-weight:750; }
+    @media (max-width:700px) { main { padding:28px 15px 50px; } table { font-size:13px; } th,td { padding:8px; } }
+  </style>
+</head>
+<body><main>
+  <header>
+    <h1>Dashboard human-observability integrity audit</h1>
+    <p class="subtitle">ibkr-auto-trader · fixed run <code>20260721T234615Z-140256</code> · 2026-07-22</p>
+  </header>
+
+  <section><h2>1. Executive summary</h2>
+    <div class="card">
+      <p><strong>Outcome:</strong> the reported “only Gemini reached Langfuse” symptom is contradicted by current read-only runtime evidence. During the observed run, Gemini was never invoked. GPT and Grok produced 28 LiteLLM spend rows and 28 Langfuse generations; all 17 app-recorded request IDs joined to Langfuse. Haiku used a direct CLI path and timed out before any gateway record.</p>
+      <p>The confirmed product defect is worse than a missing trace: the app, LiteLLM, Langfuse, archive, and UI do not share the actual run UID. The dashboard therefore cannot reconcile evidence it already has. It also mislabels an infrastructure-blocked stop as <code>capped</code>, archives an incomplete evidence set, and renders high-level “round” prose that hides model-call and verification work.</p>
+      <div class="callout"><strong>Truth boundary:</strong> no prompt or output content was inspected. Langfuse was queried with a bounded time range and metadata/model/usage fields only.</div>
+    </div>
+    <div class="grid">
+      <div class="metric"><b>28 / 28</b><span>LiteLLM calls with Langfuse generations</span></div>
+      <div class="metric"><b>17 / 17</b><span>app request IDs joined to Langfuse</span></div>
+      <div class="metric"><b>0</b><span>Gemini or Anthropic gateway calls in the run window</span></div>
+      <div class="metric"><b>8</b><span>retained high-level events; no model lifecycle events</span></div>
+    </div>
+  </section>
+
+  <section><h2>2. Overall grade</h2><div class="card grid">
+    <div><div class="grade">D</div><p><strong>Operational data exists, but the operator cannot reconstruct the truth.</strong></p></div>
+    <div><p><strong>Why not F:</strong> run identity, high-level events, model attempts, gateway spend, and Langfuse observations all exist somewhere, and the baseline test suite is green.</p><p><strong>Why not C:</strong> the canonical joins, lifecycle states, terminal decisions, evidence provenance, dispositions, and durable replay contract are absent. Current green health can mean only “local append succeeded.”</p></div>
+  </div></section>
+
+  <section><h2>3. Health scorecards</h2><table><thead><tr><th>Category</th><th>Health</th><th>Evidence</th><th>Interpretation</th></tr></thead><tbody>
+    <tr><td>Model/gateway correlation</td><td><span class="tag high">1 / 5</span></td><td><code>autopilot.py:882,1347-1362</code>; 17 app attempts use the repo slug, not the run UID.</td><td>Successful calls cannot be attributed to the archived run by canonical identity.</td></tr>
+    <tr><td>Telemetry delivery</td><td><span class="tag warn">3 / 5</span></td><td>28 LiteLLM spend rows and 28 Langfuse generations; 17/17 request-ID join.</td><td>Export worked for gateway calls, but the app neither verifies nor displays it.</td></tr>
+    <tr><td>Execution roster</td><td><span class="tag high">1 / 5</span></td><td>GPT/Grok observed; Haiku direct timeout; Gemini planned but never invoked.</td><td>Expected models can disappear behind one aggregate phase.</td></tr>
+    <tr><td>Run decision truth</td><td><span class="tag high">1 / 5</span></td><td><code>phase_final=capped</code> conflicts with <code>infrastructure_blocked</code> and work attempts 1/3.</td><td>The UI cannot explain why the third work attempt did not start.</td></tr>
+    <tr><td>Durable replay</td><td><span class="tag high">1 / 5</span></td><td>Archive has only <code>run.json</code>, <code>status.json</code>, <code>events.jsonl</code>; detail has three sections.</td><td>Budget, attempts, telemetry, evaluations, and dispositions are outside replay.</td></tr>
+    <tr><td>Quality/disposition evidence</td><td><span class="tag high">1 / 5</span></td><td>Assessment artifacts exist separately but are not part of archived run detail.</td><td>Acceptance/rejection claims cannot be traced from the dashboard.</td></tr>
+    <tr><td>Verification baseline</td><td><span class="tag ok">5 / 5</span></td><td>190 core passed; Ruff passed; Pyright 0 errors; 723 collab passed, 6 skipped.</td><td>The starting checkout is a clean Python baseline.</td></tr>
+  </tbody></table></section>
+
+  <section><h2>4. Ranked remediation candidates</h2><table><thead><tr><th>ID</th><th>Candidate</th><th>Priority</th><th>Status</th></tr></thead><tbody>
+    <tr><td><strong>OBS-001</strong></td><td>Canonical model-attempt identity and gateway/Langfuse reconciliation</td><td class="score">18</td><td><span class="tag high">selected first</span></td></tr>
+    <tr><td><strong>OBS-002</strong></td><td>Honest run plan, work-unit accounting, and terminal decision record</td><td class="score">15</td><td><span class="tag warn">queued</span></td></tr>
+    <tr><td><strong>OBS-003</strong></td><td>Durable complete run evidence and replay contract</td><td class="score">15</td><td><span class="tag warn">queued</span></td></tr>
+    <tr><td><strong>OBS-004</strong></td><td>Per-model live presence and coordinated operator views</td><td class="score">13</td><td><span class="tag warn">queued</span></td></tr>
+    <tr><td><strong>OBS-005</strong></td><td>Candidate lineage, requirement traceability, dispositions, and quality</td><td class="score">9</td><td><span class="tag warn">queued</span></td></tr>
+    <tr><td><strong>OBS-006</strong></td><td>Scale, accessibility, interruption, and operator usability proof</td><td class="score">9</td><td><span class="tag warn">queued</span></td></tr>
+  </tbody></table><p class="muted">Priority = severity + confidence + leverage + locality + testability − blast radius − regression risk − human-decision risk. Full component scores and gates are in the remediation ledger.</p></section>
+
+  <section><h2>5. Confirmed defects</h2>
+    <article class="card"><h3>OBS-001 — the true run UID is lost before transport</h3><p><span class="tag high">correlation</span><span class="tag">runtime proven</span></p><p><code>autopilot.py</code> assigns the repository slug to <code>rid</code>, later mints <code>run_uid</code>, but dispatch exports <code>COLLAB_RUN_UID=rid</code>. Lane dispatch exports no correlation environment. The exact run produced 10 GPT and 7 Grok app records under <code>ibkr-auto-trader</code>; all 17 joined to Langfuse, while none carried the archive UID.</p><p><strong>Invariant:</strong> an attempt must be visible and joinable by immutable run/request/seat/candidate identifiers before transport begins.</p></article>
+    <article class="card"><h3>OBS-002 — terminal and work-unit language is false</h3><p><span class="tag high">decision truth</span></p><p>The archive reports two “rounds” and phase <code>capped</code>, while its final status says <code>infrastructure_blocked</code> and the work-attempt budget is 1/3. <code>run_history.py:147-148</code> defines rounds/calls as actor-turn completions, not all model invocations.</p><p><strong>Invariant:</strong> maximum work attempts, actor turns, verification calls, provider attempts, and terminal outcomes remain distinct typed facts.</p></article>
+    <article class="card"><h3>OBS-003/004 — lifecycle and replay evidence is incomplete</h3><p><span class="tag high">history</span><span class="tag high">live UI</span></p><p><code>llm_gateway.py</code> appends an attempt only in <code>finally</code>; slow or hung calls are invisible before completion. <code>dashboard_core.run_detail()</code> returns only summary/events/lanes, and the observed archive has eight generic events.</p><p><strong>Invariant:</strong> queued/started/gateway-accepted/progress/terminal/telemetry states are append-only, durable, replayable, and rendered from the same canonical records.</p></article>
+  </section>
+
+  <section><h2>6. Evidence ledger</h2><table><thead><tr><th>Classification</th><th>Finding</th><th>Disposition</th></tr></thead><tbody>
+    <tr><td><span class="tag ok">confirmed bug</span></td><td>Repo slug is sent as run UID; lane calls omit correlation; UI/archive cannot join attempts.</td><td>OBS-001</td></tr>
+    <tr><td><span class="tag ok">confirmed bug</span></td><td>Haiku runtime config bypasses the canonical gateway and times out.</td><td>OBS-001 configuration gate</td></tr>
+    <tr><td><span class="tag ok">confirmed bug</span></td><td>Infrastructure-blocked is flattened to capped; work attempt and actor turn are called rounds.</td><td>OBS-002</td></tr>
+    <tr><td><span class="tag violet">ruled out</span></td><td>“GPT/Grok were absent from Langfuse.” All 17 app request IDs were found; 28 total generations exist.</td><td>Replace perception with retained reconciliation.</td></tr>
+    <tr><td><span class="tag violet">ruled out</span></td><td>“Gemini ran in this observed run.” No app attempt, LiteLLM spend, or Langfuse generation exists in the fixed window.</td><td>Roster must show planned-but-not-invoked.</td></tr>
+    <tr><td><span class="tag warn">plausible lead</span></td><td>Eleven UUID-session gateway calls may reflect adapter-internal lifecycle or concurrent app activity.</td><td>Do not attribute until a unique run UID and gateway request ID prove it.</td></tr>
+    <tr><td><span class="tag warn">requirements discovery</span></td><td>Existing operational-state append/reduce contracts may be reusable for immutable model lifecycle records.</td><td>Evaluate during OBS-001 design; avoid parallel event truth.</td></tr>
+    <tr><td><span class="tag">unrelated debt</span></td><td>Broad dashboard styling and generic collab lint cleanup.</td><td>Exclude from the candidate loop.</td></tr>
+  </tbody></table></section>
+
+  <section><h2>7. Cross-category duplicate groups</h2><div class="card"><p><strong>DG-001 — identity loss:</strong> missing live cards, unknown Langfuse health, unjoinable history, and incomplete roster reconciliation all share the run/request correlation seam; they are OBS-001, not four independent label bugs.</p><p><strong>DG-002 — round ambiguity:</strong> 2/3 display, capped phase, sparse stop prose, and misleading averages all share untyped work-unit/decision records; they are OBS-002.</p><p><strong>DG-003 — evidence outside replay:</strong> missing quality, rejection rationale, telemetry proof, and requirements coverage share archive ownership; schema content is OBS-003/005, not four bespoke UI stores.</p></div></section>
+
+  <section><h2>8. Human-decision blockers</h2><div class="card"><p>No blocker prevents OBS-001 from preserving the already specified run/request/model evidence additively. A later policy decision is required before automatic candidate acceptance can use quality thresholds: weighting, critical requirements, security-sensitive triggers, and the human override boundary must remain owner-controlled.</p></div></section>
+
+  <section><h2>9. Quick wins</h2><div class="card"><p>Pass the minted <code>run_uid</code> to every seat and lane; create the model card from a pre-transport event; stop calling a local telemetry append “gateway healthy”; and render the existing <code>last_error</code> as the terminal explanation. These are valuable only as slices of OBS-001/002 with durable tests—not standalone UI patches.</p></div></section>
+
+  <section><h2>10. High-leverage deep work</h2><div class="card"><p>The durable run manifest and candidate evidence graph are the high-leverage work. Once the manifest owns roster, attempts, decisions, candidates, validations, telemetry joins, and provenance, live and historical views can share one truthful projection and the UI no longer needs to infer from mutable status.</p></div></section>
+
+  <section><h2>11. Unsafe-to-auto-execute work</h2><div class="card"><p>Do not invent acceptance weights, auto-approval authority, trace-retention privacy policy, or destructive archive pruning. Do not copy Langfuse secrets into the application merely to make joins convenient; LiteLLM remains the telemetry owner, and the app should consume a bounded evidence contract.</p></div></section>
+
+  <section><h2>12. Verification readiness</h2><table><thead><tr><th>Oracle</th><th>Current result</th><th>Readiness</th></tr></thead><tbody>
+    <tr><td><code>scripts/repro_dashboard_observability.py</code></td><td>Five observability contracts false; deterministic exit 2</td><td><span class="tag ok">red-capable</span></td></tr>
+    <tr><td>LiteLLM spend aggregation</td><td>28 successful calls, model/session/tag groups retained</td><td><span class="tag ok">read-only live proof</span></td></tr>
+    <tr><td>Langfuse Observations API v2</td><td>28 generations; 17/17 local request IDs joined</td><td><span class="tag ok">read-only live proof</span></td></tr>
+    <tr><td><code>scripts/verify.py --python-only --fail-fast</code></td><td>190 core + 723 collab passed; Ruff/Pyright green; dashboard omitted</td><td><span class="tag ok">clean baseline</span></td></tr>
+    <tr><td>Browser/operator proof</td><td>Not yet executed against the new contract</td><td><span class="tag high">required before completion</span></td></tr>
+  </tbody></table></section>
+
+  <section><h2>13. Recommended queue</h2><ol>
+    <li><strong>OBS-001:</strong> one identity/lifecycle/reconciliation contract from orchestration through telemetry.</li>
+    <li><strong>OBS-002:</strong> immutable plan and typed round/work/stop decisions.</li>
+    <li><strong>OBS-003:</strong> seal all evidence into a replayable run manifest.</li>
+    <li><strong>OBS-004:</strong> render coordinated operator/model/validation/diagnostic views from canonical projections.</li>
+    <li><strong>OBS-005:</strong> complete candidate lineage, quality, requirements, disagreement, and dispositions.</li>
+    <li><strong>OBS-006:</strong> performance, accessibility, reconnect, failure injection, real four-model run, and formal operator proof.</li>
+  </ol><div class="callout"><strong>Delivery rule:</strong> one candidate at a time; each must go red, land the smallest connected fix, pass targeted plus repository verification, and append durable evidence before the queue advances.</div></section>
+</main></body></html>

@@ -27,7 +27,9 @@ import autopilot as ap  # noqa: E402
 import collab_common as cc  # noqa: E402
 import dashboard_core as dc  # noqa: E402
 import handoff_core as hc  # noqa: E402
+import model_observability as mo  # noqa: E402
 import run_history as rh  # noqa: E402
+import run_manifest as rm  # noqa: E402
 
 import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
 
@@ -163,6 +165,83 @@ class TestArchiveAndPrune:
         assert doc["rounds_total"] == 3 and doc["run_uid"] == "20260709T000017Z-4242"
         # the archived events copy is a faithful copy (same line count as the live log).
         assert (root / "events.jsonl").read_text("utf-8") == log.read_text("utf-8")
+        operator_summary = json.loads((root / "operator-summary.json").read_text("utf-8"))
+        assert operator_summary["run_uid"] == "20260709T000017Z-4242"
+        assert operator_summary["truth_status"] == "incomplete"
+        manifest = json.loads((root / "manifest.json").read_text("utf-8"))
+        assert manifest["state"] == "partial"
+        assert "missing:run-plan.json" in manifest["gaps"]
+        assert rm.verify(root)["valid"] is True
+        archive_health = rh.read_archive_health(collab)
+        assert archive_health["status"] == "unavailable"
+        assert archive_health["run_uid"] == "20260709T000017Z-4242"
+        assert "manifest_state:partial" in archive_health["failures"]
+
+    def test_archive_retains_run_scoped_persistence_failures_in_summary_and_replay(
+        self, tmp_path
+    ):
+        collab = str(tmp_path / "c")
+        run_uid = "20260722T120000Z-42"
+        autopilot_dir = Path(collab) / "autopilot"
+        autopilot_dir.mkdir(parents=True)
+        ap._write_status(collab, started_ts="2026-07-22T12:00:00Z", phase="capped", run_uid=run_uid)
+        health_records = {
+            "model-observability-health.json": {
+                "schema_version": "1.0",
+                "record_type": "model_observability_health",
+                "run_uid": run_uid,
+                "status": "unavailable",
+                "updated_ts": "2026-07-22T12:00:01Z",
+                "reason": "OSError: model-attempt evidence append failed",
+            },
+            "model-calls-health.json": {
+                "schema_version": "1.0",
+                "run_uid": run_uid,
+                "status": "unavailable",
+                "updated_ts": "2026-07-22T12:00:02Z",
+                "reason": "PermissionError: telemetry append failed",
+                "telemetry_failures": 1,
+            },
+            "run-events-health.json": {
+                "schema_version": "1.0",
+                "record_type": "run_evidence_health",
+                "run_uid": run_uid,
+                "status": "unavailable",
+                "updated_ts": "2026-07-22T12:00:03Z",
+                "reason": "OSError: structured run-evidence append failed",
+            },
+        }
+        for name, record in health_records.items():
+            (autopilot_dir / name).write_text(json.dumps(record), encoding="utf-8")
+
+        root = rh.archive_run(collab, run_uid)
+        assert root is not None
+        assert all((root / name).exists() for name in health_records)
+        summary = json.loads((root / "operator-summary.json").read_text("utf-8"))
+        assert summary["truth_status"] == "incomplete"
+        assert any(
+            "model attempt ledger persistence unavailable" in gap
+            for gap in summary["missing_evidence"]
+        )
+        assert any(
+            "redacted call ledger persistence unavailable" in gap
+            for gap in summary["missing_evidence"]
+        )
+        assert any(
+            "structured run-evidence ledger persistence unavailable" in gap
+            for gap in summary["missing_evidence"]
+        )
+
+        detail = dc.run_detail(collab, run_uid)
+        failures = detail["evidence_health"]["failures"]
+        assert any("model attempt ledger persistence unavailable" in gap for gap in failures)
+        assert any("redacted call ledger persistence unavailable" in gap for gap in failures)
+        assert any(
+            "structured run-evidence ledger persistence unavailable" in gap
+            for gap in failures
+        )
+        categories = {item["category"] for item in detail["manifest"]["artifacts"]}
+        assert "persistence_health" in categories
 
     def test_prune_keeps_newest_n(self, tmp_path):
         collab = str(tmp_path / "c")
@@ -247,6 +326,55 @@ class TestPathSafety:
         assert detail["summary"]["rounds_total"] == 1
         assert detail["lanes"] == {"confirmed": 2, "refuted": 0}
         assert len(detail["events"]) == 1  # the torn line was dropped
+
+    def test_run_detail_replays_archived_model_activity(self, tmp_path):
+        collab = str(tmp_path / "c")
+        run_uid = "20260709T000000Z-1"
+        run_dir = _write_run(collab, run_uid, {"run_uid": run_uid, "rounds_total": 1})
+        mo.append_event(
+            run_dir / "model-events.jsonl",
+            mo.ModelAttemptEvent(
+                event_id="event-1",
+                attempt_id="attempt-1",
+                request_id="request-1",
+                run_uid=run_uid,
+                seat="builder",
+                requested_model="gpt-5.6-luna",
+                state="completed",
+                event_ts="2026-07-09T00:00:02Z",
+                attempt_number=1,
+                source="gateway_client",
+            ),
+        )
+        detail = dc.run_detail(collab, run_uid)
+        assert detail["attempts"][0]["request_id"] == "request-1"
+        assert detail["attempts"][0]["state"] == "completed"
+
+    def test_run_detail_can_return_an_explicit_bounded_browser_window(self, tmp_path):
+        collab = str(tmp_path / "c")
+        run_uid = "20260709T000000Z-1"
+        run_dir = _write_run(collab, run_uid, {"run_uid": run_uid, "rounds_total": 1})
+        for index in range(550):
+            mo.append_event(
+                run_dir / "model-events.jsonl",
+                mo.ModelAttemptEvent(
+                    event_id=f"event-{index}",
+                    attempt_id=f"attempt-{index}",
+                    request_id=f"request-{index}",
+                    run_uid=run_uid,
+                    seat="builder",
+                    requested_model="gpt-5.6-luna",
+                    state="completed",
+                    event_ts=f"2026-07-09T00:{index % 60:02d}:00Z",
+                    attempt_number=1,
+                    source="gateway_client",
+                ),
+            )
+
+        detail = dc.run_detail(collab, run_uid, windowed=True)
+        assert len(detail["attempts"]) == 500
+        assert detail["collection_windows"]["model_activity"]["total"] == 550
+        assert detail["collection_windows"]["model_activity"]["truncated"] is True
 
     def test_compare_runs_valid_ids_return_deltas(self, tmp_path):
         collab = str(tmp_path / "c")
@@ -401,6 +529,10 @@ class TestDriverArchive:
         hist = Path(collab) / "autopilot" / "history" / run_uid
         assert hist.is_dir(), f"expected archive at {hist}"
         assert (hist / "run.json").exists() and (hist / "events.jsonl").exists()
+        assert (hist / "model-events.jsonl").exists()
+        archived_model_events = mo.read_events(hist / "model-events.jsonl")
+        assert archived_model_events
+        assert {event.run_uid for event in archived_model_events} == {run_uid}
         run_doc = json.loads((hist / "run.json").read_text("utf-8"))
         for key in ("run_uid", "rounds_total", "calls", "seat_calls", "lanes", "signoff", "handoffs_touched"):
             assert key in run_doc

@@ -214,7 +214,7 @@ class TestLoopPolicy:
             # executors are the claude CLI, so dispatch is told apart by MODEL, not seat name.
             if "gemini-3.5-flash" in argv:  # breaker always finds the persistent defect
                 return "FINDING: F1 | src/gateway.py:233 | tz-aware/naive TypeError | gates the snapshot read"
-            if "anthropic-general" in argv:  # verifier confirms it
+            if "haiku-4.5" in argv:  # verifier confirms it
                 return "VERDICT: CONFIRMED F1 | src/gateway.py:233 skew"
             return "ok"
 

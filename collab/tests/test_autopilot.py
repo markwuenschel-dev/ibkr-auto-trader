@@ -20,9 +20,14 @@ _LIB = Path(__file__).resolve().parent.parent / "tools" / "lib"
 sys.path.insert(0, str(_LIB))
 
 import autopilot as ap  # noqa: E402
+import candidate_disposition as cd  # noqa: E402
+import candidate_evidence as ce  # noqa: E402
 import collab_common as cc  # noqa: E402
 import escalation  # noqa: E402
 import handoff_core as hc  # noqa: E402
+import model_observability as mo  # noqa: E402
+import quality_evidence as qe  # noqa: E402
+import round_decision as rd  # noqa: E402
 import run_budget as rb  # noqa: E402
 
 import conftest  # noqa: E402  — shared v2 assurance catalog (ADR-0005)
@@ -58,7 +63,18 @@ def _pycmd(code: str) -> list:
 # --------------------------------------------------------------------------- #
 
 
-def _dispatch(collab, seat, *, seats, runner, hid="001", transcript="please build", claim=True, attempt=1):
+def _dispatch(
+    collab,
+    seat,
+    *,
+    seats,
+    runner,
+    hid="001",
+    transcript="please build",
+    claim=True,
+    attempt=1,
+    run_uid="run-test",
+):
     """Run ONE dispatched turn against the already-claimed handoff ``hid`` (claiming it first by default).
     Returns the raw stdout (or None on a backend failure) from :func:`autopilot._dispatch_seat`."""
     if claim and hc.state_of(collab, hid) == "pending":
@@ -71,13 +87,46 @@ def _dispatch(collab, seat, *, seats, runner, hid="001", transcript="please buil
         hid=hid,
         transcript=transcript,
         log=ap._log_default(collab),
-        rid=ap._run_id(collab),
+        rid=run_uid,
         attempt=attempt,
         span_role="builder",
     )
 
 
 class TestDispatch:
+    def test_turn_exports_actual_run_and_execution_correlation(self, tmp_path, monkeypatch):
+        collab = str(tmp_path / "c")
+        hc.create(collab, to="builder", from_="reviewer", title="x", body="build")
+        captured = {}
+
+        def fake(cmd, prompt, *, timeout, **kwargs):
+            captured.update(kwargs["env_add"])
+            return "done"
+
+        monkeypatch.setattr(ap, "_cli_runner", fake)
+
+        _dispatch(
+            collab,
+            "builder",
+            seats={
+                "builder": {
+                    "backend": "cli",
+                    "cmd": ["fake-builder"],
+                    "system": "build",
+                    "model": "gpt-5.6-luna",
+                }
+            },
+            runner=ap._cli_runner,
+            run_uid="20260722T120000Z-77",
+        )
+        assert captured["COLLAB_RUN_UID"] == "20260722T120000Z-77"
+        assert captured["COLLAB_HANDOFF_ID"] == "001"
+        assert captured["COLLAB_SEAT"] == "builder"
+        assert captured["COLLAB_MODEL_ALIAS"] == "gpt-5.6-luna"
+        assert captured["COLLAB_EXECUTION_ID"]
+        assert captured["COLLAB_ATTEMPT_NUMBER"] == "1"
+        assert captured["COLLAB_MODEL_EVENT_LOG"].endswith("model-events.jsonl")
+
     def test_turn_answers_and_feeds_the_seat_prompt(self, tmp_path):
         # ADR-0001: a turn is conversation, not a handoff. The seat gets system+transcript, its reply is
         # stored as an inert artifact, and NO new board handoff is minted — the single claimed handoff
@@ -550,6 +599,18 @@ class TestAssuranceActivationFailsClosed:
         assert hc.state_of(collab, "001") != "done"  # never closes on an unvalidated catalog
         # ...and no ledger was written by the legacy fan-out
         assert not list((Path(collab) / "autopilot" / "verification").rglob("*.ledger.json"))
+        decision = rd.read_decisions(collab)[-1]
+        assert decision["decision"] == "stop"
+        assert decision["reason"] == "required_dependency_unavailable"
+        status = json.loads((Path(collab) / "autopilot" / "status.json").read_text("utf-8"))
+        archived = (
+            Path(collab)
+            / "autopilot"
+            / "history"
+            / status["run_uid"]
+            / "run-events.jsonl"
+        )
+        assert archived.exists() and decision["decision_id"] in archived.read_text("utf-8")
 
     def test_v1_catalog_pauses_before_any_model_call(self, tmp_path):
         home = str(tmp_path)
@@ -790,7 +851,7 @@ class TestRepairLoop:
             # dispatched by MODEL, not seat name — both executors are the claude CLI.
             if "gemini-3.5-flash" in argv:  # baseline breaker
                 return "FINDING: F1 | src/m.py:1 | x is unchecked | data loss" if bad else "NO-FINDING"
-            if "anthropic-general" in argv:  # baseline verifier — one verdict per finding id
+            if "haiku-4.5" in argv:  # baseline verifier — one verdict per finding id
                 return "VERDICT: CONFIRMED F1 | x unchecked" if bad else "VERDICT: REFUTED F1"
             return "ok"
 
@@ -809,6 +870,9 @@ class TestRepairLoop:
         evs = _events(collab)
         assert sum(1 for e in evs if e["stage"] == "autopilot.sendback") == 2  # one send-back per defect
         assert any(e["stage"] == "autopilot.autonomous_done" for e in evs)
+        dispositions = cd.read_dispositions(collab)
+        assert dispositions[-1]["disposition"] == "accepted"
+        assert dispositions[-1]["acceptance_oracle"] == "autonomous-done-contract"
 
     def test_no_progress_pauses(self, tmp_path):
         # A builder that does NOT change the source after a repair packet produces a byte-identical candidate
@@ -833,7 +897,7 @@ class TestRepairLoop:
                 return conftest.conformance_reply(prompt)  # the persistent LANE defect is the point
             if "gemini-3.5-flash" in argv:  # v2 baseline breaker (batch protocol, ADR-0004 D3)
                 return "FINDING: F1 | src/m.py:1 | unchecked | data loss"
-            if "anthropic-general" in argv:  # v2 baseline verifier
+            if "haiku-4.5" in argv:  # v2 baseline verifier
                 return "VERDICT: CONFIRMED F1 | unchecked"
             return "ok"
 
@@ -841,6 +905,26 @@ class TestRepairLoop:
         assert hc.state_of(collab, "001") == "claimed"  # paused, not shipped
         esc = next(e for e in _events(collab) if e["stage"] == "autopilot.escalation")
         assert "reason:no_progress" in esc["decision"]["reason_codes"]
+        candidate = ce.project(ce.read_events(collab))
+        assert len(candidate) == 1
+        assert candidate[0]["producer"]["role"] == "builder"
+        execution_ids = {
+            event.attempt_id
+            for event in mo.read_events(Path(collab) / "autopilot" / "model-events.jsonl")
+            if event.source == "orchestrator"
+            and event.seat == "builder"
+            and event.handoff_id == "001"
+        }
+        assert candidate[0]["producer"]["attempt_id"] in execution_ids
+        assert not candidate[0]["producer"]["attempt_id"].startswith("actor-turn:")
+        assert candidate[0]["files"] == ["src/m.py"]
+        assert candidate[0]["current_disposition"] == "repair_required"
+        assert candidate[0]["evaluator_feedback"] == ["finding:baseline-F1"]
+        validations = qe.read_validations(collab)
+        assert [(item["source_kind"], item["status"]) for item in validations] == [
+            ("evaluator_judgment", "failed")
+        ]
+        assert cd.read_dispositions(collab)[-1]["disposition"] == "repair_required"
 
 
 class TestBoardLease:

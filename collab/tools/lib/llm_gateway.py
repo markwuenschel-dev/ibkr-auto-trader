@@ -10,12 +10,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import collab_common as cc
+import model_observability as mo
 
 _PROVIDER_HOST_SUFFIXES = (
     "api.openai.com",
@@ -28,6 +30,10 @@ _PROVIDER_HOST_SUFFIXES = (
 
 class GatewayConfigError(cc.CollabError):
     """Gateway configuration is absent or could bypass the controlled proxy."""
+
+
+class GatewayStreamError(cc.CollabError):
+    """A gateway stream ended without a provider completion envelope."""
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,7 @@ def request_metadata(model_alias: str, *, feature: str) -> dict[str, Any]:
     name = f"{service}:{feature}"
     metadata: dict[str, Any] = {
         "request_id": str(uuid.uuid4()),
+        "attempt_id": str(uuid.uuid4()),
         "service": service,
         "feature": feature,
         "environment": environment,
@@ -99,6 +106,7 @@ def request_metadata(model_alias: str, *, feature: str) -> dict[str, Any]:
         ],
     }
     optional = {
+        "parent_attempt_id": os.environ.get("COLLAB_EXECUTION_ID"),
         "session_id": os.environ.get("COLLAB_RUN_UID"),
         "trace_user_id": os.environ.get("TRACE_USER_ID"),
         "handoff_id": os.environ.get("COLLAB_HANDOFF_ID"),
@@ -123,7 +131,9 @@ def _health_path(path: Path) -> Path:
     return path.with_name("model-calls-health.json")
 
 
-def _write_health(path: Path, status: str, reason: str | None) -> None:
+def _write_health(
+    path: Path, status: str, reason: str | None, *, run_uid: str | None = None
+) -> None:
     try:
         failures = 0
         try:
@@ -142,6 +152,7 @@ def _write_health(path: Path, status: str, reason: str | None) -> None:
                     "reason": reason,
                     "telemetry_failures": failures,
                     "updated_ts": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                    "run_uid": run_uid,
                 },
                 separators=(",", ":"),
             )
@@ -162,25 +173,33 @@ def _append_telemetry(record: dict[str, Any]) -> None:
             path.open("a", encoding="utf-8", newline="\n") as stream,
         ):
             stream.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
-        _write_health(path, "healthy", None)
+        _write_health(path, "healthy", None, run_uid=record.get("run_uid"))
     except Exception as exc:
-        _write_health(path, "unavailable", f"{type(exc).__name__}: telemetry append failed"[:200])
+        _write_health(
+            path,
+            "unavailable",
+            f"{type(exc).__name__}: telemetry append failed"[:200],
+            run_uid=record.get("run_uid"),
+        )
 
 
 def _classify(exc: BaseException) -> str:
     if isinstance(exc, (TimeoutError, socket.timeout)):
         return "timeout"
+    if isinstance(exc, InterruptedError):
+        return "cancelled"
     if isinstance(exc, urllib.error.HTTPError):
         return "http_error"
     if isinstance(exc, urllib.error.URLError):
         return "gateway_unreachable"
-    if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)):
+    if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError, GatewayStreamError)):
         return "parsing_error"
     return "client_error"
 
 
 def _usage(data: dict[str, Any]) -> dict[str, Any]:
-    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    raw_usage = data.get("usage")
+    usage: dict[str, Any] = raw_usage if isinstance(raw_usage, dict) else {}
     details = usage.get("input_tokens_details") or usage.get("prompt_tokens_details") or {}
     details = details if isinstance(details, dict) else {}
     return {
@@ -189,6 +208,159 @@ def _usage(data: dict[str, Any]) -> dict[str, Any]:
         "cached": details.get("cached_tokens"),
         "total": usage.get("total_tokens"),
     }
+
+
+def _timestamp() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _response_header(response: Any, name: str) -> str | None:
+    headers = getattr(response, "headers", None)
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    value = headers.get(name)
+    return str(value) if value else None
+
+
+def _stream_lines(response: Any):
+    """Read an SSE response, retaining a test-compatible buffered fallback."""
+    if hasattr(response, "__iter__"):
+        for line in response:
+            if not isinstance(line, bytes):
+                raise GatewayStreamError("gateway stream line must be bytes")
+            yield line
+        return
+    raw = response.read()
+    if not isinstance(raw, bytes):
+        raise GatewayStreamError("gateway stream body must be bytes")
+    yield from raw.splitlines()
+
+
+def _decode_stream(
+    response: Any,
+    endpoint: str,
+    *,
+    started: float,
+    on_progress: Callable[[int, float | None, str], None] | None = None,
+) -> tuple[dict[str, Any], int, float | None, str | None]:
+    frames: list[dict[str, Any]] = []
+    first_token_latency_ms: float | None = None
+    last_chunk_ts: str | None = None
+    for raw_line in _stream_lines(response):
+        line = raw_line.decode("utf-8").strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line.removeprefix("data:").strip()
+        if not payload or payload == "[DONE]":
+            continue
+        frame = json.loads(payload)
+        if not isinstance(frame, dict):
+            raise GatewayStreamError("gateway stream frame must be an object")
+        frames.append(frame)
+        choices = frame.get("choices")
+        chat_content = (
+            choices[0].get("delta", {}).get("content")
+            if isinstance(choices, list)
+            and choices
+            and isinstance(choices[0], dict)
+            and isinstance(choices[0].get("delta"), dict)
+            else None
+        )
+        responses_content = (
+            frame.get("delta")
+            if str(frame.get("type") or "").endswith(".delta")
+            else None
+        )
+        content_bearing = bool(
+            (isinstance(chat_content, str) and chat_content)
+            or (isinstance(responses_content, str) and responses_content)
+        )
+        first_content = first_token_latency_ms is None and content_bearing
+        if first_content:
+            first_token_latency_ms = round((time.monotonic() - started) * 1000, 1)
+        if content_bearing:
+            last_chunk_ts = _timestamp()
+            if on_progress is not None and (first_content or len(frames) % 25 == 0):
+                on_progress(len(frames), first_token_latency_ms, last_chunk_ts)
+    if not frames:
+        raise GatewayStreamError("gateway stream contained no data frames")
+
+    if endpoint == "responses":
+        for frame in reversed(frames):
+            if frame.get("type") == "response.completed" and isinstance(
+                frame.get("response"), dict
+            ):
+                return frame["response"], len(frames), first_token_latency_ms, last_chunk_ts
+        raise GatewayStreamError("Responses API stream ended without response.completed")
+
+    content: list[str] = []
+    finish_reason: Any = None
+    last: dict[str, Any] = {}
+    usage: dict[str, Any] = {}
+    hidden: dict[str, Any] = {}
+    for frame in frames:
+        last = frame
+        if isinstance(frame.get("usage"), dict):
+            usage = frame["usage"]
+        if isinstance(frame.get("_hidden_params"), dict):
+            hidden = frame["_hidden_params"]
+        choices = frame.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            continue
+        choice = choices[0]
+        delta = choice.get("delta")
+        if isinstance(delta, dict) and isinstance(delta.get("content"), str):
+            content.append(delta["content"])
+        if choice.get("finish_reason") is not None:
+            finish_reason = choice["finish_reason"]
+    if not last.get("id"):
+        raise GatewayStreamError("chat completions stream ended without a provider response id")
+    result: dict[str, Any] = {
+        "id": last["id"],
+        "model": last.get("model"),
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": "".join(content)},
+                "finish_reason": finish_reason,
+            }
+        ],
+        "usage": usage,
+    }
+    if last.get("provider") is not None:
+        result["provider"] = last["provider"]
+    if hidden:
+        result["_hidden_params"] = hidden
+    return result, len(frames), first_token_latency_ms, last_chunk_ts
+
+
+def _model_event(
+    metadata: dict[str, Any],
+    *,
+    state: mo.LifecycleState,
+    requested_model: Any,
+    endpoint: str,
+    **updates: Any,
+) -> mo.ModelAttemptEvent:
+    return mo.ModelAttemptEvent(
+        event_id=str(uuid.uuid4()),
+        attempt_id=str(metadata.get("attempt_id") or metadata.get("request_id") or uuid.uuid4()),
+        request_id=str(metadata.get("request_id") or uuid.uuid4()),
+        run_uid=metadata.get("run_uid"),
+        seat=metadata.get("seat"),
+        requested_model=str(requested_model) if requested_model else None,
+        state=state,
+        event_ts=_timestamp(),
+        attempt_number=int(metadata.get("attempt_number") or metadata.get("retry") or 0) + 1,
+        source="gateway_client",
+        parent_attempt_id=metadata.get("parent_attempt_id"),
+        handoff_id=metadata.get("handoff_id"),
+        candidate_id=metadata.get("candidate_id"),
+        escalation_id=metadata.get("escalation_id"),
+        gateway_route=endpoint,
+        streaming=bool(updates.pop("streaming", False)),
+        retry_count=int(metadata.get("retry") or 0),
+        **updates,
+    )
 
 
 def post_json(
@@ -212,7 +384,8 @@ def post_json(
     expected = config.url(endpoint)
     if url.rstrip("/") != expected:
         raise GatewayConfigError("request URL does not match the configured LiteLLM gateway")
-    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    raw_metadata = payload.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
     started_wall = datetime.now(UTC)
     started = time.monotonic()
     record: dict[str, Any] = {
@@ -245,6 +418,25 @@ def post_json(
         "outcome": "client_error",
         "langfuse_export": "unverified",
     }
+    if int(metadata.get("retry") or 0) > 0:
+        mo.append_if_configured(
+            _model_event(
+                metadata,
+                state="retrying",
+                requested_model=payload.get("model"),
+                endpoint=endpoint,
+                streaming=bool(payload.get("stream")),
+            )
+        )
+    mo.append_if_configured(
+        _model_event(
+            metadata,
+            state="connecting",
+            requested_model=payload.get("model"),
+            endpoint=endpoint,
+            streaming=bool(payload.get("stream")),
+        )
+    )
     try:
         request = urllib.request.Request(
             url,
@@ -252,7 +444,72 @@ def post_json(
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         )
         with opener(request, timeout=timeout) as response:
-            data = json.loads(response.read())
+            gateway_request_id = _response_header(response, "x-litellm-request-id") or _response_header(
+                response, "x-request-id"
+            )
+            mo.append_if_configured(
+                _model_event(
+                    metadata,
+                    state="gateway_accepted",
+                    requested_model=payload.get("model"),
+                    endpoint=endpoint,
+                    streaming=bool(payload.get("stream")),
+                    gateway_request_id=gateway_request_id,
+                )
+            )
+            chunk_count: int | None = None
+            first_token_latency_ms: float | None = None
+            if payload.get("stream"):
+                mo.append_if_configured(
+                    _model_event(
+                        metadata,
+                        state="streaming",
+                        requested_model=payload.get("model"),
+                        endpoint=endpoint,
+                        streaming=True,
+                        gateway_request_id=gateway_request_id,
+                        detail={"phase": "response_started"},
+                    )
+                )
+
+                def retain_progress(count: int, latency: float | None, last_chunk_ts: str) -> None:
+                    mo.append_if_configured(
+                        _model_event(
+                            metadata,
+                            state="streaming",
+                            requested_model=payload.get("model"),
+                            endpoint=endpoint,
+                            streaming=True,
+                            gateway_request_id=gateway_request_id,
+                            first_token_latency_ms=latency,
+                            detail={
+                                "phase": "response_in_progress",
+                                "chunk_count": count,
+                                "last_chunk_ts": last_chunk_ts,
+                            },
+                        )
+                    )
+
+                data, chunk_count, first_token_latency_ms, last_chunk_ts = _decode_stream(
+                    response,
+                    endpoint,
+                    started=started,
+                    on_progress=retain_progress,
+                )
+            else:
+                mo.append_if_configured(
+                    _model_event(
+                        metadata,
+                        state="generating",
+                        requested_model=payload.get("model"),
+                        endpoint=endpoint,
+                        streaming=False,
+                        gateway_request_id=gateway_request_id,
+                        detail={"phase": "waiting_for_provider_response"},
+                    )
+                )
+                data = json.loads(response.read())
+                last_chunk_ts = None
         if not isinstance(data, dict):
             raise TypeError("gateway response must be an object")
         record.update(
@@ -262,13 +519,57 @@ def post_json(
                 or (data.get("_hidden_params") or {}).get("custom_llm_provider"),
                 "tokens": _usage(data),
                 "cost": (data.get("_hidden_params") or {}).get("response_cost"),
+                "first_token_latency_ms": first_token_latency_ms,
                 "completion_status": "completed",
                 "outcome": "success",
             }
         )
+        completion_detail: dict[str, Any] = {}
+        if chunk_count is not None:
+            completion_detail = {"phase": "response_complete", "chunk_count": chunk_count}
+            if last_chunk_ts is not None:
+                completion_detail["last_chunk_ts"] = last_chunk_ts
+        mo.append_if_configured(
+            _model_event(
+                metadata,
+                state="completed",
+                requested_model=payload.get("model"),
+                endpoint=endpoint,
+                streaming=bool(payload.get("stream")),
+                gateway_request_id=gateway_request_id,
+                provider_request_id=str(data.get("id")) if data.get("id") else None,
+                actual_model=data.get("model"),
+                provider=record["provider"],
+                completion_status="completed",
+                first_token_latency_ms=first_token_latency_ms,
+                tokens=record["tokens"],
+                cost=record["cost"],
+                total_duration_ms=round((time.monotonic() - started) * 1000, 1),
+                detail=completion_detail,
+            )
+        )
         return data
     except Exception as exc:
         record["outcome"] = _classify(exc)
+        terminal_state: mo.LifecycleState = (
+            "timed_out"
+            if record["outcome"] == "timeout"
+            else "cancelled"
+            if record["outcome"] == "cancelled"
+            else "failed"
+        )
+        mo.append_if_configured(
+            _model_event(
+                metadata,
+                state=terminal_state,
+                requested_model=payload.get("model"),
+                endpoint=endpoint,
+                streaming=bool(payload.get("stream")),
+                completion_status="interrupted",
+                failure_classification=record["outcome"],
+                total_duration_ms=round((time.monotonic() - started) * 1000, 1),
+            )
+        )
         raise
     finally:
         record["ended_ts"] = datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -288,6 +589,29 @@ def record_langfuse_verification(
         raise ValueError("Langfuse verification status must be verified or rejected")
     if not request_id or not observation_id:
         raise ValueError("request_id and observation_id are required")
+    path = mo.event_log_path()
+    prior = mo.find_by_request(path, request_id) if path is not None else None
+    mo.append_if_configured(
+        mo.ModelAttemptEvent(
+            event_id=str(uuid.uuid4()),
+            attempt_id=prior.attempt_id if prior else request_id,
+            request_id=request_id,
+            run_uid=prior.run_uid if prior else None,
+            seat=prior.seat if prior else None,
+            requested_model=prior.requested_model if prior else None,
+            state="telemetry_verified" if status == "verified" else "telemetry_failed",
+            event_ts=_timestamp(),
+            attempt_number=prior.attempt_number if prior else 1,
+            source="langfuse_reconciler",
+            handoff_id=prior.handoff_id if prior else None,
+            candidate_id=prior.candidate_id if prior else None,
+            escalation_id=prior.escalation_id if prior else None,
+            retry_count=prior.retry_count if prior else 0,
+            telemetry_result=status,
+            observation_id=observation_id,
+            trace_id=trace_id,
+        )
+    )
     _append_telemetry(
         {
             "schema_version": "1.0",
