@@ -102,6 +102,18 @@ def test_rejection_retains_multiple_typed_reason_categories(tmp_path: Path) -> N
         )
 
 
+def test_disposition_identity_separates_handoffs_in_the_same_run_and_timestamp(
+    tmp_path: Path,
+) -> None:
+    first = cd.record_disposition(tmp_path, disposition="rejected", **_base())
+    second_base = {**_base(), "handoff_id": "031"}
+
+    second = cd.record_disposition(tmp_path, disposition="rejected", **second_base)
+
+    assert first["event_id"] != second["event_id"]
+    assert [event["handoff_id"] for event in cd.read_dispositions(tmp_path)] == ["030", "031"]
+
+
 def test_superseded_disposition_requires_and_retains_successor(tmp_path: Path) -> None:
     with pytest.raises(cd.CandidateDispositionError, match="successor"):
         cd.record_disposition(tmp_path, disposition="superseded", **_base())

@@ -121,7 +121,10 @@ def record_disposition(
         raise CandidateDispositionError("a candidate cannot supersede itself")
     if not decision_maker.strip():
         raise CandidateDispositionError("decision_maker is required")
-    identity = f"{run_uid}:{candidate_id}:{disposition}:{timestamp}"
+    # Candidate ids and second-resolution timestamps can repeat when one driver drains
+    # multiple handoffs in the same run. The handoff is therefore part of the durable
+    # event identity, not merely payload, so distinct work cannot collide.
+    identity = f"{run_uid}:{handoff_id}:{candidate_id}:{disposition}:{timestamp}"
     event = {
         "schema_version": SCHEMA_VERSION,
         "record_type": "candidate_disposition",
