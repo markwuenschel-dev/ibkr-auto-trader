@@ -80,6 +80,7 @@ class Candidate:
     assessment_plan_revision: str
     reviewer_rubric_hash: str
     seat_profile_fingerprint: str
+    source_files: tuple[str, ...] = ()
 
     @classmethod
     def compute(
@@ -118,6 +119,9 @@ class Candidate:
             assessment_plan_revision=assessment_plan_revision,
             reviewer_rubric_hash=rubric_hash,
             seat_profile_fingerprint=seat_profile_fingerprint,
+            source_files=tuple(
+                sorted(str(path) for path in (source_manifest or {}) if path != "__builder_output__")
+            ),
         )
 
 
@@ -221,6 +225,7 @@ class CandidateAssessment:
     cause: dict | None = None
     budget_snapshot: dict | None = None
     completed_ts: str = ""
+    requirement_coverage: dict | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -383,6 +388,9 @@ def complete(
             cause=cause,
             budget_snapshot=budget_snapshot,
             completed_ts=ts,
+            requirement_coverage=(
+                dict(reviewer_report.requirement_coverage) if reviewer_report is not None else {}
+            ),
         )
         save_partial(
             collab,
@@ -397,6 +405,8 @@ def complete(
         )
         return assessment
 
+    if reviewer_report is None:  # narrowed by infra_or_incomplete above; retained for static proof
+        raise AssertionError("reviewer_report unexpectedly absent on completed assessment path")
     ledger = FindingLedger.load(collab, hid)
     findings = (
         list(reviewer_report.blocking_findings)
@@ -418,6 +428,7 @@ def complete(
         cause=cause,
         budget_snapshot=budget_snapshot,
         completed_ts=ts,
+        requirement_coverage=dict(reviewer_report.requirement_coverage),
     )
     save_assessment(collab, assessment)
     return assessment
@@ -560,6 +571,7 @@ def _assessment_from_dict(d: dict) -> CandidateAssessment:
         cause=d.get("cause"),
         budget_snapshot=d.get("budget_snapshot"),
         completed_ts=d.get("completed_ts", ""),
+        requirement_coverage=d.get("requirement_coverage") or {},
     )
 
 

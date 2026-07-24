@@ -1,8 +1,8 @@
 """dashboard_tui — a stdlib, dependency-free live console view of an autopilot run.
 
 Run in a second terminal while ``autopilot.py`` drives a collab. Polls :func:`dashboard_core.snapshot`
-and redraws in place (ANSI), showing the seats, round progress, the handoff board, and a live event
-feed with per-round latency. Human-in-the-loop keys pause/resume the loop and approve (advance) a
+and redraws in place (ANSI), showing seats, work-attempt progress, the handoff board, and a live event
+feed with per-actor-turn latency. Human-in-the-loop keys pause/resume the loop and approve (advance) a
 handoff — the driver itself never advances state ([C36]).
 
 Windows-first: keyboard input via ``msvcrt`` (non-blocking, so the redraw stays smooth); a POSIX
@@ -145,8 +145,27 @@ def render(snap: dict, selected: int, confirm: str | None, notice: str | None) -
 
     # header
     banner = _c(f" AUTOPILOT · {name} ", "bold", "inv")
-    prog = f"round {rnd}/{mx}" if mx else "round —"
+    prog = f"work attempt {rnd} of max {mx}" if mx else "work attempt —"
     L.append(f"{banner}  {prog}  phase:{_c(phase, pcolor)}" + (f"  pid:{st['pid']}" if st.get("pid") else ""))
+    budgets = ((st.get("budget") or {}).get("budgets") or {})
+    work = budgets.get("work_attempts") or {}
+    turns = budgets.get("actor_turns") or {}
+    verify = budgets.get("verification_calls") or {}
+    provider_attempts = sum(
+        1 for attempt in (snap.get("model_activity") or []) if attempt.get("source") == "gateway_client"
+    )
+    decision = snap.get("latest_decision") or {}
+    L.append(
+        _c(
+            "  counts: "
+            f"work attempts {work.get('consumed', rnd)}/{work.get('limit', mx) or '—'} · "
+            f"actor turns {turns.get('consumed', 0)} · "
+            f"verification calls {verify.get('consumed', 0)} · "
+            f"provider attempts {provider_attempts} · "
+            f"completed round boundaries {decision.get('completed_round', 0)}",
+            "dim",
+        )
+    )
     if snap.get("paused"):
         L.append(_c("  ‖ PAUSED — the loop is idling; press r to resume ", "yellow", "inv"))
     L.append("")
@@ -165,7 +184,7 @@ def render(snap: dict, selected: int, confirm: str | None, notice: str | None) -
         L.append(_c("  (no seats.json found for --home)", "dim"))
     last_lat = st.get("last_latency_ms")
     if last_lat is not None:
-        L.append(_c(f"  last round: {_fmt_ms(last_lat)}", "dim"))
+        L.append(_c(f"  last actor turn: {_fmt_ms(last_lat)}", "dim"))
     if st.get("last_error"):
         L.append("  " + _c(f"last error: {st['last_error']}", "red"))
     L.append("")

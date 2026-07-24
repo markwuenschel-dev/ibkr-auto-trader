@@ -17,6 +17,7 @@
     "test:watch": "vitest",
     "coverage": "vitest run --coverage",
     "e2e": "playwright test",
+    "e2e:collab": "playwright test --config playwright.collab.config.ts",
     "e2e:install": "playwright install chromium"
   },
   "dependencies": {

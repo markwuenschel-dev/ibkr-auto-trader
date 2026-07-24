@@ -259,11 +259,13 @@ class _Handler(BaseHTTPRequestHandler):
             # read-only run history (newest first); entries may carry current:true for the live run.
             return self._json(200, dc.list_runs(collab))
         if parts.path == "/api/run":
-            rid = (urllib.parse.parse_qs(parts.query).get("id") or [""])[0].strip()
+            run_query = urllib.parse.parse_qs(parts.query)
+            rid = (run_query.get("id") or [""])[0].strip()
+            windowed = (run_query.get("window") or ["0"])[0] == "1"
             if not _RUN_RE.fullmatch(rid):
                 return self._json(400, {"error": "bad run id"})
             try:  # unknown/malformed uid -> 400; a run that no longer exists on disk -> 404.
-                return self._json(200, dc.run_detail(collab, rid))
+                return self._json(200, dc.run_detail(collab, rid, windowed=windowed))
             except ValueError as e:
                 return self._json(400, {"error": str(e)})
             except FileNotFoundError as e:
@@ -523,6 +525,11 @@ _PAGE = r"""<!doctype html>
 
   .grid{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   @media (max-width:900px){ .grid{ grid-template-columns:1fr; } }
+  .viewtabs{ display:flex; gap:6px; margin:0 0 16px; overflow-x:auto; }
+  .viewtabs button[role="tab"]{ white-space:nowrap; }
+  .viewtabs button[aria-selected="true"]{ background:var(--accent); border-color:var(--accent); color:#fff; }
+  .viewpanel[hidden]{ display:none!important; }
+  .viewpanel[hidden]{ display:none!important; }
   .card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--r); padding:16px 17px; box-shadow:var(--shadow); }
   .card > h2{ margin:0 0 14px; font-size:12px; text-transform:uppercase; letter-spacing:.13em; color:var(--muted);
     display:flex; align-items:center; justify-content:space-between; gap:10px; font-weight:650; }
@@ -678,6 +685,8 @@ _PAGE = r"""<!doctype html>
   .healthitem b,.opchip b{ display:block; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
   .healthitem span,.opchip span{ display:block; margin-top:3px; font-size:11px; color:var(--muted); }
   .opmeta{ display:block; margin-top:5px; font-size:10.5px; color:var(--muted); line-height:1.35; }
+  .filterbar{ display:flex; gap:8px; align-items:center; margin:0 0 10px; color:var(--muted); font-size:11px; }
+  .filterbar input{ min-width:180px; flex:1; border:1px solid var(--border); border-radius:6px; padding:6px 8px; background:var(--panel); color:var(--text); }
   @media (prefers-reduced-motion:reduce){ *{ animation:none!important; transition:none!important; } }
 </style></head>
 <body>
@@ -692,9 +701,9 @@ _PAGE = r"""<!doctype html>
   <span class="statepill" id="statePill"><span class="d"></span><span id="stateTxt">—</span></span>
   <span class="live" id="live"><span class="dot"></span><span id="liveTxt">—</span></span>
   <button class="iconbtn ghost" id="theme" aria-label="Toggle theme" onclick="toggleTheme()">&#9790;</button>
-  <span class="turnbox" title="Round budget — human sign-off gate">
-    <span class="tlbl">cap</span>
-    <input type="number" min="1" max="50" id="maxturns" class="mono" aria-label="Max rounds (round budget)">
+  <span class="turnbox" title="Work attempt limit — human sign-off gate">
+    <span class="tlbl">attempts</span>
+    <input type="number" min="1" max="50" id="maxturns" class="mono" aria-label="Max work attempts">
     <button class="ghost" id="btnTurns" onclick="setTurns()">Set</button>
   </span>
   <button class="primary" id="btnStart" onclick="startRun()" title="Spawn the driver process against this collab (uses the cap at left)">▶ Start</button>
@@ -703,7 +712,7 @@ _PAGE = r"""<!doctype html>
   <button class="danger ghost" id="btnStop" onclick="doStop()">Stop</button>
 </header>
 
-<div class="wrap">
+<main class="wrap">
   <section class="hero" id="hero">
     <div class="stripe" id="heroStripe" aria-hidden="true"></div>
     <div class="body">
@@ -719,35 +728,59 @@ _PAGE = r"""<!doctype html>
 
   <div id="empty" style="display:none">Driver not running — start autopilot to see live activity.</div>
 
-  <div class="grid">
-    <section class="card full" id="operationsCard"><h2>Operational state
-      <span class="r" id="transportState">RECONNECTING</span></h2>
-      <div class="opcounts" id="opcounts"></div>
-      <h2 style="margin-top:14px">Health <span class="r">separate evidence dimensions</span></h2>
-      <div class="healthgrid" id="healthgrid"></div></section>
+  <nav class="viewtabs" role="tablist" aria-label="Dashboard views">
+    <button role="tab" id="tab-operator" aria-controls="view-operator" aria-selected="true" tabindex="0">Operator timeline</button>
+    <button role="tab" id="tab-models" aria-controls="view-models" aria-selected="false" tabindex="-1">Model activity</button>
+    <button role="tab" id="tab-quality" aria-controls="view-quality" aria-selected="false" tabindex="-1">Validation &amp; quality</button>
+    <button role="tab" id="tab-diagnostics" aria-controls="view-diagnostics" aria-selected="false" tabindex="-1">Diagnostics</button>
+  </nav>
 
+  <div class="grid viewpanel" id="view-operator" role="tabpanel" aria-labelledby="tab-operator">
+    <section class="card full"><h2>Operator timeline <span class="r">what · why · consequence · next action</span></h2>
+      <div id="operatorTimeline"></div></section>
     <section class="card full" id="narrCard" style="display:none"><h2>What happened
       <span class="r"><span id="narrMeta"></span>
       <button class="iconbtn ghost" id="narrToggle" aria-label="Collapse" aria-expanded="true"
         onclick="toggleNarr()" title="Collapse / expand">&#9662;</button></span></h2>
       <div id="narr" class="narr"></div></section>
 
+    <section class="card full"><h2>Handoff pipeline <span class="r">state machine · newest first</span></h2>
+      <div class="pipe" id="pipe"></div></section>
+
+    <section class="card full"><h2>Activity <span class="r">recent actor turns &amp; validation lanes</span></h2>
+      <div class="feed" id="feed"></div></section>
+  </div>
+
+  <div class="grid viewpanel" id="view-models" role="tabpanel" aria-labelledby="tab-models" hidden>
     <section class="card"><h2>Agents
       <span class="r"><span class="legdot"><i style="background:var(--claude)"></i>Claude</span>
       <span class="legdot"><i style="background:var(--gpt)"></i>OpenAI</span>
       <span class="legdot"><i style="background:#313131;outline:1px solid #6a6a6a"></i>Grok</span>
       <span class="legdot"><i style="background:var(--gemini)"></i>Gemini</span></span></h2>
       <div id="agents"></div></section>
+    <section class="card"><h2>Execution roster <span class="r">planned → transport → telemetry</span></h2>
+      <label class="filterbar">Filter current retained window
+        <input id="modelFilter" aria-label="Filter execution roster" type="search" oninput="modelShowAll=false;renderModelActivity(last)">
+      </label>
+      <div id="modelActivity"></div></section>
+  </div>
 
+  <div class="grid viewpanel" id="view-quality" role="tabpanel" aria-labelledby="tab-quality" hidden>
     <section class="card" id="lanesCard"><h2>Adversarial lanes <span class="r lanehead" id="lanehead"></span></h2>
       <div id="lanes"></div></section>
+    <section class="card"><h2>Quality workspace <span class="r">requirements · validations · dispositions</span></h2>
+      <label class="filterbar">Filter current retained window
+        <input id="qualityFilter" aria-label="Filter quality evidence window" type="search" oninput="renderQuality(last)">
+      </label>
+      <div id="qualityWorkspace"></div></section>
+  </div>
 
-    <section class="card full"><h2>Handoff pipeline <span class="r">state machine · newest first</span></h2>
-      <div class="pipe" id="pipe"></div></section>
-
-    <section class="card full"><h2>Activity <span class="r">recent rounds &amp; lanes</span></h2>
-      <div class="feed" id="feed"></div></section>
-
+  <div class="grid viewpanel" id="view-diagnostics" role="tabpanel" aria-labelledby="tab-diagnostics" hidden>
+    <section class="card full" id="operationsCard"><h2>Operational state
+      <span class="r" id="transportState">RECONNECTING</span></h2>
+      <div class="opcounts" id="opcounts"></div>
+      <h2 style="margin-top:14px">Health <span class="r">separate evidence dimensions</span></h2>
+      <div class="healthgrid" id="healthgrid"></div></section>
     <section class="card full" id="runsCard"><h2>Run history <span class="r">newest first · click a row for detail</span></h2>
       <div class="runs" id="runs"></div>
       <div class="runbar" id="runbar" style="display:none">
@@ -758,7 +791,7 @@ _PAGE = r"""<!doctype html>
   </div>
 
   <footer id="foot"></footer>
-</div>
+</main>
 
 <div id="viewer" role="dialog" aria-modal="true" aria-labelledby="v-title" onclick="if(event.target===this)closeViewer()">
   <div class="box"><div class="top"><b id="v-title">handoff</b>
@@ -786,6 +819,41 @@ let narrSigLast=null;              // last work-signature we fetched for -> refe
 const $=id=>document.getElementById(id);
 const esc=s=>(s==null?"":String(s));
 function el(tag,cls,txt){const e=document.createElement(tag); if(cls)e.className=cls; if(txt!=null)e.textContent=txt; return e;}
+const MODEL_STATE_LABELS={
+  queued:"Queued",starting:"Starting",connecting:"Connecting to gateway",
+  gateway_accepted:"Gateway accepted request",generating:"Generating",streaming:"Streaming",
+  waiting_for_tool:"Waiting for tool",waiting_for_evaluator:"Waiting for evaluator",
+  completed:"Completed",failed:"Failed",timed_out:"Timed out",cancelled:"Cancelled",
+  retrying:"Retrying",skipped:"Skipped",rejected:"Rejected",accepted:"Accepted",
+  superseded:"Superseded",telemetry_verified:"Telemetry verified",
+  telemetry_failed:"Telemetry export failed",telemetry_reconciled:"Telemetry reconciled",
+  provider_returned:"Provider returned",gateway_reached:"Gateway reached",
+  failed_before_invocation:"Failed before invocation",invoked:"Invoked",selected:"Selected",
+  configured:"Configured",disabled:"Disabled"
+};
+function modelStateLabel(state){ return MODEL_STATE_LABELS[state]||String(state||"Unknown state").replace(/_/g," "); }
+function toolActivitySummary(items){
+  const events=Array.isArray(items)?items:[]; if(!events.length) return "";
+  const latest=events[events.length-1]||{}, phase=latest.phase==="tool_started"?"started":latest.phase==="tool_completed"?"completed":modelStateLabel(latest.state);
+  return events.length+" retained tool lifecycle event"+(events.length===1?"":"s")+" · latest "+(latest.tool_name||"tool")+" "+phase+(latest.result_status?" · "+latest.result_status:"")+(latest.event_ts?" · "+(fmtET(latest.event_ts)||latest.event_ts):"");
+}
+const VIEW_IDS=["operator","models","quality","diagnostics"];
+function activateView(view,focus){
+  if(!VIEW_IDS.includes(view)) view="operator";
+  VIEW_IDS.forEach(name=>{ const tab=$("tab-"+name), panel=$("view-"+name), on=name===view;
+    tab.setAttribute("aria-selected",on?"true":"false"); tab.tabIndex=on?0:-1; panel.hidden=!on; });
+  try{ localStorage.setItem("ap-view",view); }catch(e){}
+  if(focus) $("tab-"+view).focus();
+}
+function tabKeydown(e){ const current=VIEW_IDS.indexOf(e.currentTarget.id.replace("tab-","")); let next=null;
+  if(e.key==="ArrowRight") next=(current+1)%VIEW_IDS.length;
+  else if(e.key==="ArrowLeft") next=(current-1+VIEW_IDS.length)%VIEW_IDS.length;
+  else if(e.key==="Home") next=0;
+  else if(e.key==="End") next=VIEW_IDS.length-1;
+  if(next!=null){ e.preventDefault(); activateView(VIEW_IDS[next],true); }
+}
+VIEW_IDS.forEach(view=>{ const tab=$("tab-"+view); tab.onclick=()=>activateView(view,false); tab.onkeydown=tabKeydown; });
+try{ activateView(localStorage.getItem("ap-view")||"operator",false); }catch(e){ activateView("operator",false); }
 function fmtms(ms){ if(ms==null) return "-"; return ms<1000? Math.round(ms)+"ms" : (ms/1000).toFixed(1)+"s"; }
 function fmtage(s){ if(s==null) return ""; s=Math.floor(s); return s<60? s+"s" : s<3600? Math.floor(s/60)+"m" : Math.floor(s/3600)+"h"; }
 // Timestamps are stored UTC; the dashboard shows them in US Eastern (America/New_York — handles EST/EDT).
@@ -800,6 +868,9 @@ function fmtET(iso){ if(!iso) return ""; try{
 function fmtdur(s){ if(s==null||s<0) return "-"; s=Math.floor(s); const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;
   return h? h+"h"+m+"m" : m? m+"m"+ss+"s" : ss+"s"; }
 function fmtbytes(b){ if(b==null) return ""; return b<1024? b+"B" : (b/1024).toFixed(1)+"KB"; }
+function maxWorkAttempts(s){ const st=(s&&s.status)||{}, plan=(s&&s.run_plan)||{}, rounds=plan.rounds||{};
+  const work=(((st.budget||{}).budgets||{}).work_attempts)||{};
+  return st.max_rounds!=null?st.max_rounds:(rounds.maximum!=null?rounds.maximum:(work.limit!=null?work.limit:null)); }
 
 const SEAT_ORDER=["builder","reviewer","breaker","verifier"];
 function seatSlot(n){ let i=SEAT_ORDER.indexOf(n); if(i<0){ SEAT_ORDER.push(n); i=SEAT_ORDER.length-1; } return i; }
@@ -874,7 +945,7 @@ async function ctl(kind, extra){
 }
 function startRun(){ const n=parseInt(($("maxturns")||{}).value,10);
   const mr=(Number.isInteger(n)&&n>=1&&n<=50)?n:null;
-  if(confirm("Start the autopilot driver against this collab now"+(mr?(" (max rounds "+mr+")"):"")+"?")) ctl("start",mr?{max_rounds:mr}:{}); }
+  if(confirm("Start the autopilot driver against this collab now"+(mr?(" (max work attempts "+mr+")"):"")+"?")) ctl("start",mr?{max_rounds:mr}:{}); }
 function doStop(){ if(confirm("Stop the autopilot loop (graceful, reversible)?")) ctl("stop"); }
 // A human override, named as one. The old copy said "Approve (advance) ... to done?", which reads like
 // countersigning a verified result; this path checks no evidence at all. Both fields are required by
@@ -954,7 +1025,8 @@ function render(s){
   setFav(PHASECOL[ph]||"#5c6675"); document.title=(s.status?"● ":"")+phaseLabel(ph)+" · autopilot";
   $("empty").style.display = (!s.status && !(s.events&&s.events.length))? "block":"none";
 
-  renderOperational(s); renderNarrative(s); renderHero(s); renderSeats(s); renderLanes(s); renderPipe(s); renderFeed(s); renderRuns(s); syncTurns(s);
+  renderOperational(s); renderOperatorTimeline(s); renderNarrative(s); renderHero(s); renderSeats(s);
+  renderModelActivity(s); renderQuality(s); renderLanes(s); renderPipe(s); renderFeed(s); renderRuns(s); syncTurns(s);
   const cn=s.counts||{};
   const foot=$("foot"); foot.textContent="";
   [["pending",cn.pending],["claimed",cn.claimed],["done",cn.done],["archive",cn.archive]].forEach(([k,v])=>{
@@ -965,6 +1037,103 @@ function render(s){
     if(lab==="Grok") i.style.outline="1px solid #6a6a6a";
     ld.appendChild(i); ld.appendChild(el("span",null,lab)); foot.appendChild(ld);
   });
+}
+
+function renderOperatorTimeline(s){
+  const box=$("operatorTimeline"); box.textContent=""; const rows=(s.operator_summary||[]).slice(-100).reverse();
+  const plan=s.run_plan||{};
+  if(plan.plain_language_strategy){ const planRow=el("div","hchip");
+    planRow.appendChild(el("div","b","Declared run strategy"));
+    planRow.appendChild(el("div",null,plan.plain_language_strategy));
+    planRow.appendChild(el("div","muted","Objective: "+(plan.objective||"not recorded"))); box.appendChild(planRow); }
+  if(!rows.length){ box.appendChild(el("div","muted","No structured operator events recorded for this run.")); return; }
+  rows.forEach(item=>{ const row=el("div","hchip"); const body=el("div");
+    body.appendChild(el("div","b",(item.actor||"unknown actor")+" · "+(item.action||"unknown action")));
+    body.appendChild(el("div","muted",(item.reason||"reason unknown")+" — "+(item.consequence||"consequence unknown")));
+    const next=item.operator_action&&item.operator_action!=="none"?item.operator_action:item.next_action;
+    body.appendChild(el("div",null,"Next: "+(next||"not recorded"))); row.appendChild(body); box.appendChild(row); });
+}
+
+let modelShowAll=false;
+function renderModelActivity(s){
+  const box=$("modelActivity"); box.textContent=""; const rawRoster=s.execution_roster||[], attempts=s.model_activity||[];
+  const query=(($("modelFilter")||{}).value||"").trim().toLowerCase();
+  const roster=rawRoster.filter(item=>!query||[item.role,item.model,item.state].some(value=>String(value||"").toLowerCase().includes(query)));
+  if(!roster.length){ box.appendChild(el("div","muted","No execution roster is retained for this run.")); return; }
+  const visible=modelShowAll?roster:roster.slice(0,100);
+  visible.forEach(item=>{ const row=el("div","hchip model-roster"); const model=item.model||"model not configured";
+    row.appendChild(el("div","b",(item.role||"unknown role")+" · "+model));
+    const milestones=[modelStateLabel(item.state||"configured"), (item.orchestration_execution_count||0)+" orchestration executions", (item.provider_attempt_count||0)+" provider calls"];
+    if(item.gateway_reached) milestones.push("gateway reached");
+    if(item.provider_returned) milestones.push("provider returned");
+    if(item.telemetry_reconciled) milestones.push("telemetry reconciled");
+    row.appendChild(el("div","muted",milestones.join(" · ")));
+    row.appendChild(el("div",null,"Terminal disposition: "+(item.terminal_disposition||"not yet reconciled")+" · telemetry "+(item.telemetry_outcome||"not applicable")+(item.terminal_reason?" · reason "+item.terminal_reason:"")));
+    row.appendChild(el("div",null,"Task: "+(item.assigned_task||"not recorded")));
+    row.appendChild(el("div","muted","Selected because: "+(item.selection_reason||"not recorded"))); box.appendChild(row); });
+  if(!modelShowAll&&roster.length>visible.length){ const more=el("button","ghost","Show all "+roster.length+" matching roster entries");
+    more.onclick=()=>{modelShowAll=true;renderModelActivity(s);}; box.appendChild(more); }
+  const window=((s.collection_windows||{}).model_activity)||{}; const total=window.total!=null?window.total:attempts.length;
+  if(total){ const note=window.truncated?("Showing latest "+window.returned+" of "+total+" model attempts."):(total+" retained model attempt record"+(total===1?"":"s"));
+    box.appendChild(el("div","muted",note)); }
+  attempts.slice(-100).reverse().forEach(item=>{ const row=el("div","hchip model-attempt"); const activity=item.last_activity||{}, token=item.tokens||{};
+    row.appendChild(el("div","b",(item.requested_model||"unknown model")+" · "+modelStateLabel(item.state)+" · "+(item.source||"source unknown")+" · "+(item.attempt_id||"attempt unknown")));
+    const elapsed=item.total_duration_ms!=null?fmtms(item.total_duration_ms):(item.started_ts?fmtdur((Date.now()-Date.parse(item.started_ts))/1000):"not recorded");
+    row.appendChild(el("div",null,"Started "+(fmtET(item.started_ts)||"not recorded")+" · completed "+(fmtET(item.completed_ts)||"not recorded")+" · last activity "+(fmtET(item.updated_ts)||"not recorded")+" · elapsed "+elapsed));
+    row.appendChild(el("div","muted","Route "+(item.gateway_route||"not recorded")+" · resolved "+(item.actual_model||"not recorded")+" · provider "+(item.provider||"not recorded")+" · "+(item.streaming?"streaming":"non-streaming")));
+    row.appendChild(el("div","muted","LiteLLM request "+(item.gateway_request_id||"not recorded")+" · provider request "+(item.provider_request_id||"not recorded")+" · Langfuse trace "+(item.trace_id||"not recorded")));
+    row.appendChild(el("div","muted","Parent execution "+(item.parent_attempt_id||"none")+" · request "+(item.request_id||"not recorded")));
+    row.appendChild(el("div","muted","First token "+fmtms(item.first_token_latency_ms)+" · tokens in/out/cached "+(token.input??"?")+"/"+(token.output??"?")+"/"+(token.cached??"?")+" · cost "+(item.cost!=null?item.cost:"not recorded")+" · retries "+(item.retry_count||0)));
+    if(Object.keys(activity).length) row.appendChild(el("div",null,"Safe activity: "+Object.entries(activity).map(([k,v])=>{
+      const shown=(k==="phase"||k.endsWith("_status"))?String(v).replace(/_/g," "):v;
+      return k.replace(/_/g," ")+" "+shown;
+    }).join(" · ")));
+    const toolSummary=toolActivitySummary(item.tool_activity); if(toolSummary) row.appendChild(el("div",null,"Tool activity: "+toolSummary));
+    box.appendChild(row); });
+  box.appendChild(el("div","muted","Private model reasoning and response bodies are not displayed."));
+}
+
+function renderQuality(s){
+  const box=$("qualityWorkspace"); box.textContent="";
+  const query=(($("qualityFilter")||{}).value||"").trim().toLowerCase();
+  const matches=item=>!query||JSON.stringify(item).toLowerCase().includes(query);
+  const candidates=(s.candidates||[]).filter(matches), validations=(s.validations||[]).filter(matches), requirements=(s.requirements||[]).filter(matches), dispositions=(s.dispositions||[]).filter(matches);
+  const windows=s.collection_windows||{};
+  const heading=(label,key,values)=>{ const meta=windows[key]||{}, count=query?values.length:(meta.total!=null?meta.total:values.length);
+    const row=el("div","hchip"); row.appendChild(el("div","b",label+" · "+count));
+    if(!count) row.appendChild(el("div","muted",query?"No records in the current retained window match this filter.":"Not recorded for this run.")); box.appendChild(row); };
+  const windowNote=key=>{ const meta=windows[key]||{}; if(meta.truncated) box.appendChild(el("div","muted","Showing latest "+meta.returned+" of "+meta.total+" in the current retained window.")); };
+  heading("Candidates","candidates",candidates); windowNote("candidates");
+  candidates.slice(-25).forEach(item=>{ const producer=item.producer||{}; const row=el("div","hchip");
+    row.appendChild(el("div","b",(item.candidate_id||"unknown candidate")+" · "+(item.current_disposition||"unknown disposition")));
+    row.appendChild(el("div",null,"Produced by "+(producer.role||"unknown producer")+" / "+(producer.model||"model unknown")+" · parent "+(item.parent_candidate_id||"none")));
+    row.appendChild(el("div","muted","Files: "+((item.files||[]).join(", ")||"not recorded")+" · patch "+(item.patch_digest||"not recorded")+" · artifact "+(item.final_artifact_ref||"not recorded")+" · commit "+(item.final_commit||"not recorded")+" · incorporated "+((item.incorporated_candidate_ids||[]).join(", ")||"none")));
+    row.appendChild(el("div","muted","Revision evidence: "+((item.revision_evidence_refs||[]).join(", ")||"none recorded"))); box.appendChild(row); });
+  heading("Validations","validations",validations); windowNote("validations");
+  validations.slice(-50).forEach(item=>{ const row=el("div","hchip"), dimensions=item.dimensions||{}, testQuality=item.test_quality||{};
+    row.appendChild(el("div","b",(item.validation_id||"validation")+" · "+(item.status||"unknown")+" · "+(item.source_kind||"source unknown")));
+    row.appendChild(el("div",null,"Producer "+(item.producer||"unknown")+" "+(item.producer_version||"version unknown")+" · evidence "+(item.artifact_ref||"not recorded")));
+    row.appendChild(el("div","muted","Dimensions: "+(Object.entries(dimensions).map(([k,v])=>k.replace(/_/g," ")+" "+v).join(" · ")||"not recorded")+" · uncertainty "+(item.uncertainty||"not recorded")));
+    if(item.baseline_delta) row.appendChild(el("div","muted","Baseline change: "+Object.entries(item.baseline_delta).map(([k,v])=>k.replace(/_/g," ")+" "+v).join(" · ")));
+    if((item.gaps||[]).length) row.appendChild(el("div","v-warn","Known gaps: "+item.gaps.join(" · ")));
+    if(Object.keys(testQuality).length) row.appendChild(el("div","muted","Test quality: "+Object.entries(testQuality).map(([k,v])=>k.replace(/_/g," ")+" "+(v==null?"unknown":v?"yes":"no")).join(" · ")));
+    box.appendChild(row); });
+  heading("Requirements","requirements",requirements); windowNote("requirements");
+  requirements.slice(-50).forEach(item=>{ const row=el("div","hchip");
+    row.appendChild(el("div","b",(item.requirement_id||"requirement")+" · "+(item.effective_status||item.status||"unknown")+(item.critical?" · critical":" · non-critical")));
+    row.appendChild(el("div",null,item.description||"Requirement text not recorded."));
+    row.appendChild(el("div","muted",(item.source_kind||"source unknown")+" · producer "+(item.producer||"unknown")+" · evidence "+((item.evidence_refs||[]).join(", ")||"not recorded"))); box.appendChild(row); });
+  heading("Dispositions","dispositions",dispositions); windowNote("dispositions");
+  dispositions.slice(-25).forEach(item=>{ const row=el("div","hchip");
+    row.appendChild(el("div","b",(item.disposition||"unknown")+" · "+(item.candidate_id||"candidate unknown")));
+    row.appendChild(el("div",null,item.executive_explanation||"Explanation not recorded."));
+    row.appendChild(el("div","muted","Reason: "+(item.primary_reason||"not applicable")+" · categories "+((item.reason_categories||[]).join(", ")||"none")+" · decision maker "+(item.decision_maker||"not recorded")+" · failed checks "+((item.failed_checks||[]).join(", ")||"none")+" · superseded by "+(item.superseded_by_candidate_id||"not applicable")));
+    row.appendChild(el("div","muted","Impact: "+(item.impact||"unknown")+" Remediation: "+(item.remediation||"not recorded")));
+    if((item.disagreements||[]).length) row.appendChild(el("div","v-warn","Evaluator disagreement recorded · "+(item.resolution||"unresolved")));
+    if((item.weaknesses||[]).length) row.appendChild(el("div","muted","Visible weaknesses: "+item.weaknesses.join(", ")));
+    box.appendChild(row); });
+  const evidence=s.evidence_health||s.health||{};
+  if(evidence.archive_integrity) box.appendChild(el("div","muted","Archive integrity: "+evidence.archive_integrity));
 }
 
 // ---- "What happened" narrative card ------------------------------------- //
@@ -1119,7 +1288,7 @@ function renderHero(s){
   if(active){
     const seat=st.active_seat, isLanes=(seat==="lanes"||seat==="assess"), isVerify=(seat==="verify"||st.stage==="verify");
     color=isVerify?"var(--ok)":isLanes?vColor("breaker"):vColor(seat);
-    eb.textContent="round "+(st.round||0)+" / "+(st.max_rounds||0)+" · "+(st.stage||"working");
+    eb.textContent="work attempt "+(st.round||0)+" of max "+(maxWorkAttempts(s)??"not recorded")+" · "+(st.stage||"working");
     const verb = isVerify?"is running the authoritative gate on":
       seat==="reviewer"?"is reviewing":seat==="builder"?"is building on":
       (seat==="breaker"||seat==="verifier"||isLanes)?"is probing":"is working on";
@@ -1141,7 +1310,7 @@ function renderHero(s){
     const stage=st.stage||"working";
     const cand=st.candidate?("candidate "+st.candidate):"";
     color="var(--accent)";
-    eb.textContent="round "+(st.round||0)+" / "+(st.max_rounds||0)+" · "+stage;
+    eb.textContent="work attempt "+(st.round||0)+" of max "+(maxWorkAttempts(s)??"not recorded")+" · "+stage;
     ti.textContent=(hid?(stage+" on "+hid):("Autopilot · "+stage));
     const since=Date.parse(st.active_since||st.updated_ts); const elp=since?(Date.now()-since)/1000:null;
     const laneLine=latestLaneLine(s);
@@ -1173,10 +1342,11 @@ function renderHero(s){
           +(row.closed_actor?(" · by "+row.closed_actor):"")+(row.closed_reason?(" · “"+row.closed_reason+"”"):"");
       }
     }
-    else{ color="var(--violet)"; eb.textContent="round budget reached · "+(st.round||0)+" / "+(st.max_rounds||0);
+    else{ const decision=s.latest_decision||null; const reason=decision&&decision.reason;
+      color="var(--violet)"; eb.textContent=reason?("stopped · "+reason.replaceAll("_"," ")):"stopped · reason not recorded";
       ti.textContent="The gate held. Your call.";
       const blk=(s.lanes||{}).blockers||0; const laneLine=latestLaneLine(s);
-      sub.textContent=(hid?("Handoff "+hid+" was not signed off. "):"")+(blk?(blk+" adversarial finding"+(blk===1?"":"s")+" unresolved. "):"")+"Nothing shipped autonomously — exactly as designed."+(laneLine?(" Last lane: "+laneLine+"."):"");
+      sub.textContent=(hid?("Handoff "+hid+" was not signed off. "):"")+(blk?(blk+" adversarial finding"+(blk===1?"":"s")+" unresolved. "):"")+(decision?("Decision after completed round "+decision.completed_round+" of max "+decision.maximum_rounds+". "):"")+"Nothing shipped autonomously — exactly as designed."+(laneLine?(" Last lane: "+laneLine+"."):"");
       if(hid){ const b1=el("button","primary","Human override "+hid+" → done"); b1.onclick=()=>approve(hid); cta.appendChild(b1);
         const b2=el("button","warn ghost","↻ Re-run "+hid); b2.onclick=()=>reopen(hid); cta.appendChild(b2); } }
   } else if(ph==="paused"){ color="var(--warn)"; eb.textContent="held"; ti.textContent="Paused";
@@ -1197,9 +1367,20 @@ function renderHero(s){
   } else { color="var(--faint)"; eb.textContent=ph||"—"; ti.textContent="Autopilot"; sub.textContent=""; }
   stripe.style.background=color;
   if(st.started_ts) metric(mx,fmtdur((Date.now()-Date.parse(st.started_ts))/1000),"uptime");
-  metric(mx,String(ov.rounds||0),"rounds");
+  const budgets=((st.budget||{}).budgets)||{};
+  const work=budgets.work_attempts||{};
+  const turns=budgets.actor_turns||{};
+  const verification=budgets.verification_calls||{};
+  const providerWindow=((s.collection_windows||{}).provider_attempts)||{};
+  const providerAttempts=providerWindow.total!=null?providerWindow.total:(s.model_activity||[]).filter(a=>a.source==="gateway_client").length;
+  const latestDecision=s.latest_decision||null;
+  metric(mx,String(work.consumed!=null?work.consumed:(st.round||0))+(work.limit!=null?(" / "+work.limit):""),"work attempts");
+  metric(mx,String(turns.consumed!=null?turns.consumed:(ov.rounds||0)),"actor turns");
+  metric(mx,String(verification.consumed!=null?verification.consumed:0),"verification calls");
+  metric(mx,String(providerAttempts),"provider attempts");
+  metric(mx,String(latestDecision?latestDecision.completed_round:0),"completed round boundaries");
   metric(mx,String(ov.fails||0),"failures",ov.fails?"var(--crit)":"var(--ok)");
-  if(ov.avg_ms){ const m=el("div","metric"); m.appendChild(el("div","v mono",fmtms(ov.avg_ms))); m.appendChild(el("div","k","avg round")); mx.appendChild(m); }
+  if(ov.avg_ms){ const m=el("div","metric"); m.appendChild(el("div","v mono",fmtms(ov.avg_ms))); m.appendChild(el("div","k","avg actor turn")); mx.appendChild(m); }
   const blk=(s.lanes||{}).blockers||0; if(blk) metric(mx,String(blk),"blockers","var(--crit)");
 }
 
@@ -1251,7 +1432,7 @@ function renderSeats(s){
         bi.style.background=vColor(n); bar.appendChild(bi); mid.appendChild(bar); }
       row.appendChild(mid);
       const stt=el("div","st");
-      if(d.rounds){ const r1=el("div"); r1.appendChild(el("span","b",String(d.rounds))); r1.appendChild(document.createTextNode(" rounds")); stt.appendChild(r1);
+      if(d.rounds){ const r1=el("div"); r1.appendChild(el("span","b",String(d.rounds))); r1.appendChild(document.createTextNode(" actor turns")); stt.appendChild(r1);
         stt.appendChild(el("div","mono","avg "+fmtms(d.avg_ms)));
         if(d.fails) stt.appendChild(el("div","mono",d.fails+" fails")); else stt.appendChild(el("div","mono","0 fails")); }
       else if((L.lanes||[]).length && (n==="breaker"||n==="verifier")){ const r1=el("div");
@@ -1343,7 +1524,7 @@ function renderLanes(s){
 }
 
 const OPERATIONAL_STATES=["queued","claimed","running","awaiting","paused","capped","blocked","parked","escalated","retrying","failed","cancelled","superseded","completed"];
-const HEALTH_DIMENSIONS=["source_reads","reconciliation","history_persistence","schema_compatibility","freshness","stream","gateway","langfuse"];
+const HEALTH_DIMENSIONS=["source_reads","reconciliation","history_persistence","run_archive_persistence","attempt_persistence","call_ledger_persistence","run_evidence_persistence","schema_compatibility","freshness","stream","gateway","langfuse"];
 let activeOpFilter=null;
 function renderOperational(s){
   const counts=s.state_counts||{}, countBox=$("opcounts"); countBox.textContent="";
@@ -1428,7 +1609,7 @@ function evMsg(ev){ const dec=ev.decision||{}, act=dec.action||"", stage=ev.stag
     const sb=(rc.find(x=>x.indexOf("sendback:")===0)||"sendback:?").slice(9);
     return wrap(el("b","v-crit","sent back to builder")," — send-back #"+sb+", "+n+" defect"+(n==="1"?"":"s")); }
   if(stage==="autopilot.signoff_blocked") return wrap(b(art)," sign-off blocked: ", el("span","v-crit",rc.join(", ").slice(0,60)));
-  if(stage==="autopilot.pause") return wrap(el("b","v-violet","round budget reached")," — awaiting human"+(art?" on "+art:""));
+  if(stage==="autopilot.pause") return wrap(el("b","v-violet","autopilot stopped")," — awaiting human"+(art?" on "+art:""));
   if(stage==="autopilot.control") return wrap("· "+act+" ("+role+")");
   if(stage==="handoff.done") return wrap(el("b","v-ok",art+" → done"));
   if(stage==="handoff.create") return wrap("created "+art);
@@ -1454,7 +1635,7 @@ function renderFeed(s){
   if(atBottom) box.scrollTop=box.scrollHeight;
 }
 
-// ---- max-turns (round budget) ------------------------------------------- //
+// ---- max work-attempt control ------------------------------------------- //
 function fmtDurMs(ms){ if(ms==null) return "-"; return fmtdur(ms/1000); }
 function shortId(u){ if(!u) return "—"; const m=String(u).match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})\d{2}Z?-(\d+)$/);
   if(m){ const mo=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][(+m[2])-1]||m[2];
@@ -1465,7 +1646,7 @@ function syncTurns(s){
   // CRITICAL focus guard (mirrors the renderSeats <select> guard): if the operator is typing in the
   // cap field, DON'T overwrite it on the 2s poll — that would eat their keystrokes. Only sync when idle.
   if(document.activeElement!==inp){
-    const mx=(s.status||{}).max_rounds;
+    const mx=maxWorkAttempts(s);
     if(mx!=null) inp.value=mx; else if(!inp.value) inp.placeholder="cap";
   }
   $("btnTurns").disabled=!s.status;
@@ -1496,7 +1677,7 @@ function renderRuns(s){
     meta.appendChild(el("span","when",fmtET(r.started_ts)||"—"));
     meta.appendChild(el("span",runPhaseCls(r.phase_final),r.phase_final||"—"));
     const sub=el("span","sub");
-    sub.textContent=(r.rounds_total!=null?r.rounds_total:"?")+" rounds · "+fmtDurMs(r.duration_ms);
+    sub.textContent=(r.rounds_total!=null?r.rounds_total:"?")+" actor turns · "+fmtDurMs(r.duration_ms);
     meta.appendChild(sub);
     if(uid) meta.appendChild(el("span","uid mono",shortId(uid)));
     row.appendChild(meta);
@@ -1538,22 +1719,68 @@ function laneBreakdown(box,byLane){
     const t=el("div","tally"); t.appendChild(el("span","c",cf+" confirmed")); t.appendChild(el("br"));
     t.appendChild(el("span","r",rf+" refuted")); row.appendChild(t); box.appendChild(row); });
 }
+function replaySection(box,title,subtitle){ const section=el("section","replay-section");
+  const h=el("div","eyebrow",title); h.style.margin="14px 0 6px"; section.appendChild(h);
+  if(subtitle) section.appendChild(el("div","muted",subtitle)); box.appendChild(section); return section; }
+function replayRow(section,title,detail,cls){ const row=el("div","hchip");
+  row.appendChild(el("div","b",title)); if(detail) row.appendChild(el("div",cls||"muted",detail)); section.appendChild(row); }
+function replayWindow(section,j,key){ const meta=((j.collection_windows||{})[key])||{};
+  if(meta.truncated) section.appendChild(el("div","muted","Showing latest "+meta.returned+" of "+meta.total+" retained records. Full evidence remains available from the unwindowed run API.")); }
+function renderHistoricalEvidence(body,j){
+  const human=j.operator_run_summary||null;
+  if(!human){ const missing=replaySection(body,"Human run summary");
+    replayRow(missing,"Historical human summary was not recorded","This legacy archive is not promoted to complete; use only the retained sections below.","v-warn");
+  } else {
+    const outcome=human.outcome||{}, facts=human.proven_facts||{};
+    const summary=replaySection(body,"Human run summary","Evidence status · "+(human.truth_status||"unknown"));
+    replayRow(summary,human.objective||"Objective not recorded","Run objective");
+    replayRow(summary,
+      "Stopped after completed round "+(outcome.completed_rounds??"not recorded")+" of maximum "+(outcome.maximum_rounds??"not recorded"),
+      "Reason: "+(outcome.stop_reason||"not recorded"), human.truth_status==="complete"?"v-ok":"v-warn");
+    replayRow(summary,"Models expected · "+(facts.models_expected||[]).join(", "),"Attempted · "+(facts.models_attempted||[]).join(", "));
+    replayRow(summary,"Gateway and telemetry",
+      (facts.calls_reaching_litellm??0)+" reached LiteLLM · "+(facts.provider_responses??0)+" provider responses · "+(facts.calls_reaching_langfuse??0)+" reached Langfuse · "+(facts.explicit_telemetry_failures??0)+" explicit export failures");
+    const missingEvidence=human.missing_evidence||[];
+    replayRow(summary,"Missing evidence · "+missingEvidence.length,missingEvidence.length?missingEvidence.join(" · "):"None recorded",missingEvidence.length?"v-warn":"v-ok");
+    replayRow(summary,"Known risks · "+(human.known_risks||[]).length,(human.known_risks||[]).join(" · ")||"None recorded",(human.known_risks||[]).length?"v-warn":"v-ok");
+    replayRow(summary,"Human actions · "+(human.human_actions||[]).length,(human.human_actions||[]).join(" · ")||"No operator action recorded");
+    const judgments=replaySection(body,"Evaluator judgments","Independent decisions remain distinct from model claims.");
+    (human.evaluator_judgments||[]).forEach(item=>replayRow(judgments,(item.disposition||"unknown")+" · "+(item.candidate_id||"candidate unknown"),(item.explanation||"Explanation not recorded")+" Impact: "+(item.impact||"unknown")));
+    (human.model_claims||[]).forEach(item=>replayRow(judgments,"MODEL CLAIM · "+(item.validation_id||"claim"),(item.status||"unknown")+" · not an acceptance oracle","v-warn"));
+  }
+  const roster=replaySection(body,"Execution roster","Every planned model and its terminal evidence state.");
+  (j.roster||[]).forEach(item=>replayRow(roster,(item.role||"unknown role")+" · "+(item.model||"model not recorded"),modelStateLabel(item.state)+" · terminal "+(item.terminal_disposition||"not reconciled")+" · telemetry "+(item.telemetry_outcome||"not applicable")+" · "+(item.orchestration_execution_count||0)+" orchestration execution(s) · "+(item.provider_attempt_count||0)+" provider call(s)"+(item.terminal_reason?" · reason "+item.terminal_reason:"")));
+  if(!(j.roster||[]).length) replayRow(roster,"Not recorded","No execution roster was retained.","v-warn");
+  const attempts=replaySection(body,"Model attempts","Lifecycle and telemetry outcomes; identifiers are secondary evidence.");
+  (j.attempts||[]).forEach(item=>replayRow(attempts,(item.requested_model||"unknown model")+" · "+modelStateLabel(item.state)+" · "+(item.source||"source unknown"),(item.seat||"unknown role")+" · parent execution "+(item.parent_attempt_id||"none")+" · route "+(item.gateway_route||"not recorded")+" · resolved "+(item.actual_model||"not recorded")+" · provider "+(item.provider||"not recorded")+" · first token "+fmtms(item.first_token_latency_ms)+" · duration "+fmtms(item.total_duration_ms)+" · telemetry "+(item.telemetry_result||item.telemetry_state||"not recorded")+" · LiteLLM "+(item.gateway_request_id||"not recorded")+" · trace "+(item.trace_id||"not recorded")+" · tool lifecycle "+(toolActivitySummary(item.tool_activity)||"not retained")+" · attempt "+(item.attempt_id||"unknown")));
+  replayWindow(attempts,j,"model_activity");
+  const candidates=replaySection(body,"Candidates and lineage");
+  (j.candidates||[]).forEach(item=>replayRow(candidates,(item.candidate_id||"unknown candidate")+" · "+(item.current_disposition||"unknown"),"Parent "+(item.parent_candidate_id||"none")+" · files "+((item.files||[]).join(", ")||"not recorded")+" · artifact "+(item.final_artifact_ref||"not recorded")+" · commit "+(item.final_commit||"not recorded")+" · revision evidence "+((item.revision_evidence_refs||[]).join(", ")||"none")));
+  replayWindow(candidates,j,"candidates");
+  const quality=replaySection(body,"Validation and requirements","Source authority remains visible.");
+  (j.validations||[]).forEach(item=>replayRow(quality,(item.validation_id||"validation")+" · "+(item.status||"unknown"),(item.source_kind||"source unknown")+" · producer "+(item.producer||"unknown")+" "+(item.producer_version||"version unknown")+" · artifact "+(item.artifact_ref||"not recorded")+" · dimensions "+(JSON.stringify(item.dimensions||{}))+" · baseline "+(JSON.stringify(item.baseline_delta||{}))+" · uncertainty "+(item.uncertainty||"not recorded")+" · gaps "+((item.gaps||[]).join(", ")||"none")+" · test quality "+JSON.stringify(item.test_quality||{})));
+  (j.requirements||[]).forEach(item=>replayRow(quality,(item.requirement_id||"requirement")+" · "+(item.effective_status||item.status||"unknown"),(item.critical?"critical":"non-critical")+" · "+(item.description||"text not recorded")+" · "+(item.source_kind||"source unknown")+" · evidence "+((item.evidence_refs||[]).join(", ")||"not recorded")));
+  replayWindow(quality,j,"validations"); replayWindow(quality,j,"requirements");
+  const dispositions=replaySection(body,"Candidate dispositions","Reasons, impact, remediation, and disagreement are retained.");
+  (j.dispositions||[]).forEach(item=>replayRow(dispositions,(item.disposition||"unknown")+" · "+(item.candidate_id||"candidate unknown"),(item.executive_explanation||"Explanation not recorded")+" Reason: "+(item.primary_reason||"not applicable")+" / "+((item.reason_categories||[]).join(", ")||"none")+". Failed checks: "+((item.failed_checks||[]).join(", ")||"none")+". Impact: "+(item.impact||"unknown")+" Remediation: "+(item.remediation||"not recorded")+" Weaknesses: "+((item.weaknesses||[]).join(", ")||"none")+" Unavailable evidence: "+((item.unavailable_evidence||[]).join(", ")||"none")+((item.disagreements||[]).length?(" Evaluator disagreement: "+(item.resolution||"unresolved")):"")));
+  replayWindow(dispositions,j,"dispositions");
+}
 async function openRun(uid){
   if(!uid) return; openRViewer("run "+shortId(uid));
   const body=$("rv-body");
-  try{ const r=await fetch("/api/run?id="+encodeURIComponent(uid)); const j=await r.json();
+  try{ const r=await fetch("/api/run?id="+encodeURIComponent(uid)+"&window=1"); const j=await r.json();
     if(!r.ok){ body.textContent=j.error||("error "+r.status); return; }
     const sum=j.summary||{};
     $("rv-title").textContent="run "+shortId(sum.run_uid||uid)+(sum.phase_final?" · "+sum.phase_final:"");
     const fm=$("rv-fm"); fm.textContent="";
     const addfm=(k,v)=>{ if(v==null||v==="") return; const sp=el("span");
       sp.appendChild(el("b",null,k+": ")); sp.appendChild(document.createTextNode(String(v))); fm.appendChild(sp); };
-    addfm("started",fmtET(sum.started_ts)); addfm("rounds",sum.rounds_total); addfm("cap",sum.max_rounds);
-    addfm("duration",fmtDurMs(sum.duration_ms)); addfm("calls",sum.calls);
+    addfm("started",fmtET(sum.started_ts)); addfm("actor turns",sum.rounds_total); addfm("max work attempts",sum.max_rounds);
+    addfm("duration",fmtDurMs(sum.duration_ms)); addfm("legacy turn count",sum.calls);
     const lz=sum.lanes||{}; addfm("lanes","C"+(lz.confirmed||0)+"/R"+(lz.refuted||0));
     addfm("signoff",(sum.signoff||{}).result);
-    body.textContent="";
-    const ah=el("div","eyebrow"); ah.textContent="activity"; ah.style.margin="4px 0 6px"; body.appendChild(ah);
+    body.textContent=""; renderHistoricalEvidence(body,j);
+    const ah=el("div","eyebrow"); ah.textContent="technical activity tail"; ah.style.margin="14px 0 6px"; body.appendChild(ah);
     const feedbox=el("div","feed"); buildFeed(feedbox,(j.events||[]),false); body.appendChild(feedbox);
     laneBreakdown(body, lz.by_lane || (j.lanes||{}).by_lane || j.lanes);
   }catch(e){ body.textContent="failed to load: "+e; }

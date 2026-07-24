@@ -75,6 +75,10 @@ class TestCandidateIdentity:
     def test_identical_inputs_stable(self):
         assert _cand().candidate_id == _cand().candidate_id
 
+    def test_candidate_retains_source_file_inventory_without_source_contents(self):
+        candidate = _cand(src={"src/a.py": "h1", "tests/test_a.py": "h2"})
+        assert candidate.source_files == ("src/a.py", "tests/test_a.py")
+
 
 class TestReviewerReportParse:
     def test_edited_code_rejected(self):
@@ -108,6 +112,7 @@ class TestMergeTable:
         cand = _cand()
         a = ca.complete(str(tmp_path), "030", cand, reviewer_report=_rep(cand), lane_ledger=_CLEAN)
         assert a.outcome == ca.APPROVED
+        assert a.requirement_coverage == {"r1": "met"}
 
     def test_lane_confirmed_blocks(self, tmp_path):
         cand = _cand()

@@ -24,6 +24,7 @@ import dashboard_core as dc  # noqa: E402
 import escalation as esc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import lanes  # noqa: E402
+import model_observability as mo  # noqa: E402
 import operational_state as ops  # noqa: E402
 import transitions as tr  # noqa: E402
 
@@ -250,6 +251,11 @@ class TestSnapshotAndActions:
         assert snap["seats"]["builder"]["model"] == "opus"  # the chosen catalog id surfaces
         assert "secret" not in json.dumps(snap["seats"])  # never the full argv ([C38])
         assert snap["paused"] is False
+        assert snap["candidates"] == []
+        assert snap["validations"] == []
+        assert snap["requirements"] == []
+        assert snap["dispositions"] == []
+        assert snap["evidence_health"] == snap["health"]
 
     def test_snapshot_projects_full_escalated_parked_operational_item_without_live_run(self, tmp_path):
         collab = str(tmp_path / "c")
@@ -783,6 +789,69 @@ class TestNoStaleRunSurface:
         _live_run(collab, hid=hid, run_uid="THIS-RUN")
         got = dc.snapshot(collab)["lanes"]
         assert got is not None and got["run_uid"] == "THIS-RUN" and len(got["lanes"]) == 1
+
+
+class TestModelActivity:
+    def test_live_snapshot_exposes_pretransport_activity_and_truthful_telemetry_health(self, tmp_path):
+        collab = str(tmp_path / "c")
+        hid = hc.create(collab, to="reviewer", from_="builder", title="x", body="y")["id"]
+        lease = _live_run(collab, hid=hid, run_uid="run-models")
+        path = Path(collab) / "autopilot" / "model-events.jsonl"
+        common = {
+            "attempt_id": "attempt-1",
+            "request_id": "request-1",
+            "run_uid": "run-models",
+            "seat": "builder",
+            "requested_model": "gpt-5.6-luna",
+            "attempt_number": 1,
+            "source": "gateway_client",
+        }
+        mo.append_event(
+            path,
+            mo.ModelAttemptEvent(
+                event_id="event-1", state="connecting", event_ts="2026-07-22T00:00:00Z", **common
+            ),
+        )
+        snap = dc.snapshot(collab)
+        assert snap["model_activity"][0]["state"] == "connecting"
+        assert snap["health"]["gateway"]["status"] == "unknown"
+        assert snap["health"]["langfuse"]["status"] == "unknown"
+
+        mo.append_event(
+            path,
+            mo.ModelAttemptEvent(
+                event_id="event-2",
+                state="completed",
+                event_ts="2026-07-22T00:00:02Z",
+                actual_model="openai/gpt-5.6-luna",
+                provider="openai",
+                **common,
+            ),
+        )
+        snap = dc.snapshot(collab)
+        assert snap["model_activity"][0]["state"] == "completed"
+        assert snap["health"]["gateway"]["status"] == "healthy"
+        assert snap["health"]["langfuse"]["status"] == "unknown"
+        assert "0 of 1" in snap["health"]["langfuse"]["reason"]
+
+        mo.append_event(
+            path,
+            mo.ModelAttemptEvent(
+                event_id="event-3",
+                state="telemetry_verified",
+                event_ts="2026-07-22T00:00:03Z",
+                telemetry_result="verified",
+                observation_id="obs-1",
+                trace_id="trace-1",
+                source="langfuse_reconciler",
+                **{key: value for key, value in common.items() if key != "source"},
+            ),
+        )
+        snap = dc.snapshot(collab)
+        assert snap["model_activity"][0]["telemetry_state"] == "telemetry_verified"
+        assert snap["model_activity"][0]["observation_id"] == "obs-1"
+        assert snap["health"]["langfuse"]["status"] == "healthy"
+        lease.release()
 
 
 class TestHandoffView:

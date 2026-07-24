@@ -35,14 +35,26 @@ if _LIB not in sys.path:
 # Reuse autopilot's path/telemetry helpers (the single source of truth for the layout).
 import adapter_profiles as adapter_profiles  # noqa: E402
 import autopilot as ap  # noqa: E402
+import candidate_disposition as cd  # noqa: E402
+import candidate_evidence as ce  # noqa: E402
 import collab_common as cc  # noqa: E402
 import contracts  # noqa: E402
 import escalation as esc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
+import model_observability as mo  # noqa: E402
 import operational_state as ops  # noqa: E402
 import operator_requests as opreq  # noqa: E402
+import quality_evidence as qe  # noqa: E402
 import registry  # noqa: E402
+import requirements_matrix as req  # noqa: E402
+import round_decision as rd  # noqa: E402
+import run_evidence as revidence  # noqa: E402
+import run_history as rh  # noqa: E402
+import run_manifest as rm  # noqa: E402
+import run_plan as rp  # noqa: E402
+import run_projection as rproj  # noqa: E402
+import run_summary as rsummary  # noqa: E402
 import transitions as _transitions  # noqa: E402
 import verification as _verification  # noqa: E402
 import verification_plan as verification_plan  # noqa: E402
@@ -132,6 +144,48 @@ def set_max_rounds(collab, n, *, by: str = "dashboard") -> dict:
 
 _events_cache: dict[str, tuple] = {}  # resolved_path -> (mtime_ns, size, events)
 _events_lock = threading.Lock()
+
+_LIVE_COLLECTION_LIMITS = {
+    "attempts": 500,
+    "candidates": 200,
+    "validations": 250,
+    "requirements": 250,
+    "dispositions": 200,
+}
+
+
+def _window_live_projection(projection: dict) -> tuple[dict, dict[str, dict]]:
+    """Bound live SSE payloads while declaring exactly what was omitted.
+
+    Historical ``/api/run`` detail remains complete. The high-frequency live snapshot
+    carries recent tails plus totals so browser memory and SSE frames do not grow without
+    bound or silently pretend a tail is the complete collection.
+    """
+    windowed = dict(projection)
+    windows: dict[str, dict] = {}
+    public_names = {"attempts": "model_activity"}
+    for name, limit in _LIVE_COLLECTION_LIMITS.items():
+        values = list(projection.get(name) or [])
+        returned = values[-limit:]
+        windowed[name] = returned
+        windows[public_names.get(name, name)] = {
+            "total": len(values),
+            "returned": len(returned),
+            "truncated": len(values) > len(returned),
+            "order": "latest",
+        }
+    attempts = list(projection.get("attempts") or [])
+    provider_total = sum(item.get("source") == "gateway_client" for item in attempts)
+    windows["provider_attempts"] = {
+        "total": provider_total,
+        "returned": sum(
+            item.get("source") == "gateway_client" for item in windowed.get("attempts") or []
+        ),
+        "truncated": provider_total
+        > sum(item.get("source") == "gateway_client" for item in windowed.get("attempts") or []),
+        "order": "latest",
+    }
+    return windowed, windows
 
 
 def read_events(collab) -> list[dict]:
@@ -371,7 +425,8 @@ def set_seat_model(home, seat, model, *, by: str = "dashboard") -> dict:
     cfg = seats.get(seat)
     if not isinstance(cfg, dict) or cfg.get("backend") != "cli":
         raise cc.CollabError(f"seat {seat!r} is not an existing CLI seat — cannot set its model")
-    models = doc.get("models") if isinstance(doc.get("models"), dict) else {}
+    raw_models = doc.get("models")
+    models: dict = raw_models if isinstance(raw_models, dict) else {}
     if model not in models:
         valid = ", ".join(sorted(str(k) for k in models)) or "(none)"
         raise cc.CollabError(f"model {model!r} is not in the 'models' catalog; valid ids: {valid}")
@@ -440,9 +495,14 @@ def _latest_lanes(collab, *, run_uid: str | None = None, hid: str | None = None)
     for ln in data.get("lanes") or []:
         if not isinstance(ln, dict):
             continue
-        profile = ln.get("profile") if isinstance(ln.get("profile"), dict) else {}
-        breaker = ln.get("breaker_seat") or ((profile.get("breaker") or {}).get("seat"))
-        verifier = ln.get("verifier_seat") or ((profile.get("verifier") or {}).get("seat"))
+        raw_profile = ln.get("profile")
+        profile: dict = raw_profile if isinstance(raw_profile, dict) else {}
+        raw_breaker = profile.get("breaker")
+        breaker_profile: dict = raw_breaker if isinstance(raw_breaker, dict) else {}
+        raw_verifier = profile.get("verifier")
+        verifier_profile: dict = raw_verifier if isinstance(raw_verifier, dict) else {}
+        breaker = ln.get("breaker_seat") or breaker_profile.get("seat")
+        verifier = ln.get("verifier_seat") or verifier_profile.get("seat")
         lanes.append(
             {
                 "lane": ln.get("pass") or ln.get("lane"),
@@ -617,7 +677,7 @@ def list_runs(collab) -> list[dict]:
     return out
 
 
-def run_detail(collab, run_uid) -> dict:
+def run_detail(collab, run_uid, *, windowed: bool = False) -> dict:
     """Full detail for one archived run: its summary, an events tail, and a derived lane summary.
 
     ``run_uid`` is validated (:func:`_validate_run_uid`) and resolved strictly under the history root
@@ -641,7 +701,89 @@ def run_detail(collab, run_uid) -> dict:
             continue  # torn/partial line — skip, never crash
         if isinstance(ev, dict):
             events.append(ev)
-    return {"summary": doc, "events": events[-200:], "lanes": doc.get("lanes") or {}}
+    try:
+        model_events = mo.read_events(run_dir / "model-events.jsonl")
+    except (OSError, mo.ModelObservabilityError):
+        model_events = []
+    try:
+        raw_plan = json.loads((run_dir / "run-plan.json").read_text("utf-8"))
+        plan = raw_plan if isinstance(raw_plan, dict) and raw_plan.get("run_uid") == run_uid else None
+    except (OSError, ValueError):
+        plan = None
+    try:
+        decisions = rd.read_decision_file(run_dir / "run-events.jsonl", run_uid=run_uid)
+    except rd.RoundDecisionError:
+        decisions = []
+    try:
+        candidate_events = ce.read_event_file(run_dir / "run-events.jsonl", run_uid=run_uid)
+    except ce.CandidateEvidenceError:
+        candidate_events = []
+    try:
+        validations = qe.read_validation_file(run_dir / "run-events.jsonl", run_uid=run_uid)
+    except qe.QualityEvidenceError:
+        validations = []
+    try:
+        requirements = req.read_requirement_file(run_dir / "run-events.jsonl", run_uid=run_uid)
+    except req.RequirementsMatrixError:
+        requirements = []
+    try:
+        dispositions = cd.read_disposition_file(run_dir / "run-events.jsonl", run_uid=run_uid)
+    except cd.CandidateDispositionError:
+        dispositions = []
+    try:
+        manifest = json.loads((run_dir / "manifest.json").read_text("utf-8"))
+        manifest = manifest if isinstance(manifest, dict) else None
+    except (OSError, ValueError):
+        manifest = None
+    try:
+        raw_operator_summary = json.loads((run_dir / "operator-summary.json").read_text("utf-8"))
+        operator_run_summary = (
+            raw_operator_summary
+            if isinstance(raw_operator_summary, dict)
+            and raw_operator_summary.get("run_uid") == run_uid
+            else None
+        )
+    except (OSError, ValueError):
+        operator_run_summary = None
+    manifest_verification = rm.verify(run_dir)
+    projection = rproj.project(
+        run_uid=run_uid,
+        plan=plan,
+        model_events=model_events,
+        decisions=decisions,
+        candidate_events=candidate_events,
+        validations=validations,
+        requirements=req.project(requirements),
+        dispositions=dispositions,
+        manifest_verification=manifest_verification,
+    )
+    projection["evidence_health"]["failures"].extend(
+        rsummary.retained_persistence_failures(run_dir)
+    )
+    if windowed:
+        projection, collection_windows = _window_live_projection(projection)
+    else:
+        collection_windows = {}
+    return {
+        "summary": doc,
+        "events": events[-200:],
+        "lanes": doc.get("lanes") or {},
+        "attempts": projection["attempts"],
+        "plan": projection["plan"],
+        "roster": projection["roster"],
+        "decisions": projection["decisions"],
+        "latest_decision": projection["latest_decision"],
+        "telemetry": projection["telemetry"],
+        "narrative": projection["narrative"],
+        "candidates": projection["candidates"],
+        "validations": projection["validations"],
+        "requirements": projection["requirements"],
+        "dispositions": projection["dispositions"],
+        "manifest": manifest,
+        "operator_run_summary": operator_run_summary,
+        "collection_windows": collection_windows,
+        "evidence_health": projection["evidence_health"],
+    }
 
 
 def _as_dict(v) -> dict:
@@ -789,7 +931,47 @@ def read_model_telemetry(collab, *, hid: str | None = None, limit: int = 100) ->
     return records[-max(1, min(int(limit), 500)) :]
 
 
-def _snapshot_health(collab, *, items: list[dict], live: bool, ts: str) -> dict:
+def _call_ledger_health(collab: str | Path) -> dict:
+    path = Path(collab) / "autopilot" / "model-calls-health.json"
+    try:
+        value = json.loads(path.read_text("utf-8"))
+    except FileNotFoundError:
+        return {
+            "status": "unknown",
+            "updated_ts": None,
+            "reason": "redacted call ledger has not reported persistence health",
+        }
+    except (OSError, ValueError):
+        return {
+            "status": "unavailable",
+            "updated_ts": None,
+            "reason": "redacted call ledger health record is unreadable",
+        }
+    if not isinstance(value, dict):
+        return {
+            "status": "unavailable",
+            "updated_ts": None,
+            "reason": "redacted call ledger health record is malformed",
+        }
+    status = str(value.get("status") or "unknown")
+    if status not in ("healthy", "degraded", "unavailable", "unknown"):
+        status = "unknown"
+    return {
+        "status": status,
+        "updated_ts": value.get("updated_ts"),
+        "reason": value.get("reason"),
+    }
+
+
+def _snapshot_health(
+    collab,
+    *,
+    items: list[dict],
+    model_activity: list[dict],
+    live: bool,
+    run_uid: str | None,
+    ts: str,
+) -> dict:
     source_states = {item.get("source_read_status") for item in items}
     if "unavailable" in source_states:
         source_status, source_reason = "unavailable", "one or more source records are incompatible"
@@ -813,36 +995,101 @@ def _snapshot_health(collab, *, items: list[dict], live: bool, ts: str) -> dict:
     else:
         freshness_status, freshness_reason = "unknown", "no driver currently holds the board lease"
     persistence = ops.read_history_health(collab)
+    archive_persistence = rh.read_archive_health(collab)
+    attempt_persistence = mo.read_persistence_health(
+        Path(collab) / "autopilot" / "model-events.jsonl"
+    )
+    call_ledger_persistence = _call_ledger_health(collab)
+    run_evidence_persistence = revidence.read_health(collab)
+    if run_uid:
+        scoped = (
+            (archive_persistence, "run archive persistence"),
+            (attempt_persistence, "model attempt persistence"),
+            (call_ledger_persistence, "redacted call ledger persistence"),
+            (run_evidence_persistence, "structured run-evidence persistence"),
+        )
+        for record, label in scoped:
+            if record.get("run_uid") != run_uid:
+                record.clear()
+                record.update(
+                    {
+                        "status": "unknown",
+                        "updated_ts": ts,
+                        "reason": f"{label} has not reported for the active run",
+                        "run_uid": run_uid,
+                    }
+                )
     persistence_status = persistence.get("status")
     if persistence_status not in ("healthy", "degraded", "unavailable", "unknown"):
         persistence_status = "unknown"
-    calls = read_model_telemetry(collab, limit=100)
-    last_call = next(
-        (record for record in reversed(calls) if record.get("record_type") != "langfuse_verification"),
-        None,
-    )
-    if last_call is None:
-        gateway_status, gateway_reason, gateway_ts = "unknown", "no model attempt has been recorded", ts
-        langfuse_status, langfuse_reason = "unknown", "no verified export evidence is available"
+    gateway_attempts = [item for item in model_activity if item.get("source") == "gateway_client"]
+    terminal_attempts = [
+        item
+        for item in gateway_attempts
+        if item.get("state") in ("completed", "failed", "timed_out", "cancelled")
+    ]
+    if gateway_attempts:
+        failed = [item for item in terminal_attempts if item.get("state") != "completed"]
+        incomplete = len(gateway_attempts) - len(terminal_attempts)
+        if failed:
+            gateway_status = "degraded"
+            gateway_reason = f"{len(failed)} of {len(gateway_attempts)} gateway attempt(s) failed"
+        elif incomplete:
+            gateway_status = "unknown"
+            gateway_reason = f"{incomplete} of {len(gateway_attempts)} gateway attempt(s) still in flight"
+        else:
+            gateway_status, gateway_reason = "healthy", None
+        gateway_ts = str(max((item.get("updated_ts") or ts for item in gateway_attempts), default=ts))
+        verified = [
+            item for item in terminal_attempts if item.get("telemetry_state") == "telemetry_verified"
+        ]
+        telemetry_failed = [
+            item for item in terminal_attempts if item.get("telemetry_state") == "telemetry_failed"
+        ]
+        if telemetry_failed:
+            langfuse_status = "unavailable"
+            langfuse_reason = (
+                f"{len(telemetry_failed)} of {len(terminal_attempts)} terminal attempt(s) have explicit "
+                "telemetry failure"
+            )
+        elif terminal_attempts and len(verified) == len(terminal_attempts):
+            langfuse_status, langfuse_reason = "healthy", None
+        else:
+            langfuse_status = "unknown"
+            langfuse_reason = (
+                f"{len(verified)} of {len(terminal_attempts)} terminal attempt(s) have verified "
+                "Langfuse evidence"
+            )
     else:
-        outcome = last_call.get("outcome")
-        gateway_status = "healthy" if outcome == "success" else "degraded"
-        gateway_reason = None if outcome == "success" else f"latest model attempt: {outcome or 'unknown'}"
-        gateway_ts = str(last_call.get("ended_ts") or ts)
-        verification = next(
-            (
-                record
-                for record in reversed(calls)
-                if record.get("record_type") == "langfuse_verification"
-                and record.get("request_id") == last_call.get("request_id")
-            ),
+        calls = read_model_telemetry(collab, limit=100)
+        last_call = next(
+            (record for record in reversed(calls) if record.get("record_type") != "langfuse_verification"),
             None,
         )
-        export = (verification or last_call).get("langfuse_export")
-        langfuse_status = (
-            "healthy" if export == "verified" else "unavailable" if export == "rejected" else "unknown"
-        )
-        langfuse_reason = None if export == "verified" else f"latest export evidence: {export or 'unknown'}"
+        if last_call is None:
+            gateway_status, gateway_reason, gateway_ts = "unknown", "no model attempt has been recorded", ts
+            langfuse_status, langfuse_reason = "unknown", "no verified export evidence is available"
+        else:
+            outcome = last_call.get("outcome")
+            gateway_status = "healthy" if outcome == "success" else "degraded"
+            gateway_reason = None if outcome == "success" else f"latest model attempt: {outcome or 'unknown'}"
+            gateway_ts = str(last_call.get("ended_ts") or ts)
+            verification = next(
+                (
+                    record
+                    for record in reversed(calls)
+                    if record.get("record_type") == "langfuse_verification"
+                    and record.get("request_id") == last_call.get("request_id")
+                ),
+                None,
+            )
+            export = (verification or last_call).get("langfuse_export")
+            langfuse_status = (
+                "healthy" if export == "verified" else "unavailable" if export == "rejected" else "unknown"
+            )
+            langfuse_reason = (
+                None if export == "verified" else f"latest export evidence: {export or 'unknown'}"
+            )
     return {
         "source_reads": _health_record(source_status, ts=ts, reason=source_reason),
         "reconciliation": _health_record(
@@ -854,6 +1101,26 @@ def _snapshot_health(collab, *, items: list[dict], live: bool, ts: str) -> dict:
             persistence_status,
             ts=str(persistence.get("updated_ts") or ts),
             reason=persistence.get("reason"),
+        ),
+        "run_archive_persistence": _health_record(
+            str(archive_persistence.get("status") or "unknown"),
+            ts=str(archive_persistence.get("updated_ts") or ts),
+            reason=archive_persistence.get("reason"),
+        ),
+        "attempt_persistence": _health_record(
+            str(attempt_persistence.get("status") or "unknown"),
+            ts=str(attempt_persistence.get("updated_ts") or ts),
+            reason=attempt_persistence.get("reason"),
+        ),
+        "call_ledger_persistence": _health_record(
+            str(call_ledger_persistence.get("status") or "unknown"),
+            ts=str(call_ledger_persistence.get("updated_ts") or ts),
+            reason=call_ledger_persistence.get("reason"),
+        ),
+        "run_evidence_persistence": _health_record(
+            str(run_evidence_persistence.get("status") or "unknown"),
+            ts=str(run_evidence_persistence.get("updated_ts") or ts),
+            reason=run_evidence_persistence.get("reason"),
         ),
         "schema_compatibility": _health_record(
             "unavailable" if incompatible else "healthy",
@@ -909,7 +1176,67 @@ def snapshot(collab, home=None) -> dict:
     for item in items:
         state_counts[item["operational_state"]] += 1
     snapshot_ts = ap._now_utc()
-    health = _snapshot_health(collab, items=items, live=live, ts=snapshot_ts)
+    try:
+        live_model_events = mo.read_events(Path(collab) / "autopilot" / "model-events.jsonl")
+    except (OSError, mo.ModelObservabilityError):
+        live_model_events = []
+    run_plan = rp.read_plan(collab, run_uid=run_uid) if live and run_uid else None
+    try:
+        decisions = rd.read_decisions(collab, run_uid=run_uid) if live and run_uid else []
+    except rd.RoundDecisionError:
+        decisions = []
+    try:
+        candidate_events = ce.read_events(collab, run_uid=run_uid) if live and run_uid else []
+    except ce.CandidateEvidenceError:
+        candidate_events = []
+    try:
+        validations = qe.read_validations(collab, run_uid=run_uid) if live and run_uid else []
+    except qe.QualityEvidenceError:
+        validations = []
+    try:
+        requirements = req.read_requirements(collab, run_uid=run_uid) if live and run_uid else []
+    except req.RequirementsMatrixError:
+        requirements = []
+    try:
+        dispositions = cd.read_dispositions(collab, run_uid=run_uid) if live and run_uid else []
+    except cd.CandidateDispositionError:
+        dispositions = []
+    projection = (
+        rproj.project(
+            run_uid=run_uid,
+            plan=run_plan,
+            model_events=live_model_events,
+            decisions=decisions,
+            candidate_events=candidate_events,
+            validations=validations,
+            requirements=req.project(requirements),
+            dispositions=dispositions,
+        )
+        if live and run_uid
+        else {
+            "attempts": [],
+            "roster": [],
+            "latest_decision": None,
+            "telemetry": [],
+            "narrative": [],
+            "candidates": [],
+            "validations": [],
+            "requirements": [],
+            "dispositions": [],
+        }
+    )
+    full_model_activity = projection["attempts"]
+    execution_roster = projection["roster"]
+    projection, collection_windows = _window_live_projection(projection)
+    model_activity = projection["attempts"]
+    health = _snapshot_health(
+        collab,
+        items=items,
+        model_activity=full_model_activity,
+        live=live,
+        run_uid=run_uid,
+        ts=snapshot_ts,
+    )
     return {
         "schema_version": "1.0",
         "collab": str(collab),
@@ -924,6 +1251,17 @@ def snapshot(collab, home=None) -> dict:
         "lanes": _latest_lanes(collab, run_uid=run_uid, hid=(status or {}).get("current_hid"))
         if live
         else None,
+        "model_activity": model_activity,
+        "run_plan": run_plan,
+        "execution_roster": execution_roster,
+        "latest_decision": projection["latest_decision"],
+        "telemetry": projection["telemetry"],
+        "operator_summary": projection["narrative"],
+        "candidates": projection["candidates"],
+        "validations": projection["validations"],
+        "requirements": projection["requirements"],
+        "dispositions": projection["dispositions"],
+        "collection_windows": collection_windows,
         # --- durable: true regardless of whether anything is running ---
         "control": ctrl,
         "paused": bool(ctrl.get("paused")),
@@ -935,6 +1273,7 @@ def snapshot(collab, home=None) -> dict:
         "counts": counts,
         "state_counts": state_counts,
         "health": health,
+        "evidence_health": health,
         "freshness": health["freshness"],
         "stream": health["stream"],
         "open": open_handoffs(collab, b),

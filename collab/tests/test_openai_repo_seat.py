@@ -172,6 +172,123 @@ class TestPromptCaching:
         assert "usage api=chat step=1 prompt_tokens=2000 cached_tokens=0" in err
         assert "usage api=chat step=2 prompt_tokens=2600 cached_tokens=2048" in err
 
+    def test_tool_activity_is_run_correlated_safe_and_durable(
+        self, monkeypatch, tmp_path
+    ):
+        event_log = tmp_path / "model-events.jsonl"
+        monkeypatch.setenv("COLLAB_MODEL_EVENT_LOG", str(event_log))
+        monkeypatch.setenv("COLLAB_EXECUTION_ID", "parent-execution-1")
+        monkeypatch.setenv("COLLAB_RUN_UID", "run-1")
+        monkeypatch.setenv("COLLAB_HANDOFF_ID", "001")
+        monkeypatch.setenv("COLLAB_SEAT", "builder")
+        monkeypatch.setenv("COLLAB_MODEL_ALIAS", "grok-4.5")
+        monkeypatch.setenv("COLLAB_ATTEMPT_NUMBER", "2")
+        (tmp_path / "private-source-name.py").write_text("x = 1\n", encoding="utf-8")
+        calls = [
+            {
+                "id": "tool-call-1",
+                "function": {
+                    "name": "read_file",
+                    "arguments": '{"path":"private-source-name.py"}',
+                },
+            }
+        ]
+        replies = [
+            {"choices": [{"message": {"content": None, "tool_calls": calls}}]},
+            {"choices": [{"message": {"content": "done"}}]},
+        ]
+
+        monkeypatch.setattr(
+            seat,
+            "_post_json",
+            lambda *args, **kwargs: replies.pop(0),
+        )
+        assert (
+            seat._run_agentic(
+                "https://gateway.example/v1",
+                "grok-4.5",
+                "k",
+                "PROMPT",
+                tmp_path,
+                timeout=5,
+                max_steps=3,
+                max_bytes=1000,
+            )
+            == "done"
+        )
+
+        events = seat.mo.read_events(event_log)
+        assert [event.state for event in events] == ["waiting_for_tool", "generating"]
+        assert {event.attempt_id for event in events} == {"parent-execution-1"}
+        assert all(event.run_uid == "run-1" and event.attempt_number == 2 for event in events)
+        assert events[0].detail == {
+            "phase": "tool_started",
+            "tool_name": "read_file",
+            "tool_call_id": "tool-call-1",
+            "step": 1,
+        }
+        assert events[1].detail["phase"] == "tool_completed"
+        assert "private-source-name.py" not in event_log.read_text("utf-8")
+        assert seat.mo.reduce_attempts(events)[0]["tool_activity"] == [
+            {
+                "event_ts": events[0].event_ts,
+                "state": "waiting_for_tool",
+                **events[0].detail,
+            },
+            {
+                "event_ts": events[1].event_ts,
+                "state": "generating",
+                **events[1].detail,
+            },
+        ]
+
+    def test_responses_tool_activity_uses_the_same_parent_execution(
+        self, monkeypatch, tmp_path
+    ):
+        event_log = tmp_path / "model-events.jsonl"
+        for key, value in {
+            "COLLAB_MODEL_EVENT_LOG": str(event_log),
+            "COLLAB_EXECUTION_ID": "parent-responses-1",
+            "COLLAB_RUN_UID": "run-1",
+            "COLLAB_HANDOFF_ID": "001",
+            "COLLAB_SEAT": "builder",
+            "COLLAB_MODEL_ALIAS": "gpt-5.6-luna",
+            "COLLAB_ATTEMPT_NUMBER": "1",
+        }.items():
+            monkeypatch.setenv(key, value)
+        replies = [
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "list_dir",
+                        "arguments": "{}",
+                    }
+                ]
+            },
+            {"output_text": "done"},
+        ]
+        monkeypatch.setattr(seat, "_post_json", lambda *args, **kwargs: replies.pop(0))
+
+        assert (
+            seat._run_agentic_responses(
+                "https://gateway.example/v1",
+                "gpt-5.6-luna",
+                "k",
+                "PROMPT",
+                tmp_path,
+                timeout=5,
+                max_steps=3,
+                max_bytes=1000,
+            )
+            == "done"
+        )
+        events = seat.mo.read_events(event_log)
+        assert [event.state for event in events] == ["waiting_for_tool", "generating"]
+        assert {event.attempt_id for event in events} == {"parent-responses-1"}
+        assert {event.detail["tool_name"] for event in events} == {"list_dir"}
+
     def test_chat_budget_final_keeps_tools_and_key_and_absent_usage_is_na(
         self, monkeypatch, capsys, tmp_path
     ):

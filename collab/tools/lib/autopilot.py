@@ -39,6 +39,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, suppress
 from dataclasses import replace
@@ -48,13 +49,18 @@ _LIB = str(Path(__file__).resolve().parent)
 sys.path.insert(0, _LIB)
 import adapter_profiles  # noqa: E402
 import candidate_assessment as ca  # noqa: E402
+import candidate_disposition as cd  # noqa: E402
+import candidate_evidence as ce  # noqa: E402
 import collab_common as cc  # noqa: E402
 import contracts  # noqa: E402
 import escalation as esc  # noqa: E402
 import handoff_core as hc  # noqa: E402
 import handoff_events as he  # noqa: E402
+import model_observability as mo  # noqa: E402
 import operational_state as _ops  # noqa: E402
 import operator_requests as opreq  # noqa: E402
+import quality_evidence as qe  # noqa: E402
+import requirements_matrix as req_matrix  # noqa: E402
 import run_budget as rb  # noqa: E402
 import transitions as _transitions  # noqa: E402
 from verification import AUTHORITATIVE_ARGV as _AUTHORITATIVE_ARGV  # noqa: E402
@@ -823,6 +829,7 @@ def _dispatch_seat(
     rid: str,
     attempt: int,
     span_role: str,
+    execution_ref: dict[str, str] | None = None,
 ) -> str | None:
     """Run ONE seat turn against the already-claimed handoff ``hid`` and return its raw stdout, or ``None``
     on a backend failure. A turn is *conversation*, not a handoff (ADR-0001): it is persisted only as an
@@ -834,6 +841,28 @@ def _dispatch_seat(
     cfg = _cli_seat(seats, seat)
     if cfg is None:
         return None  # human/web seat mid-exchange — the caller treats it as awaiting a person
+    execution_id = str(uuid.uuid4())
+    if execution_ref is not None:
+        execution_ref["attempt_id"] = execution_id
+    requested_model = str(cfg.get("model") or seat)
+    model_event_log = Path(collab) / "autopilot" / "model-events.jsonl"
+    mo.append_with_health(
+        model_event_log,
+        mo.ModelAttemptEvent(
+            event_id=str(uuid.uuid4()),
+            attempt_id=execution_id,
+            request_id=execution_id,
+            run_uid=rid,
+            seat=seat,
+            requested_model=requested_model,
+            state="starting",
+            event_ts=mo.now_utc(),
+            attempt_number=attempt,
+            source="orchestrator",
+            handoff_id=hid,
+            streaming=False,
+        ),
+    )
     sp = f"{span_role}:{hid}:{attempt}"
     _emit_safe(
         _trace.emit,
@@ -881,11 +910,35 @@ def _dispatch_seat(
                     "COLLAB_HANDOFF_ID": hid,
                     "COLLAB_RUN_UID": rid,
                     "COLLAB_SEAT": seat,
+                    "COLLAB_MODEL_ALIAS": requested_model,
+                    "COLLAB_EXECUTION_ID": execution_id,
+                    "COLLAB_ATTEMPT_NUMBER": str(attempt),
                     "COLLAB_MODEL_CALL_LOG": str(Path(collab) / "autopilot" / "model-calls.jsonl"),
+                    "COLLAB_MODEL_EVENT_LOG": str(model_event_log),
                 },
             )
     except cc.CollabError as e:
         lat_ms = round((time.monotonic() - t0) * 1000, 1)
+        mo.append_with_health(
+            model_event_log,
+            mo.ModelAttemptEvent(
+                event_id=str(uuid.uuid4()),
+                attempt_id=execution_id,
+                request_id=execution_id,
+                run_uid=rid,
+                seat=seat,
+                requested_model=requested_model,
+                state="failed",
+                event_ts=mo.now_utc(),
+                attempt_number=attempt,
+                source="orchestrator",
+                handoff_id=hid,
+                completion_status="interrupted",
+                failure_classification="backend_error",
+                total_duration_ms=lat_ms,
+                streaming=False,
+            ),
+        )
         print(f"[autopilot] backend for seat {seat!r} failed on {hid}: {e}", file=sys.stderr)
         _emit_safe(
             _trace.emit,
@@ -908,6 +961,25 @@ def _dispatch_seat(
         )
         return None  # handoff stays claimed for a human; the drive stalls ([C39])
     lat_ms = round((time.monotonic() - t0) * 1000, 1)
+    mo.append_with_health(
+        model_event_log,
+        mo.ModelAttemptEvent(
+            event_id=str(uuid.uuid4()),
+            attempt_id=execution_id,
+            request_id=execution_id,
+            run_uid=rid,
+            seat=seat,
+            requested_model=requested_model,
+            state="completed",
+            event_ts=mo.now_utc(),
+            attempt_number=attempt,
+            source="orchestrator",
+            handoff_id=hid,
+            completion_status="completed",
+            total_duration_ms=lat_ms,
+            streaming=False,
+        ),
+    )
     resp_bytes = len(raw.encode("utf-8", "replace"))
     relpath = _write_reply(collab, seat, _sanitize(raw))  # the turn, stored as an inert artifact
     # Clear only the active seat mark — not current_hid. Assess (and repair loops) still own the hid.
@@ -1327,6 +1399,7 @@ def run(
     interval: float = 2.0,
     home=None,
     log: str | None = None,
+    objective: str | None = None,
 ) -> int:
     """Drive the CANDIDATE lifecycle ONE HANDOFF AT A TIME (ADR-0002/0003). Returns the total seat turns.
 
@@ -1344,7 +1417,6 @@ def run(
     resident to poll for newly-queued handoffs once the board is drained.
     """
     log = log or _log_default(collab)
-    rid = _run_id(collab)
     closeout = load_closeout(home) if home else None  # opt-in auto-lane closeout (breaker/verifier + tests)
     driven: set = set()  # roots started this run — excluded from future root selection ([C35])
     import run_history as _rh  # lazy: run_history imports autopilot; avoid a module-load cycle
@@ -1363,6 +1435,16 @@ def run(
     seats_snapshot = {
         name: (cfg.get("model") if isinstance(cfg, dict) else None) for name, cfg in (seats or {}).items()
     }
+    import run_plan as _run_plan
+
+    _run_plan.declare(
+        collab,
+        run_uid=run_uid,
+        seats=seats or {},
+        limits=base_limits,
+        objective=objective or "Evidence-gated assessment of queued collab handoffs",
+        created_ts=started_ts,
+    )
     lease = hc.ActiveHandoffLease(collab, run_uid, pid=pid)
     # ROTATE+WIPE the live feed so this run starts clean: the prior run archived ITS log at its own end
     # (finally, below), so truncating here only discards already-archived leftovers. Guard a fresh collab.
@@ -1402,7 +1484,7 @@ def run(
     )
     # Un-strand anything a dead driver left in claimed/ BEFORE selecting work: _next_root scans pending/
     # only, so an orphan is invisible to it and the run would idle to a false "done" with the board wedged.
-    _reclaim_orphans(collab, log=log, rid=rid)
+    _reclaim_orphans(collab, log=log, rid=run_uid)
     try:
         # Renew the board lease for the whole loop: without this it goes stale 90 s in (mid first agentic
         # call), the dashboard reports "no driver running" while we work, and Start will spawn a SECOND
@@ -1417,7 +1499,7 @@ def run(
                 interval=interval,
                 home=home,
                 log=log,
-                rid=rid,
+                rid=run_uid,
                 closeout=closeout,
                 driven=driven,
                 lease=lease,
@@ -1588,6 +1670,107 @@ def _limits_from_control(collab, base_limits):
     return replace(base_limits, max_work_attempts=int(mr)) if mr else base_limits
 
 
+def _persist_round_decision(
+    collab,
+    *,
+    rid,
+    completed_round,
+    maximum_rounds,
+    budget,
+    candidate_id=None,
+    unresolved=(),
+    viable_models=(),
+    evidence=(),
+    **facts,
+):
+    """Persist the authoritative continue/stop ruling before the corresponding control action."""
+    import round_decision as _rd
+
+    report = budget.report() if budget is not None else {"budgets": {}}
+    budgets = report.get("budgets") or {}
+
+    def _remaining(name):
+        item = budgets.get(name) or {}
+        consumed, limit = item.get("consumed"), item.get("limit")
+        if not isinstance(consumed, (int, float)) or not isinstance(limit, (int, float)):
+            return None
+        return max(0, limit - consumed)
+
+    decision = _rd.evaluate(
+        _rd.DecisionContext(
+            run_uid=rid,
+            completed_round=completed_round,
+            maximum_rounds=maximum_rounds,
+            candidate_id=candidate_id,
+            unresolved_requirements=tuple(str(value) for value in unresolved),
+            viable_models=tuple(str(value) for value in viable_models if value),
+            remaining_budget={
+                "tokens": None,
+                "time_seconds": _remaining("wall_clock_seconds"),
+                "cost": None,
+                "work_attempts": _remaining("work_attempts"),
+                "total_model_calls": _remaining("total_model_calls"),
+                "verification_passes": _remaining("verification_passes"),
+            },
+            timestamp=_now_utc(),
+            supporting_evidence=tuple(str(value) for value in evidence),
+            **facts,
+        )
+    )
+    _rd.persist(collab, decision)
+    return decision
+
+
+def _persist_candidate_disposition(
+    collab,
+    *,
+    rid,
+    root,
+    candidate_id,
+    disposition,
+    explanation,
+    evidence,
+    impact,
+    remediation,
+    retryable,
+    final,
+    weaknesses=(),
+    unavailable=(),
+    disagreements=(),
+    resolution="no evaluator disagreement recorded",
+    human_triggers=(),
+    requirements_evaluation=None,
+    primary_reason=None,
+    failed_checks=(),
+):
+    return cd.record_disposition(
+        collab,
+        run_uid=rid,
+        candidate_id=candidate_id,
+        handoff_id=root,
+        timestamp=_now_utc(),
+        disposition=disposition,
+        executive_explanation=explanation,
+        evidence_refs=tuple(evidence),
+        impact=impact,
+        remediation=remediation,
+        retryable=retryable,
+        final=final,
+        retained_work=(f"candidate:{candidate_id}",),
+        alternatives=("revise candidate", "request human review"),
+        weaknesses=tuple(weaknesses),
+        unavailable_evidence=tuple(unavailable),
+        confidence="high" if evidence else "low",
+        disagreements=tuple(disagreements),
+        resolution=resolution,
+        human_review_triggers=tuple(human_triggers),
+        requirements_evaluation=requirements_evaluation,
+        decision_maker="autopilot.candidate_assessment",
+        primary_reason=primary_reason,
+        failed_checks=tuple(failed_checks),
+    )
+
+
 def _next_request(collab, seats):
     """Return the lowest-id consumable retry/adopt request, or ``None``.
 
@@ -1670,6 +1853,21 @@ def _drive_candidate(
         verification_plan = _resolve_assurance_plan(home, guardrails)
     except cc.CollabError as exc:
         budget = rb.RunBudget(collab, root, _limits_from_control(collab, base_limits))
+        builder_config = seats.get(builder_seat) if isinstance(seats, dict) else None
+        _persist_round_decision(
+            collab,
+            rid=rid,
+            completed_round=0,
+            maximum_rounds=budget.limits.max_work_attempts,
+            budget=budget,
+            viable_models=(
+                (builder_config.get("model"),)
+                if isinstance(builder_config, dict) and builder_config.get("model")
+                else ()
+            ),
+            evidence=(f"handoff:{root}", "assurance-plan:unavailable"),
+            required_dependency_unavailable=True,
+        )
         _escalate_pause(
             collab, root, home, budget, reason="infrastructure_blocked", log=log, rid=rid, cause=str(exc)
         )
@@ -1704,12 +1902,63 @@ def _drive_candidate(
     while True:
         ctrl = _read_control(collab)
         if ctrl.get("stop"):
+            _persist_round_decision(
+                collab,
+                rid=rid,
+                completed_round=attempt,
+                maximum_rounds=budget.limits.max_work_attempts,
+                budget=budget,
+                candidate_id=last_candidate_id,
+                unresolved=tuple(
+                    f"{item.get('lane') or 'finding'}:{index}"
+                    for index, item in enumerate(last_blockers, 1)
+                ),
+                evidence=(f"handoff:{root}", "control:stop"),
+                user_cancelled=True,
+            )
             return "stopped", calls
         # Honor a live control change to the work-attempt ceiling (reconstruct the budget: it reloads the
         # persisted counters from disk and re-applies the new limits — a lower cap can trip immediately).
         live_limits = _limits_from_control(collab, base_limits)
         if live_limits != budget.limits:
             budget = rb.RunBudget(collab, root, live_limits)
+        exhausted = budget.exhausted()
+        viable_models = tuple(
+            config.get("model")
+            for role in (builder_seat, reviewer_seat)
+            if isinstance((config := seats.get(role)), dict) and config.get("model")
+        )
+        next_decision = _persist_round_decision(
+            collab,
+            rid=rid,
+            completed_round=attempt,
+            maximum_rounds=live_limits.max_work_attempts,
+            budget=budget,
+            candidate_id=last_candidate_id,
+            unresolved=(
+                tuple(
+                    f"{item.get('lane') or 'finding'}:{index}"
+                    for index, item in enumerate(last_blockers, 1)
+                )
+                or (f"handoff:{root}",)
+            ),
+            viable_models=viable_models,
+            evidence=(f"handoff:{root}",),
+            budget_exhausted=bool(exhausted and exhausted not in ("work_attempts", "wall_clock")),
+            timeout_reached=exhausted == "wall_clock",
+        )
+        if next_decision["decision"] == "stop":
+            _escalate_pause(
+                collab,
+                root,
+                home,
+                budget,
+                reason="budget_exhausted",
+                log=log,
+                rid=rid,
+                blockers=last_blockers,
+            )
+            return "budget_exhausted", calls
         _write_status(
             collab,
             max_rounds=live_limits.max_work_attempts,
@@ -1738,7 +1987,9 @@ def _drive_candidate(
             # assess it as-is. The evidence contract still gates any close.
             adopt_pending = False
             builder_raw = "[operator adopted the current on-disk source as this candidate]"
+            producer_attempt_id = f"operator-adoption:{root}:{attempt}"
         else:
+            execution_ref: dict[str, str] = {}
             builder_raw = _dispatch_seat(
                 collab,
                 builder_seat,
@@ -1750,10 +2001,21 @@ def _drive_candidate(
                 rid=rid,
                 attempt=attempt,
                 span_role="builder",
+                execution_ref=execution_ref,
             )
             calls += 1
             if builder_raw is None:
+                _persist_round_decision(
+                    collab,
+                    rid=rid,
+                    completed_round=attempt,
+                    maximum_rounds=live_limits.max_work_attempts,
+                    budget=budget,
+                    evidence=(f"handoff:{root}", f"seat:{builder_seat}"),
+                    orchestration_error=True,
+                )
                 return "stalled", calls  # backend failed — handoff stays claimed; a human needs to look
+            producer_attempt_id = execution_ref["attempt_id"]
         transcript = f"{transcript}\n\n----- {builder_seat} -----\n{_sanitize(builder_raw)}"
 
         candidate = _compute_candidate(
@@ -1770,10 +2032,56 @@ def _drive_candidate(
             verification_plan=verification_plan,
         )
         cid = candidate.candidate_id
+        builder_config = seats.get(builder_seat) if isinstance(seats.get(builder_seat), dict) else {}
+        try:
+            base_commit = (json.loads(_status_path(collab).read_text("utf-8")) or {}).get("git_sha")
+        except (OSError, ValueError, AttributeError):
+            base_commit = None
+        launcher = (builder_config.get("cmd") or [None])[0]
+        ce.record_created(
+            collab,
+            run_uid=rid,
+            candidate_id=cid,
+            handoff_id=root,
+            timestamp=_now_utc(),
+            producer={
+                "role": builder_seat,
+                "model": builder_config.get("model"),
+                "attempt_id": producer_attempt_id,
+            },
+            parent_candidate_id=last_candidate_id,
+            task_version=(
+                candidate.contract_revision or candidate.assessment_plan_revision or "not_recorded"
+            ),
+            base_commit=base_commit,
+            worktree_state_hash=candidate.source_manifest_hash,
+            files=tuple(candidate.source_files),
+            tools=(str(launcher),) if launcher else (),
+            revision_evidence_refs=tuple(
+                f"finding:{blocker.get('id')}"
+                for blocker in last_blockers
+                if blocker.get("id")
+            ),
+            final_artifact_ref=(
+                f"source-manifest:{candidate.source_manifest_hash}"
+                if candidate.source_manifest_hash
+                else None
+            ),
+        )
         _write_status(collab, stage="assess", candidate=cid[5:17], current_hid=root)
         # No progress: a repair packet that produced a byte-identical candidate — the builder did not change
         # the source. Pause rather than reassess the identical work forever (ADR-0003).
         if repaired and cid == last_candidate_id:
+            _persist_round_decision(
+                collab,
+                rid=rid,
+                completed_round=attempt,
+                maximum_rounds=live_limits.max_work_attempts,
+                budget=budget,
+                candidate_id=cid,
+                evidence=(f"handoff:{root}", f"candidate:{cid}"),
+                duplicate_or_non_improving=True,
+            )
             _escalate_pause(
                 collab, root, home, budget, reason="no_progress", log=log, rid=rid, blockers=last_blockers
             )
@@ -1818,6 +2126,69 @@ def _drive_candidate(
             )
 
         outcome = assessment.outcome
+        ce.record_assessed(
+            collab,
+            run_uid=rid,
+            candidate_id=cid,
+            handoff_id=root,
+            timestamp=assessment.completed_ts or _now_utc(),
+            outcome=outcome,
+            evaluator="candidate-assessment-v1",
+            feedback_refs=tuple(
+                f"finding:{finding.fingerprint}"
+                for finding in (*assessment.unresolved_findings, *assessment.advisory_findings)
+            ),
+        )
+        qe.record_validation(
+            collab,
+            run_uid=rid,
+            candidate_id=cid,
+            validation_id="candidate-assessment",
+            timestamp=assessment.completed_ts or _now_utc(),
+            source_kind="evaluator_judgment",
+            status=(
+                "passed"
+                if outcome == ca.APPROVED
+                else "failed"
+                if outcome == ca.REPAIR_REQUIRED
+                else "warning"
+            ),
+            producer="candidate-assessment",
+            producer_version="v1",
+            artifact_ref=f"assessment:{root}:{cid}",
+            dimensions={
+                "correctness": "passed" if outcome == ca.APPROVED else "unresolved",
+                "verification": outcome,
+            },
+            uncertainty="model and lane judgment; authoritative done contract remains separate",
+            gaps=("not an autonomous acceptance oracle",),
+        )
+        for requirement_id, raw_status in sorted((assessment.requirement_coverage or {}).items()):
+            value = raw_status.get("status") if isinstance(raw_status, dict) else raw_status
+            normalized = str(value or "unknown").strip().lower()
+            status = (
+                "met"
+                if normalized in ("met", "pass", "passed", "true")
+                else "partial"
+                if normalized == "partial"
+                else "missing"
+                if normalized in ("missing", "fail", "failed", "false")
+                else "unknown"
+            )
+            req_matrix.record_requirement(
+                collab,
+                run_uid=rid,
+                candidate_id=cid,
+                requirement_id=str(requirement_id),
+                description=str(requirement_id),
+                critical=True,
+                status=status,
+                source_kind="evaluator_judgment",
+                evidence_refs=(f"assessment:{root}:{cid}",),
+                producer="candidate-assessment",
+                producer_version="v1",
+                timestamp=assessment.completed_ts or _now_utc(),
+            )
         _emit_safe(
             _trace.emit,
             log,
@@ -1834,7 +2205,81 @@ def _drive_candidate(
 
         if outcome == ca.APPROVED:
             verdict = _dc_evaluate(collab, root, seats, reviewer_seat, builder_seat, cid)
+            qe.record_validation(
+                collab,
+                run_uid=rid,
+                candidate_id=cid,
+                validation_id="autonomous-done-contract",
+                timestamp=_now_utc(),
+                source_kind="automated_check",
+                status="passed" if verdict["satisfied"] else "failed",
+                producer="done-contract",
+                producer_version="18.3",
+                artifact_ref=f"contract:{verdict['hash']}",
+                dimensions={
+                    "contract": "passed" if verdict["satisfied"] else "failed",
+                    "source_equals_tested": (
+                        "passed" if verdict["satisfied"] else "see contract conditions"
+                    ),
+                },
+                uncertainty="none beyond the named contract conditions",
+                gaps=tuple(
+                    condition["name"]
+                    for condition in verdict["conditions"]
+                    if condition["status"] != "pass"
+                ),
+                is_acceptance_oracle=True,
+            )
+            for condition in verdict["conditions"]:
+                req_matrix.record_requirement(
+                    collab,
+                    run_uid=rid,
+                    candidate_id=cid,
+                    requirement_id=f"done-contract:{condition['name']}",
+                    description=condition["name"],
+                    critical=True,
+                    status="met" if condition["status"] == "pass" else "missing",
+                    source_kind="automated_check",
+                    evidence_refs=(f"contract:{verdict['hash']}",),
+                    producer="done-contract",
+                    producer_version="18.3",
+                    timestamp=_now_utc(),
+                )
+            requirements_evaluation = req_matrix.evaluate_acceptance(
+                req_matrix.read_requirements(collab, run_uid=rid),
+                validations=qe.read_validations(collab, run_uid=rid),
+                candidate_id=cid,
+                oracle_validation_id="autonomous-done-contract",
+            )
             if verdict["satisfied"]:
+                _persist_candidate_disposition(
+                    collab,
+                    rid=rid,
+                    root=root,
+                    candidate_id=cid,
+                    disposition="accepted",
+                    explanation="Candidate satisfied every critical done-contract condition.",
+                    evidence=(f"contract:{verdict['hash']}",),
+                    impact="The candidate is eligible for autonomous closeout.",
+                    remediation="No remediation required; retain visible warnings for operator review.",
+                    retryable=False,
+                    final=True,
+                    weaknesses=tuple(
+                        finding.fingerprint for finding in assessment.advisory_findings
+                    ),
+                    requirements_evaluation=requirements_evaluation,
+                )
+                _persist_round_decision(
+                    collab,
+                    rid=rid,
+                    completed_round=attempt,
+                    maximum_rounds=live_limits.max_work_attempts,
+                    budget=budget,
+                    candidate_id=cid,
+                    evidence=(f"handoff:{root}", f"candidate:{cid}", f"contract:{verdict['hash']}"),
+                    accepted=True,
+                    completion_criteria_met=True,
+                )
                 # The ONLY AUTONOMOUS claimed->done transition ([C36]): approved + contract clean. Human
                 # override paths exist (dashboard_core.advance_handoff, handoff_cli.cmd_done) and reach
                 # the same CAS; they are distinguished by the persisted transition KIND, never by which
@@ -1887,6 +2332,40 @@ def _drive_candidate(
             # The evidence contract refused (e.g. red tests, missing preflight, source drift).
             # Never ship on an unsatisfied contract ([C36]); pause for a human.
             unmet = [c["name"] for c in verdict["conditions"] if c["status"] != "pass"]
+            _persist_candidate_disposition(
+                collab,
+                rid=rid,
+                root=root,
+                candidate_id=cid,
+                disposition="rejected",
+                explanation=(
+                    "Candidate was provisionally approved but failed the authoritative done contract."
+                ),
+                evidence=(f"contract:{verdict['hash']}",),
+                impact="Autonomous closeout is prohibited.",
+                remediation="Resolve every failed contract condition and reassess a new candidate.",
+                retryable=True,
+                final=False,
+                weaknesses=tuple(unmet),
+                unavailable=tuple(unmet),
+                disagreements=({"reviewer": "approved", "done_contract": "rejected"},),
+                resolution="authoritative done contract overruled provisional reviewer approval",
+                human_triggers=("authoritative contract rejected a provisionally approved candidate",),
+                requirements_evaluation=requirements_evaluation,
+                primary_reason="contract_violation",
+                failed_checks=tuple(unmet),
+            )
+            _persist_round_decision(
+                collab,
+                rid=rid,
+                completed_round=attempt,
+                maximum_rounds=live_limits.max_work_attempts,
+                budget=budget,
+                candidate_id=cid,
+                unresolved=tuple(unmet),
+                evidence=(f"handoff:{root}", f"candidate:{cid}"),
+                policy_or_safety_rejection=True,
+            )
             _write_status(collab, last_error=f"contract unsatisfied on {root}: {', '.join(unmet)}"[:200])
             _escalate_pause(
                 collab, root, home, budget, reason="contract_unsatisfied", log=log, rid=rid, detail=unmet
@@ -1895,6 +2374,22 @@ def _drive_candidate(
 
         if outcome == ca.REPAIR_REQUIRED:
             blockers = _assessment_blockers(assessment)
+            _persist_candidate_disposition(
+                collab,
+                rid=rid,
+                root=root,
+                candidate_id=cid,
+                disposition="repair_required",
+                explanation=f"Candidate has {len(blockers)} unresolved blocking finding(s).",
+                evidence=tuple(
+                    f"finding:{finding.fingerprint}" for finding in assessment.unresolved_findings
+                ),
+                impact="The candidate cannot advance to closeout.",
+                remediation="Apply the recorded blocker remediations and produce a revised candidate.",
+                retryable=True,
+                final=False,
+                weaknesses=tuple(finding.fingerprint for finding in assessment.unresolved_findings),
+            )
             transcript = f"{transcript}\n\n{_fix_directive(blockers)}"  # hand the builder the exact findings
             _record_sendback(collab, root, blockers, attempt=attempt, round_no=attempt, log=log, rid=rid)
             last_candidate_id = cid
@@ -1908,6 +2403,36 @@ def _drive_candidate(
             continue  # loop -> another work attempt
 
         # infrastructure_blocked / verification_incomplete -> terminal pause + durable escalation record.
+        _persist_candidate_disposition(
+            collab,
+            rid=rid,
+            root=root,
+            candidate_id=cid,
+            disposition="blocked",
+            explanation=f"Candidate assessment stopped with {outcome}.",
+            evidence=(f"assessment:{outcome}",),
+            impact="No acceptance or autonomous closeout decision can be made.",
+            remediation="Restore the missing verification dependency and retry explicitly.",
+            retryable=True,
+            final=False,
+            unavailable=(outcome,),
+            human_triggers=(outcome,),
+        )
+        _persist_round_decision(
+            collab,
+            rid=rid,
+            completed_round=attempt,
+            maximum_rounds=live_limits.max_work_attempts,
+            budget=budget,
+            candidate_id=cid,
+            unresolved=tuple(
+                f"{item.get('lane') or 'finding'}:{index}"
+                for index, item in enumerate(_assessment_blockers(assessment), 1)
+            ),
+            evidence=(f"handoff:{root}", f"candidate:{cid}", f"assessment:{outcome}"),
+            required_dependency_unavailable=outcome == "infrastructure_blocked",
+            orchestration_error=outcome != "infrastructure_blocked",
+        )
         _escalate_pause(
             collab,
             root,

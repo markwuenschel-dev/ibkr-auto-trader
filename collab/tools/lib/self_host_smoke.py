@@ -128,7 +128,7 @@ def _scripted_runner(inject: str):
     # is a high-risk guardrail) is gpt-5.6-luna -> grok-4.5. Breakers/verifiers speak the bounded batch
     # protocol (ADR-0004 D3): 'FINDING: F<n> | path | trigger | impact' and one verdict per finding id.
     _BREAKERS = ("gemini-3.5-flash", "gpt-5.6-luna")
-    _VERIFIERS = ("anthropic-general", "grok-4.5")
+    _VERIFIERS = ("haiku-4.5", "grok-4.5")
 
     def run(cmd, prompt, *, timeout, **kw):
         who = cmd[0]

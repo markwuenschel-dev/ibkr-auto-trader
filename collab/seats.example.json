@@ -18,9 +18,9 @@
       "provider": "google",
       "cmd": ["python", "tools/adapters/openai-repo-seat.py", "--model", "gemini-3.5-flash", "--repo-root", "."]
     },
-    "anthropic-general": {
+    "haiku-4.5": {
       "provider": "anthropic",
-      "cmd": ["python", "tools/adapters/openai-repo-seat.py", "--model", "anthropic-general", "--repo-root", "."]
+      "cmd": ["python", "tools/adapters/openai-repo-seat.py", "--model", "haiku-4.5", "--repo-root", "."]
     },
     "gpt-5.6-luna": {
       "provider": "openai",
@@ -76,7 +76,7 @@
       "backend": "cli",
       "role": "verifier",
       "access": "read_test",
-      "model": "anthropic-general",
+      "model": "haiku-4.5",
       "system": "You are the independent VERIFIER. Inspect the repository and allowed tests, but never edit source. Confirm only evidence-backed findings.",
       "timeout": 900
     }

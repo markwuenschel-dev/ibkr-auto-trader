@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -33,6 +35,7 @@ import collab_common as cc  # noqa: E402
 import contracts  # noqa: E402
 import gate_runner as gr  # noqa: E402
 import handoff_core as hc  # noqa: E402
+import model_observability as mo  # noqa: E402
 import run_budget as rb  # noqa: E402
 import verification as _verification  # noqa: E402
 import verification_plan as vp  # noqa: E402
@@ -170,7 +173,27 @@ def _cmd_str(cmd) -> str:
     return " ".join(str(a) for a in (cmd or []))
 
 
-def _dispatch(runner, cmd, prompt, *, timeout, unset_env, budget):
+def _lane_env(collab, hid: str, seat: str, model: str, candidate_id: str | None) -> dict[str, str]:
+    execution_id = str(uuid.uuid4())
+    values = {
+        "COLLAB_DIR": str(collab),
+        "COLLAB_HANDOFF_ID": hid,
+        "COLLAB_SEAT": seat,
+        "COLLAB_MODEL_ALIAS": model,
+        "COLLAB_EXECUTION_ID": execution_id,
+        "COLLAB_ATTEMPT_NUMBER": "1",
+        "COLLAB_MODEL_CALL_LOG": str(Path(collab) / "autopilot" / "model-calls.jsonl"),
+        "COLLAB_MODEL_EVENT_LOG": str(Path(collab) / "autopilot" / "model-events.jsonl"),
+    }
+    run_uid = ap._status_run_uid(collab)
+    if run_uid:
+        values["COLLAB_RUN_UID"] = run_uid
+    if candidate_id:
+        values["COLLAB_CANDIDATE_ID"] = candidate_id
+    return values
+
+
+def _dispatch(runner, cmd, prompt, *, timeout, unset_env, budget, env_add=None):
     """Charge one verification model call (ADR-0002 D6: reserve BEFORE dispatch, spent even if it then
     fails), then run the backend. `BudgetExceeded` / `CollabError` propagate to the lane handler."""
     if budget is not None:
@@ -179,7 +202,66 @@ def _dispatch(runner, cmd, prompt, *, timeout, unset_env, budget):
     # adapter (the Claude CLI) would write the driver's cwd via its allow-listed Bash tools — run it in an
     # ephemeral copy of cwd instead. Self-isolating (OpenAI --run-checks) / text-only adapters run as-is.
     isolate_root = Path.cwd() if ap._should_isolate(ap.adapter_profiles.adapter_for(list(cmd))) else None
-    return ap._run_seat(runner, cmd, prompt, timeout=timeout, unset_env=unset_env, isolate_root=isolate_root)
+    started = time.monotonic()
+    event_path = Path(env_add["COLLAB_MODEL_EVENT_LOG"]) if env_add else None
+    execution_id = env_add.get("COLLAB_EXECUTION_ID") if env_add else None
+    event_kwargs = {
+        "attempt_id": execution_id,
+        "request_id": execution_id,
+        "run_uid": env_add.get("COLLAB_RUN_UID") if env_add else None,
+        "seat": env_add.get("COLLAB_SEAT") if env_add else None,
+        "requested_model": env_add.get("COLLAB_MODEL_ALIAS") if env_add else None,
+        "attempt_number": 1,
+        "source": "orchestrator",
+        "handoff_id": env_add.get("COLLAB_HANDOFF_ID") if env_add else None,
+        "candidate_id": env_add.get("COLLAB_CANDIDATE_ID") if env_add else None,
+        "streaming": False,
+    }
+    if event_path is not None and execution_id:
+        mo.append_with_health(
+            event_path,
+            mo.ModelAttemptEvent(
+                event_id=str(uuid.uuid4()), state="starting", event_ts=mo.now_utc(), **event_kwargs
+            ),
+        )
+    try:
+        raw = ap._run_seat(
+            runner,
+            cmd,
+            prompt,
+            timeout=timeout,
+            unset_env=unset_env,
+            isolate_root=isolate_root,
+            env_add=env_add,
+        )
+    except Exception as exc:
+        if event_path is not None and execution_id:
+            mo.append_with_health(
+                event_path,
+                mo.ModelAttemptEvent(
+                    event_id=str(uuid.uuid4()),
+                    state="failed",
+                    event_ts=mo.now_utc(),
+                    completion_status="interrupted",
+                    failure_classification=type(exc).__name__,
+                    total_duration_ms=round((time.monotonic() - started) * 1000, 1),
+                    **event_kwargs,
+                ),
+            )
+        raise
+    if event_path is not None and execution_id:
+        mo.append_with_health(
+            event_path,
+            mo.ModelAttemptEvent(
+                event_id=str(uuid.uuid4()),
+                state="completed",
+                event_ts=mo.now_utc(),
+                completion_status="completed",
+                total_duration_ms=round((time.monotonic() - started) * 1000, 1),
+                **event_kwargs,
+            ),
+        )
+    return raw
 
 
 # --------------------------------------------------------------------------- #
@@ -418,6 +500,13 @@ def run_conformance_pass(
                 timeout=timeout,
                 unset_env=list(unset) or None,
                 budget=budget,
+                env_add=_lane_env(
+                    collab,
+                    hid,
+                    seat,
+                    profile.breaker_model if role == "assessor" else profile.verifier_model,
+                    candidate_id,
+                ),
             )
         except rb.BudgetExceeded as exc:
             record["incomplete"] = {"reason": "budget", "detail": exc.which}
@@ -467,6 +556,7 @@ def run_plan_pass(
     runner=ap._cli_runner,
     log: str | None = None,
     budget=None,
+    candidate_id: str | None = None,
 ) -> dict:
     """Run one bounded, pre-resolved breaker→verifier assurance pair."""
     profile = lane_pass.profile
@@ -500,6 +590,9 @@ def run_plan_pass(
             timeout=profile.breaker_timeout,
             unset_env=list(profile.breaker_unset_env) or None,
             budget=budget,
+            env_add=_lane_env(
+                collab, hid, profile.breaker_seat, profile.breaker_model, candidate_id
+            ),
         )
     except rb.BudgetExceeded as exc:
         return _plan_incomplete(lane_pass, f"budget:{exc.which}")
@@ -554,6 +647,9 @@ def run_plan_pass(
             timeout=profile.verifier_timeout,
             unset_env=list(profile.verifier_unset_env) or None,
             budget=budget,
+            env_add=_lane_env(
+                collab, hid, profile.verifier_seat, profile.verifier_model, candidate_id
+            ),
         )
     except rb.BudgetExceeded as exc:
         return _plan_incomplete(
@@ -652,7 +748,14 @@ def _run_resolved_plan(
         results = list(
             executor.map(
                 lambda lane_pass: run_plan_pass(
-                    collab, hid, lane_pass, builder_seat=builder_seat, runner=runner, log=log, budget=budget
+                    collab,
+                    hid,
+                    lane_pass,
+                    builder_seat=builder_seat,
+                    runner=runner,
+                    log=log,
+                    budget=budget,
+                    candidate_id=candidate_id,
                 ),
                 verification_plan.passes,
             )
@@ -749,6 +852,7 @@ def run_lane(
     runner=ap._cli_runner,
     log: str | None = None,
     budget=None,
+    candidate_id: str | None = None,
 ) -> dict:
     """Run one legacy string lane (breaker → independent verifier) and return its result dict.
 
@@ -803,6 +907,9 @@ def run_lane(
             timeout=float(bcfg.get("timeout", ap._DEFAULT_TIMEOUT)),
             unset_env=bcfg.get("unset_env"),
             budget=budget,
+            env_add=_lane_env(
+                collab, hid, breaker_seat, str(bcfg.get("model") or breaker_seat), candidate_id
+            ),
         )
     except rb.BudgetExceeded as e:
         return _incomplete(e.which, [], [], [])
@@ -850,6 +957,13 @@ def run_lane(
                 timeout=float(vcfg.get("timeout", ap._DEFAULT_TIMEOUT)),
                 unset_env=vcfg.get("unset_env"),
                 budget=budget,
+                env_add=_lane_env(
+                    collab,
+                    hid,
+                    verifier_seat,
+                    str(vcfg.get("model") or verifier_seat),
+                    candidate_id,
+                ),
             )
         except rb.BudgetExceeded as e:
             return _incomplete(e.which, confirmed, refuted, unverified + list(findings[idx - 1 :]))
@@ -1044,6 +1158,7 @@ def run_lanes(
                             runner=runner,
                             log=log,
                             budget=budget,
+                            candidate_id=candidate_id,
                         ),
                         lanes,
                     )

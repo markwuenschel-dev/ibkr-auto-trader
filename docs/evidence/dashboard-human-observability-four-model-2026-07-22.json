@@ -1,0 +1,61 @@
+{
+  "schema_version": "1.0",
+  "evidence_type": "redacted_four_model_gateway_reconciliation",
+  "run_uid": "obs001-four-model-20260722T0107Z",
+  "contains_model_io": false,
+  "fresh_proof": {
+    "planned_models": 4,
+    "app_attempts": 4,
+    "litellm_success_spend_rows": 3,
+    "langfuse_generation_matches": 4,
+    "verdict": "transport_and_export_complete_provider_success_incomplete",
+    "blocker": "xai_credit_or_monthly_spend_limit"
+  },
+  "preflight_attempts_excluded_from_fresh_proof": {
+    "count": 1,
+    "model": "haiku-4.5",
+    "outcome": "http_403_before_virtual_key_allowlist_update",
+    "langfuse_result": "missing_after_grace"
+  },
+  "attempts": [
+    {
+      "model": "gpt-5.6-luna",
+      "outcome": "completed",
+      "actual_model": "gpt-5.6-luna",
+      "request_sha256_prefix": "35d9042c56e38dfd",
+      "telemetry": "verified",
+      "observation_sha256_prefix": "4a02140a443b3ed3"
+    },
+    {
+      "model": "grok-4.5",
+      "outcome": "failed",
+      "failure_classification": "http_error",
+      "provider_error_class": "credit_or_monthly_spend_limit",
+      "request_sha256_prefix": "acd255f682e81239",
+      "telemetry": "verified",
+      "observation_sha256_prefix": "a571eb84fdc8efed"
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "outcome": "completed",
+      "actual_model": "gemini-3.5-flash",
+      "request_sha256_prefix": "9fea427917a96fb1",
+      "telemetry": "verified",
+      "observation_sha256_prefix": "f1f83030094fd736"
+    },
+    {
+      "model": "haiku-4.5",
+      "outcome": "completed",
+      "actual_model": "haiku-4.5",
+      "request_sha256_prefix": "7457d0ee70558745",
+      "telemetry": "verified",
+      "observation_sha256_prefix": "ee43b3760b374a3a"
+    }
+  ],
+  "prior_grok_success_evidence": {
+    "archived_run_uid": "20260721T234615Z-140256",
+    "app_recorded_grok_successes": 7,
+    "fixed_window_xai_spend_successes": 12,
+    "local_request_ids_matched_in_langfuse": 7
+  }
+}

@@ -54,6 +54,63 @@ def _verification_dir(collab) -> Path:
     return Path(collab) / "autopilot" / "verification"
 
 
+def _archive_health_path(collab) -> Path:
+    return Path(collab) / "autopilot" / "run-history-health.json"
+
+
+def _record_archive_health(
+    collab,
+    *,
+    run_uid: str,
+    status: str,
+    failures: list[str],
+) -> None:
+    reason = "; ".join(failures[:20]) if failures else None
+    cc.safe_write(
+        _archive_health_path(collab),
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "record_type": "run_history_health",
+                "run_uid": run_uid,
+                "status": status,
+                "updated_ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "reason": reason,
+                "failures": failures[:20],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+
+
+def read_archive_health(collab) -> dict:
+    try:
+        value = json.loads(_archive_health_path(collab).read_text("utf-8"))
+    except (OSError, ValueError):
+        return {
+            "status": "unknown",
+            "updated_ts": None,
+            "reason": "run archive persistence has not reported",
+            "run_uid": None,
+            "failures": [],
+        }
+    if not isinstance(value, dict):
+        return {
+            "status": "unavailable",
+            "updated_ts": None,
+            "reason": "run archive persistence health is malformed",
+            "run_uid": None,
+            "failures": ["health_record_malformed"],
+        }
+    return value
+
+
+def _retain_archive_failure(failures: list[str], stage: str, exc: BaseException) -> None:
+    failures.append(f"{stage}:{type(exc).__name__}")
+
+
 # --------------------------------------------------------------------------- #
 # small parse helpers (all tolerant — telemetry aggregation never raises)
 # --------------------------------------------------------------------------- #
@@ -295,10 +352,21 @@ def archive_run(collab, run_uid) -> Path | None:
     if not safe_uid or set(safe_uid) <= {"-"}:
         safe_uid = "run"
     root = _history_root(collab) / safe_uid
+    failures: list[str] = []
     try:
         root.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         print(f"[run_history] could not create history dir: {e}", file=sys.stderr)
+        _retain_archive_failure(failures, "create_history_dir", e)
+        try:
+            _record_archive_health(
+                collab, run_uid=str(run_uid), status="unavailable", failures=failures
+            )
+        except (OSError, cc.CollabError) as health_error:
+            print(
+                f"[run_history] could not persist archive health: {type(health_error).__name__}",
+                file=sys.stderr,
+            )
         return None
 
     events_dst = root / "events.jsonl"
@@ -309,6 +377,7 @@ def archive_run(collab, run_uid) -> Path | None:
             cc.safe_write(events_dst, src.read_text("utf-8", errors="replace"))
     except (OSError, cc.CollabError) as e:
         print(f"[run_history] could not copy events.jsonl: {e}", file=sys.stderr)
+        _retain_archive_failure(failures, "copy_events", e)
     # status.json
     try:
         sp = _ap._status_path(collab)
@@ -316,6 +385,68 @@ def archive_run(collab, run_uid) -> Path | None:
             cc.safe_write(root / "status.json", sp.read_text("utf-8", errors="replace"))
     except (OSError, cc.CollabError) as e:
         print(f"[run_history] could not copy status.json: {e}", file=sys.stderr)
+        _retain_archive_failure(failures, "copy_status", e)
+    # immutable run plan + expected execution roster
+    try:
+        plan_src = Path(collab) / "autopilot" / "run-plan.json"
+        if plan_src.exists():
+            plan = json.loads(plan_src.read_text("utf-8"))
+            if isinstance(plan, dict) and plan.get("run_uid") == run_uid:
+                cc.safe_write(root / "run-plan.json", json.dumps(plan, indent=2, sort_keys=True) + "\n")
+    except (OSError, ValueError, cc.CollabError) as e:
+        print(f"[run_history] could not copy run-plan.json: {e}", file=sys.stderr)
+        _retain_archive_failure(failures, "copy_run_plan", e)
+    # typed run decisions/events, filtered by actual run identity
+    try:
+        run_events_src = Path(collab) / "autopilot" / "run-events.jsonl"
+        if run_events_src.exists():
+            records = []
+            for line in run_events_src.read_text("utf-8").splitlines():
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                if isinstance(item, dict) and item.get("run_uid") == run_uid:
+                    records.append(item)
+            if records:
+                cc.safe_write(
+                    root / "run-events.jsonl",
+                    "".join(json.dumps(item, sort_keys=True) + "\n" for item in records),
+                )
+    except (OSError, ValueError, cc.CollabError) as e:
+        print(f"[run_history] could not copy run-events.jsonl: {e}", file=sys.stderr)
+        _retain_archive_failure(failures, "copy_run_events", e)
+    # model-events.jsonl — filter by the actual run UID so concurrent/legacy records cannot leak across runs.
+    try:
+        import model_observability as _mo
+
+        model_src = Path(collab) / "autopilot" / "model-events.jsonl"
+        if model_src.exists():
+            records = [event for event in _mo.read_events(model_src) if event.run_uid == run_uid]
+            if records:
+                cc.safe_write(
+                    root / "model-events.jsonl",
+                    "".join(json.dumps(event.to_dict(), sort_keys=True) + "\n" for event in records),
+                )
+    except (OSError, cc.CollabError) as e:
+        print(f"[run_history] could not copy model-events.jsonl: {e}", file=sys.stderr)
+        _retain_archive_failure(failures, "copy_model_events", e)
+    # Persistence health belongs to this archive only when the sidecar names this run. Without the
+    # identity check, an idle run could inherit a prior run's failure or recovery state.
+    for health_name in (
+        "model-observability-health.json",
+        "model-calls-health.json",
+        "run-events-health.json",
+    ):
+        try:
+            health_src = Path(collab) / "autopilot" / health_name
+            if not health_src.exists():
+                continue
+            health = json.loads(health_src.read_text("utf-8"))
+            if isinstance(health, dict) and health.get("run_uid") == run_uid:
+                cc.safe_write(root / health_name, json.dumps(health, indent=2, sort_keys=True) + "\n")
+        except (OSError, ValueError, cc.CollabError) as e:
+            print(f"[run_history] could not copy {health_name}: {e}", file=sys.stderr)
+            _retain_archive_failure(failures, f"copy_{health_name}", e)
     # verification/*.ledger.json
     try:
         vdir = _verification_dir(collab)
@@ -324,16 +455,88 @@ def archive_run(collab, run_uid) -> Path | None:
             for f in sorted(vdir.glob("*.ledger.json")):
                 try:
                     cc.safe_write(root / "verification" / f.name, f.read_text("utf-8", errors="replace"))
-                except OSError, cc.CollabError:
+                except (OSError, cc.CollabError) as e:
+                    _retain_archive_failure(failures, f"copy_verification_{f.name}", e)
                     continue  # one bad ledger must not abort the archive
     except OSError as e:
         print(f"[run_history] could not copy ledgers: {e}", file=sys.stderr)
+        _retain_archive_failure(failures, "copy_verification", e)
     # run.json roll-up
     try:
         summary = build_summary(collab, run_uid, events_path=str(events_dst) if events_dst.exists() else None)
         cc.safe_write(root / "run.json", json.dumps(summary, indent=2, sort_keys=False) + "\n")
     except Exception as e:  # broad: run.json is telemetry, never worth raising into the driver
         print(f"[run_history] could not write run.json: {e}", file=sys.stderr)
+        _retain_archive_failure(failures, "write_run_summary", e)
+    # Empty typed streams are evidence of zero records, not missing evidence. Ensure they exist before the
+    # manifest is written last so a sealed idle run can distinguish "zero attempts" from "file vanished".
+    for name in ("events.jsonl", "model-events.jsonl", "run-events.jsonl"):
+        path = root / name
+        if not path.exists():
+            try:
+                cc.safe_write(path, "")
+            except (OSError, cc.CollabError) as e:
+                print(f"[run_history] could not create empty {name}: {e}", file=sys.stderr)
+                _retain_archive_failure(failures, f"create_empty_{name}", e)
+    # Human summary is built only from the retained archive and is sealed with it. It explicitly
+    # separates facts, evaluator judgments, model claims, and missing evidence.
+    try:
+        import run_summary as _run_summary
+
+        operator_summary = _run_summary.build_from_archive(root, run_uid=run_uid)
+        cc.safe_write(
+            root / "operator-summary.json",
+            json.dumps(operator_summary, indent=2, sort_keys=True) + "\n",
+        )
+    except Exception as e:  # broad: a missing summary becomes an explicit partial-manifest gap
+        print(f"[run_history] could not write operator-summary.json: {e}", file=sys.stderr)
+        _retain_archive_failure(failures, "write_operator_summary", e)
+    # The manifest is deliberately the final archive write. A complete seal refuses missing core artifacts;
+    # teardown falls back to an explicit partial manifest rather than hiding the gap or breaking the run.
+    manifest_result: dict = {"valid": False, "state": "missing", "failures": ["not_written"]}
+    try:
+        import run_manifest as _manifest
+
+        try:
+            _manifest.seal(root, run_uid=run_uid)
+        except _manifest.RunManifestError as e:
+            print(f"[run_history] archive sealed partial: {e}", file=sys.stderr)
+            _retain_archive_failure(failures, "seal_complete_manifest", e)
+            _manifest.seal(root, run_uid=run_uid, partial=True)
+        manifest_result = _manifest.verify(root)
+    except Exception as e:  # broad: archival telemetry must never mask the real driver outcome
+        print(f"[run_history] could not write manifest.json: {e}", file=sys.stderr)
+        _retain_archive_failure(failures, "write_manifest", e)
+    manifest_complete = bool(
+        manifest_result.get("valid")
+        and manifest_result.get("state") == "sealed"
+        and not manifest_result.get("gaps")
+    )
+    archive_status = "healthy" if manifest_complete and not failures else (
+        "degraded" if manifest_complete else "unavailable"
+    )
+    if not manifest_complete:
+        failures.extend(
+            f"manifest:{item}"
+            for item in (
+                list(manifest_result.get("failures") or [])
+                + list(manifest_result.get("gaps") or [])
+            )
+        )
+        if manifest_result.get("state") != "sealed":
+            failures.append(f"manifest_state:{manifest_result.get('state') or 'unknown'}")
+    try:
+        _record_archive_health(
+            collab,
+            run_uid=str(run_uid),
+            status=archive_status,
+            failures=list(dict.fromkeys(failures)),
+        )
+    except (OSError, cc.CollabError) as e:
+        print(
+            f"[run_history] could not persist archive health: {type(e).__name__}",
+            file=sys.stderr,
+        )
     return root
 
 

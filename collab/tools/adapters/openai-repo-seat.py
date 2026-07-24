@@ -24,6 +24,10 @@ BUILDER seat on ANY model (not just Claude) can implement a handoff and run the 
   --max-bytes <n>     per read_file / per search-hit byte cap (default 100000)
 """
 
+# The adapter bootstraps its sibling lib directory before importing these runtime-only modules.
+# Pyright cannot infer that dynamic sys.path update when this standalone script is checked directly.
+# pyright: reportMissingImports=false
+
 import argparse
 import json
 import os
@@ -40,11 +44,13 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 _LIB = str(Path(__file__).resolve().parents[1] / "lib")
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 import llm_gateway as gateway  # noqa: E402
+import model_observability as mo  # noqa: E402
 
 # Directories that are never worth serving to a code reviewer — noise, vendored, or VCS internals.
 _SKIP_DIRS = {
@@ -394,6 +400,50 @@ def _dispatch_tool(root: Path, name: str, args: dict, max_bytes: int, run_timeou
         return f"error: {e}"
 
 
+def _emit_tool_activity(
+    *,
+    state: mo.LifecycleState,
+    phase: str,
+    tool_name: str,
+    tool_call_id: str | None,
+    step: int,
+    result_status: str | None = None,
+) -> None:
+    """Persist safe tool progress against the parent orchestration execution."""
+    execution_id = (os.environ.get("COLLAB_EXECUTION_ID") or "").strip()
+    if not execution_id:
+        return
+    try:
+        attempt_number = max(1, int(os.environ.get("COLLAB_ATTEMPT_NUMBER") or "1"))
+    except ValueError:
+        attempt_number = 1
+    detail = {
+        "phase": phase,
+        "tool_name": tool_name or "unknown_tool",
+        "tool_call_id": tool_call_id or "not_recorded",
+        "step": step,
+    }
+    if result_status:
+        detail["result_status"] = result_status
+    mo.append_if_configured(
+        mo.ModelAttemptEvent(
+            event_id=str(uuid.uuid4()),
+            attempt_id=execution_id,
+            request_id=execution_id,
+            run_uid=os.environ.get("COLLAB_RUN_UID"),
+            seat=os.environ.get("COLLAB_SEAT"),
+            requested_model=os.environ.get("COLLAB_MODEL_ALIAS"),
+            state=state,
+            event_ts=mo.now_utc(),
+            attempt_number=attempt_number,
+            source="repo_seat_tool",
+            handoff_id=os.environ.get("COLLAB_HANDOFF_ID"),
+            candidate_id=os.environ.get("COLLAB_CANDIDATE_ID"),
+            detail=detail,
+        )
+    )
+
+
 # --------------------------------------------------------------------------- #
 # HTTP + agentic loop
 # --------------------------------------------------------------------------- #
@@ -606,11 +656,28 @@ def _run_agentic(
         messages.append(assistant_turn)
         for call in calls:
             fn = call.get("function", {})
+            tool_name = str(fn.get("name") or "")
+            tool_call_id = str(call.get("id")) if call.get("id") else None
             try:
                 cargs = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 cargs = {}
-            result = _dispatch_tool(root, fn.get("name", ""), cargs, max_bytes, run_timeout)
+            _emit_tool_activity(
+                state="waiting_for_tool",
+                phase="tool_started",
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                step=step,
+            )
+            result = _dispatch_tool(root, tool_name, cargs, max_bytes, run_timeout)
+            _emit_tool_activity(
+                state="generating",
+                phase="tool_failed" if result.startswith("error:") else "tool_completed",
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                step=step,
+                result_status="failed" if result.startswith("error:") else "completed",
+            )
             messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": result[:max_bytes]})
     # Ran out of steps: ask once more, tools OFF, forcing a final written review from what it has seen.
     messages.append(
@@ -696,7 +763,7 @@ def _run_agentic_responses(
     each turn (no server-side state)."""
     tools = _to_responses_tools(tools_spec if tools_spec is not None else _TOOLS_SPEC)
     url = f"{base}/responses"
-    input_items = [{"role": "user", "content": prompt}]
+    input_items: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     for step in range(1, max_steps + 1):
         data = _post_json(
             url,
@@ -729,11 +796,28 @@ def _run_agentic_responses(
         )
         for call in calls:
             cid = call.get("call_id") or call.get("id")
+            tool_name = str(call.get("name") or "")
+            tool_call_id = str(cid) if cid else None
             try:
                 cargs = json.loads(call.get("arguments") or "{}")
             except json.JSONDecodeError:
                 cargs = {}
-            result = _dispatch_tool(root, call.get("name", ""), cargs, max_bytes, run_timeout)
+            _emit_tool_activity(
+                state="waiting_for_tool",
+                phase="tool_started",
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                step=step,
+            )
+            result = _dispatch_tool(root, tool_name, cargs, max_bytes, run_timeout)
+            _emit_tool_activity(
+                state="generating",
+                phase="tool_failed" if result.startswith("error:") else "tool_completed",
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                step=step,
+                result_status="failed" if result.startswith("error:") else "completed",
+            )
             input_items.append({"type": "function_call_output", "call_id": cid, "output": result[:max_bytes]})
     input_items.append(
         {
